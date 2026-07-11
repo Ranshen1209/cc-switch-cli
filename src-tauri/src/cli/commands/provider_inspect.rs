@@ -88,14 +88,14 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     });
 
     for (id, provider) in provider_list {
-        let current_marker = if id == current_id { "✓" } else { " " };
+        let current_marker = if id == current_id { "OK" } else { "" };
         let api_url = extract_api_url(&provider, &app_type).unwrap_or_else(|| "N/A".to_string());
 
         table.add_row(vec![current_marker.to_string(), id, provider.name, api_url]);
     }
 
     println!("{}", table);
-    println!("\n{} Application: {}", info("ℹ"), app_str);
+    println!("\n{} Application: {}", info("i"), app_str);
     println!("{} Current: {}", info("→"), highlight(&current_id));
 
     Ok(())
@@ -114,53 +114,45 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
     println!("{}", "═".repeat(60));
 
     println!("\n{}", highlight(texts::basic_info_section_header()));
-    println!("  ID:       {}", current_id);
-    println!(
-        "  {}:     {}",
-        texts::name_label_with_colon(),
-        provider.name
-    );
-    println!(
-        "  {}:     {}",
-        texts::app_label_with_colon(),
-        app_type.as_str()
-    );
+    println!("ID: {}", current_id);
+    println!("{}: {}", texts::name_label_with_colon(), provider.name);
+    println!("{}: {}", texts::app_label_with_colon(), app_type.as_str());
 
     if matches!(app_type, AppType::Claude) {
         let config = extract_claude_config(&provider.settings_config);
 
         println!("\n{}", highlight(texts::api_config_section_header()));
         println!(
-            "  Base URL: {}",
+            "Base URL: {}",
             config.base_url.unwrap_or_else(|| "N/A".to_string())
         );
         println!(
-            "  API Key:  {}",
+            "API Key: {}",
             config.api_key.unwrap_or_else(|| "N/A".to_string())
         );
 
         println!("\n{}", highlight(texts::model_config_section_header()));
         println!(
-            "  {}:   {}",
+            "{}: {}",
             texts::main_model_label_with_colon(),
             config.model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "  Haiku:    {}",
+            "Haiku: {}",
             config.haiku_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "  Sonnet:   {}",
+            "Sonnet: {}",
             config.sonnet_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "  Opus:     {}",
+            "Opus: {}",
             config.opus_model.unwrap_or_else(|| "default".to_string())
         );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
-        println!("  API URL:  {}", api_url);
+        println!("API URL: {}", api_url);
     }
 
     println!("\n{}", "─".repeat(60));
@@ -215,7 +207,7 @@ pub(crate) fn speedtest_provider(app_type: AppType, id: &str) -> Result<(), AppE
         if let Some(err) = &result.error {
             println!("\n{}", error(&format!("Error: {}", err)));
         } else if result.latency.is_some() {
-            println!("\n{}", success("✓ Speedtest completed successfully"));
+            println!("\n{}", success("OK Speedtest completed successfully"));
         }
     }
 
@@ -254,7 +246,7 @@ pub(crate) fn stream_check_provider(app_type: AppType, id: &str) -> Result<(), A
     }
     println!();
     if result.success {
-        println!("{}", success("✓ Stream check completed successfully"));
+        println!("{}", success("OK Stream check completed successfully"));
     } else {
         println!("{}", warning("Stream check finished with errors."));
     }
@@ -359,7 +351,7 @@ fn print_fetched_models(models: &[String]) {
     println!();
     println!(
         "{}",
-        success(&format!("✓ Fetched {} model(s)", models.len()))
+        success(&format!("OK Fetched {} model(s)", models.len()))
     );
 }
 
@@ -643,7 +635,7 @@ fn push_subscription_quota_lines(
             lines.push(format!(
                 "{}: {}",
                 texts::tui_quota_extra_usage(),
-                parts.join(" ")
+                parts.join("")
             ));
         }
     }
@@ -708,7 +700,7 @@ fn script_usage_item_text(item: &UsageData) -> String {
     {
         parts.push(extra.to_string());
     }
-    parts.join("  ")
+    parts.join("")
 }
 
 fn push_optional_error(lines: &mut Vec<String>, message: Option<&String>) {
@@ -731,7 +723,7 @@ fn quota_tier_label(name: &str) -> String {
         "gemini_pro" => texts::tui_quota_tier_gemini_pro().to_string(),
         "gemini_flash" => texts::tui_quota_tier_gemini_flash().to_string(),
         "gemini_flash_lite" => texts::tui_quota_tier_gemini_flash_lite().to_string(),
-        other => other.replace('_', " "),
+        other => other.replace('_', ""),
     }
 }
 
@@ -1353,8 +1345,8 @@ mod tests {
     fn one_off_model_fetch_target_defaults_strategy_by_app_and_trims_input() {
         let target = one_off_model_fetch_target(
             &AppType::Gemini,
-            Some(" https://gemini.example.com/ "),
-            Some(" sk-gemini "),
+            Some("https://gemini.example.com/ "),
+            Some("sk-gemini "),
             None,
         )
         .expect("one-off target should be built");

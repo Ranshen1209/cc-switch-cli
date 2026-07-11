@@ -140,15 +140,15 @@ fn show() -> Result<(), AppError> {
 
     println!("{}", highlight(crate::t!("WebDAV Sync", "WebDAV 同步")));
     println!("{}", "═".repeat(60));
-    println!("Enabled:      {}", yes_no(settings.enabled));
-    println!("Base URL:     {}", settings.base_url);
-    println!("Remote Root:  {}", settings.remote_root);
-    println!("Profile:      {}", settings.profile);
-    println!("Username:     {}", blank_as_na(&settings.username));
-    println!("Password:     {}", masked_secret(&settings.password));
-    println!("Auto Sync:    {}", yes_no(settings.auto_sync));
+    println!("Enabled: {}", yes_no(settings.enabled));
+    println!("Base URL: {}", settings.base_url);
+    println!("Remote Root: {}", settings.remote_root);
+    println!("Profile: {}", settings.profile);
+    println!("Username: {}", blank_as_na(&settings.username));
+    println!("Password: {}", masked_secret(&settings.password));
+    println!("Auto Sync: {}", yes_no(settings.auto_sync));
     println!(
-        "Last Sync:    {}",
+        "Last Sync: {}",
         settings
             .status
             .last_sync_at
@@ -156,7 +156,7 @@ fn show() -> Result<(), AppError> {
             .unwrap_or_else(|| "N/A".to_string())
     );
     println!(
-        "Last Error:   {}",
+        "Last Error: {}",
         settings
             .status
             .last_error
@@ -197,8 +197,8 @@ fn set(
     println!(
         "{}",
         success(crate::t!(
-            "✓ WebDAV settings saved.",
-            "✓ WebDAV 设置已保存。"
+            "OK WebDAV settings saved.",
+            "OK WebDAV 设置已保存。"
         ))
     );
     Ok(())
@@ -209,8 +209,8 @@ fn clear() -> Result<(), AppError> {
     println!(
         "{}",
         success(crate::t!(
-            "✓ WebDAV settings cleared.",
-            "✓ WebDAV 设置已清空。"
+            "OK WebDAV settings cleared.",
+            "OK WebDAV 设置已清空。"
         ))
     );
     Ok(())
@@ -243,8 +243,8 @@ fn jianguoyun(
     println!(
         "{}",
         success(crate::t!(
-            "✓ Jianguoyun WebDAV preset applied.",
-            "✓ 已应用坚果云 WebDAV 预设。"
+            "OK Jianguoyun WebDAV preset applied.",
+            "OK 已应用坚果云 WebDAV 预设。"
         ))
     );
     Ok(())
@@ -255,8 +255,8 @@ fn check_connection() -> Result<(), AppError> {
     println!(
         "{}",
         success(crate::t!(
-            "✓ WebDAV connection succeeded.",
-            "✓ WebDAV 连接成功。"
+            "OK WebDAV connection succeeded.",
+            "OK WebDAV 连接成功。"
         ))
     );
     Ok(())

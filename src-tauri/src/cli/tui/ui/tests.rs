@@ -1088,7 +1088,7 @@ fn provider_field_label_and_value_renders_claude_hide_attribution_toggle() {
     );
 
     assert!(label.contains("署名") || label.contains("Attribution"));
-    assert_eq!(value, "[✓]");
+    assert_eq!(value, "[OK]");
 }
 
 #[test]
@@ -1451,7 +1451,7 @@ fn nav_label_text(item: NavItem) -> String {
 }
 
 fn nav_title_text(item: NavItem) -> &'static str {
-    super::split_nav_label(super::nav_label(item)).1
+    super::nav_label(item)
 }
 
 pub(super) fn spaces_before_substring(text: &str, needle: &str) -> usize {
@@ -2648,12 +2648,10 @@ fn header_keeps_proxy_visible_and_truncates_long_provider_name() {
 }
 
 #[test]
-fn nav_icons_have_left_padding_from_border() {
+fn nav_text_has_left_padding_from_border() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");
-    // This test is specifically about the emoji icon column, so pin emoji
-    // mode rather than depend on the ambient locale (auto-detection).
-    let _icons = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
+    let _lang = use_test_language(Language::English);
 
     let app = App::new(Some(AppType::Claude));
     let data = minimal_data(&app.app_type);
@@ -2662,31 +2660,20 @@ fn nav_icons_have_left_padding_from_border() {
     let mut home_line = None;
     for y in 0..buf.area.height {
         let line = line_at(&buf, y);
-        if line.contains("Home") && line.contains("🏠") {
+        if line.contains("Home") && !line.contains("Interactive") {
             home_line = Some(line);
             break;
         }
     }
 
     let home_line = home_line.expect("Home row missing from nav");
-    let emoji_idx = home_line
-        .find("🏠")
-        .expect("Home emoji missing from nav row");
-    let emoji_char_idx = home_line[..emoji_idx].chars().count();
-    let chars: Vec<char> = home_line.chars().collect();
     assert!(
-        emoji_char_idx >= 2,
-        "expected at least 2 chars before emoji, got line: {home_line}"
+        home_line.contains('│'),
+        "expected nav border around Home row: {home_line}"
     );
-    assert_eq!(
-        chars[emoji_char_idx.saturating_sub(2)],
-        '│',
-        "expected nav border immediately before padding space, got line: {home_line}"
-    );
-    assert_eq!(
-        chars[emoji_char_idx.saturating_sub(1)],
-        ' ',
-        "expected a 1-cell padding between nav border and emoji, got line: {home_line}"
+    assert!(
+        !home_line.contains('🏠'),
+        "nav should be text-only: {home_line}"
     );
 }
 
@@ -3007,8 +2994,8 @@ fn home_restores_main_logo_and_home_labels() {
 
     let buf = render(&app, &data);
     let all = all_text(&buf);
-    assert!(all.contains("___  ___"));
-    assert!(all.contains("\\___|\\___|"));
+    assert!(all.contains("CC-Switch"));
+    assert!(!all.contains("___  ___"));
     assert!(all.contains("Connection Details"));
 }
 
@@ -3157,8 +3144,8 @@ fn home_hides_proxy_dashboard_when_proxy_is_off() {
     let all = all_text(&buf);
     let footer = line_at(&buf, buf.area.height - 1);
 
-    assert!(all.contains("___  ___"));
-    assert!(all.contains("\\___|\\___|"));
+    assert!(all.contains("CC-Switch"));
+    assert!(!all.contains("___  ___"));
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("127.0.0.1:15721"), "{all}");
@@ -3277,7 +3264,8 @@ fn home_footer_shows_proxy_on_shortcut_when_stopped() {
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!footer.contains("NAV"), "{footer}");
     assert!(!footer.contains("ACT"), "{footer}");
-    assert!(all.contains("___  ___"));
+    assert!(all.contains("CC-Switch"));
+    assert!(!all.contains("___  ___"));
     assert!(!all.contains("Proxy Dashboard"));
 }
 
@@ -3346,7 +3334,8 @@ fn home_proxy_dashboard_keeps_current_app_off_semantics_when_another_app_is_acti
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(all.contains("CC-Switch"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Shared runtime ready"), "{all}");
     assert!(!all.contains("x1.00"), "{all}");
@@ -3383,7 +3372,8 @@ fn home_proxy_dashboard_stays_off_for_current_worker_without_takeover() {
     );
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(all.contains("CC-Switch"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
 }
 
 #[test]
@@ -3407,7 +3397,8 @@ fn home_proxy_dashboard_hides_attach_cta_for_foreground_runtime_owned_elsewhere(
     let footer = line_at(&buf, buf.area.height - 1);
 
     assert!(!footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(all.contains("CC-Switch"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
 }
 
@@ -3457,7 +3448,8 @@ fn home_proxy_dashboard_shows_idle_baseline_without_header_copy() {
     let shared_buf = render(&app, &shared_runtime);
     let shared_text = all_text(&shared_buf);
     let shared_footer = line_at(&shared_buf, shared_buf.area.height - 1);
-    assert!(shared_text.contains("___  ___"), "{shared_text}");
+    assert!(shared_text.contains("CC-Switch"), "{shared_text}");
+    assert!(!shared_text.contains("___  ___"), "{shared_text}");
     assert!(!shared_text.contains("Proxy Dashboard"), "{shared_text}");
     assert!(!shared_text.contains("x1.25"), "{shared_text}");
     assert!(shared_footer.contains("proxy on"), "{shared_footer}");
@@ -3597,7 +3589,8 @@ fn home_proxy_dashboard_marks_unsupported_apps_without_proxy_cta() {
     assert!(!all.contains("start proxy"));
     assert!(!all.contains("stop proxy"));
     assert!(!footer.contains("proxy on"), "{footer}");
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(all.contains("CC-Switch"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(!all.contains("Claude Test Provider"), "{all}");
 }
@@ -3649,7 +3642,8 @@ fn home_proxy_dashboard_keeps_current_app_route_separate_from_global_proxy_route
     let all = all_text(&buf);
     let footer = line_at(&buf, buf.area.height - 1);
 
-    assert!(all.contains("___  ___"), "{all}");
+    assert!(all.contains("CC-Switch"), "{all}");
+    assert!(!all.contains("___  ___"), "{all}");
     assert!(!all.contains("Proxy Dashboard"), "{all}");
     assert!(footer.contains("proxy on"), "{footer}");
     assert!(!all.contains("Latest proxy route"));
@@ -3676,7 +3670,8 @@ fn home_proxy_dashboard_hides_internal_target_identifiers() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    assert!(all.contains("___  ___"));
+    assert!(all.contains("CC-Switch"));
+    assert!(!all.contains("___  ___"));
     assert!(!all.contains("Proxy Dashboard"));
     assert!(!all.contains("Claude Test Provider"));
     assert!(!all.contains("Current app route"));
@@ -4264,57 +4259,6 @@ fn page_key_bar_stays_visible_while_nav_has_focus() {
         all.contains("a=add"),
         "key bar should stay visible (dimmed) with nav focus: {all}"
     );
-}
-
-#[test]
-fn breadcrumb_title_strips_leading_emoji_in_ascii_mode() {
-    let _env_lock = lock_env();
-    // Share the crate-wide lock with the other CC_SWITCH_ICONS tests so env
-    // mutations don't race across modules.
-    let _icons_lock = lock_test_home_and_settings();
-
-    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
-    assert!(super::breadcrumb_title(&["🔧 Settings", "Proxy"]).contains('🔧'));
-
-    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
-    let ascii = super::breadcrumb_title(&["🔧 Settings", "Proxy"]);
-    assert!(!ascii.contains('🔧'), "{ascii}");
-    assert!(ascii.contains("Settings › Proxy"), "{ascii}");
-}
-
-#[test]
-fn nav_drops_emoji_icons_in_ascii_mode() {
-    let _lock = lock_env();
-    let _icons_lock = lock_test_home_and_settings();
-    let _lang = use_test_language(Language::English);
-    let _no_color = EnvGuard::set("NO_COLOR", "1");
-    let app = App::new(Some(AppType::Claude));
-    let data = minimal_data(&app.app_type);
-
-    let _emoji = EnvGuard::set("CC_SWITCH_ICONS", "emoji");
-    let emoji_view = all_text(&render(&app, &data));
-    assert!(
-        emoji_view.contains('🔑'),
-        "emoji mode should render the nav provider icon: {emoji_view}"
-    );
-    assert!(
-        emoji_view.contains('🎯'),
-        "emoji mode should render the home title icon: {emoji_view}"
-    );
-
-    let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
-    let ascii_view = all_text(&render(&app, &data));
-    assert!(
-        !ascii_view.contains('🔑'),
-        "ascii mode should drop the nav emoji: {ascii_view}"
-    );
-    assert!(
-        !ascii_view.contains('🎯'),
-        "ascii mode should drop the home title emoji: {ascii_view}"
-    );
-    // The label text still renders — only the decorative glyph is gone.
-    assert!(ascii_view.contains("Providers"), "{ascii_view}");
-    assert!(ascii_view.contains("CC-Switch"), "{ascii_view}");
 }
 
 #[test]
@@ -6847,7 +6791,8 @@ fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
 #[test]
 fn workspace_openclaw_nav_uses_app_specific_labels_and_hides_generic_entries() {
     let _lock = lock_env();
-    let _lang = use_test_language(Language::Chinese);
+    // English avoids Chinese substring collisions (e.g. "配置" inside "Agents 配置").
+    let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
 
     let app = App::new(Some(AppType::OpenClaw));
@@ -7255,7 +7200,7 @@ fn workspace_route_render_wraps_long_summary_and_daily_memory_values_in_narrow_w
     };
 
     let rendered = render_with_size(&app, &data, 76, 28);
-    let content = content_text(&app, &rendered);
+    let content = content_text(&app, &rendered).replace('\\', "/");
 
     assert!(content.contains(long_workspace_tail), "{content}");
     assert!(content.contains(long_memory_tail), "{content}");

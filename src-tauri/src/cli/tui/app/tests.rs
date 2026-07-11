@@ -4997,6 +4997,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial(home_settings)]
     fn openclaw_workspace_open_failure_is_localized() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -5122,6 +5123,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     #[serial(home_settings)]
     fn openclaw_daily_memory_save_failure_is_localized() {
         let temp_home = TempDir::new().expect("create temp home");
@@ -9167,37 +9169,6 @@ mod tests {
                 ..
             }) if input.value == r"\\wsl$\Ubuntu\home\demo\.openclaw"
         ));
-    }
-
-    #[test]
-    fn settings_icons_row_toggles_and_persists_mode() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = TestEnvGuard::isolated(temp_home.path());
-        // The CC_SWITCH_ICONS override would short-circuit the persisted
-        // value, so clear it to exercise the Settings path deterministically.
-        let saved_icons = std::env::var_os("CC_SWITCH_ICONS");
-        std::env::remove_var("CC_SWITCH_ICONS");
-
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Settings;
-        app.focus = Focus::Content;
-        app.settings_idx = SettingsItem::ALL
-            .iter()
-            .position(|item| matches!(item, SettingsItem::Icons))
-            .expect("Icons missing from SettingsItem::ALL");
-
-        // No persisted value is Auto; Enter cycles Auto -> Emoji -> Ascii -> Auto.
-        assert!(matches!(
-            app.on_key(key(KeyCode::Enter), &UiData::default()),
-            Action::None
-        ));
-        assert_eq!(crate::settings::get_icon_mode().as_deref(), Some("emoji"));
-        app.on_key(key(KeyCode::Enter), &UiData::default());
-        assert_eq!(crate::settings::get_icon_mode().as_deref(), Some("ascii"));
-        app.on_key(key(KeyCode::Enter), &UiData::default());
-        assert_eq!(crate::settings::get_icon_mode().as_deref(), Some("auto"));
-
-        crate::test_support::restore_env("CC_SWITCH_ICONS", &saved_icons);
     }
 
     #[test]

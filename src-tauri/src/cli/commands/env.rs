@@ -44,14 +44,14 @@ fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
     if conflicts.is_empty() {
         println!(
             "\n{}",
-            success("✓ No environment variable conflicts detected")
+            success("OK No environment variable conflicts detected")
         );
     } else {
         // 显示冲突
         println!(
             "\n{}",
             error(&format!(
-                "⚠ Found {} environment variable(s) that may conflict:",
+                "WARN Found {} environment variable(s) that may conflict:",
                 conflicts.len()
             ))
         );

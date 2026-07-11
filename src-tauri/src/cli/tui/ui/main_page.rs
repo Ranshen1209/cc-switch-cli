@@ -254,7 +254,7 @@ pub(super) fn render_main(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", icons::strip_icon(texts::welcome_title())));
+        .title(format!(" {} ", texts::welcome_title()));
     frame.render_widget(block.clone(), area);
 
     let inner = block.inner(area);
@@ -299,7 +299,7 @@ pub(super) fn render_main(
             data.proxy.estimated_output_tokens_total,
         );
     } else {
-        render_logo_hero(frame, chunks[1], theme);
+        render_plain_hero(frame, chunks[1], theme);
     }
 }
 
@@ -476,32 +476,24 @@ fn wrapped_display_line_count(text: &str, width: u16) -> u16 {
     UnicodeWidthStr::width(text).max(1).div_ceil(width as usize) as u16
 }
 
-fn render_logo_hero(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
-    let logo_lines = logo_hero_lines(theme);
-    let logo_height = (logo_lines.len() as u16).min(area.height);
-    let logo_chunks = Layout::default()
+fn render_plain_hero(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    let title = Line::from(Span::styled(
+        "CC-Switch".to_string(),
+        Style::default().fg(theme.surface),
+    ));
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(logo_height),
+            Constraint::Length(1),
             Constraint::Min(0),
         ])
         .split(area);
 
     frame.render_widget(
-        Paragraph::new(logo_lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
-        logo_chunks[1],
+        Paragraph::new(title).alignment(Alignment::Center),
+        chunks[1],
     );
-}
-
-fn logo_hero_lines(theme: &super::theme::Theme) -> Vec<Line<'static>> {
-    let logo_style = Style::default().fg(theme.surface);
-    texts::tui_home_ascii_logo()
-        .lines()
-        .map(|s| Line::from(Span::styled(s.to_string(), logo_style)))
-        .collect::<Vec<_>>()
 }
 
 fn render_connection_card(
@@ -621,7 +613,7 @@ fn render_local_env_tool_cell(
     } else {
         match status {
             Some(ToolCheckStatus::Ok { .. }) => (
-                "✓",
+                "OK",
                 if theme.no_color {
                     Style::default()
                 } else {

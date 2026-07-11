@@ -139,7 +139,7 @@ fn set_memory_cmd(kind: MemoryKind, content: Option<String>) -> Result<(), AppEr
     println!(
         "{}",
         success(&format!(
-            "✓ Wrote {} bytes to Hermes {} memory",
+            "OK Wrote {} bytes to Hermes {} memory",
             content.len(),
             kind.as_str()
         ))
@@ -161,7 +161,7 @@ fn clear_memory(kind: MemoryKind, yes: bool) -> Result<(), AppError> {
     write_memory(kind, "")?;
     println!(
         "{}",
-        success(&format!("✓ Cleared Hermes {} memory", kind.as_str()))
+        success(&format!("OK Cleared Hermes {} memory", kind.as_str()))
     );
     Ok(())
 }
@@ -171,7 +171,7 @@ fn toggle_memory(kind: MemoryKind, enabled: bool) -> Result<(), AppError> {
     let verb = if enabled { "Enabled" } else { "Disabled" };
     println!(
         "{}",
-        success(&format!("✓ {verb} Hermes {} memory", kind.as_str()))
+        success(&format!("OK {verb} Hermes {} memory", kind.as_str()))
     );
     Ok(())
 }
@@ -180,11 +180,11 @@ fn print_limits() -> Result<(), AppError> {
     let limits = read_memory_limits()?;
     println!("Hermes memory limits:");
     println!(
-        "  memory:  {} chars  (enabled: {})",
+        "memory: {} chars (enabled: {})",
         limits.memory, limits.memory_enabled
     );
     println!(
-        "  user:    {} chars  (enabled: {})",
+        "user: {} chars (enabled: {})",
         limits.user, limits.user_enabled
     );
 
@@ -195,8 +195,8 @@ fn print_limits() -> Result<(), AppError> {
 
     println!();
     println!("Current usage (file size in bytes; Hermes truncates at character budget on load):");
-    println!("  memory:  {memory_len} bytes");
-    println!("  user:    {user_len} bytes");
+    println!("memory: {memory_len} bytes");
+    println!("user: {user_len} bytes");
 
     // Avoid `unused import` if the helper isn't used elsewhere in this file.
     let _ = hermes_config::get_hermes_config_path();

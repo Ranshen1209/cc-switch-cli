@@ -3234,7 +3234,7 @@ impl ProviderService {
             }
         }
 
-        // 🔧 验证并清理 UsageScript 配置（所有应用类型通用）
+        //  验证并清理 UsageScript 配置（所有应用类型通用）
         if let Some(meta) = &provider.meta {
             if let Some(usage_script) = &meta.usage_script {
                 Self::validate_usage_script(usage_script)?;

@@ -21,11 +21,11 @@ English | [中文](README_ZH.md)
 
 ---
 
-## 📖 About
+## About
 
 This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-switch). 
 
-🔄 The WebDAV sync feature is fully compatible with the upstream project.
+The WebDAV sync feature is fully compatible with the upstream project.
 
 
 **Credits:** Original architecture and core functionality from [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
@@ -34,7 +34,7 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## ❤️ Sponsor
+## Sponsor
 
 <table>
   <tr>
@@ -125,7 +125,7 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## 📸 Screenshots
+## Screenshots
 
 <div align="center">
   <h3>Home</h3>
@@ -145,7 +145,7 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
 </table>
 
-## 🚀 Quick Start
+## Quick Start
 
 **TUI Mode (Recommended)**
 ```bash
@@ -183,7 +183,7 @@ See the "Features" section for full command list.
 
 ---
 
-## 📥 Installation
+## Installation
 
 ### Method 1: Quick Install (macOS / Linux)
 
@@ -298,9 +298,9 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ---
 
-## ✨ Features
+## Features
 
-### 🔌 Provider Management
+### Provider Management
 
 Manage API configurations for **Claude Code**, **Codex**, **Gemini**, **OpenCode**, **Hermes**, and **OpenClaw**.
 
@@ -322,7 +322,7 @@ cc-switch provider fetch-models <id> # Fetch remote model list
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # Custom settings file path
 ```
 
-### 🔐 Managed Accounts
+### Managed Accounts
 
 Manage ChatGPT/Codex OAuth accounts locally and reuse them across provider profiles, including using a Codex OAuth account as a Claude Code provider through the local proxy.
 
@@ -336,7 +336,7 @@ cc-switch auth default <account-id>  # Set the default account
 cc-switch auth remove <account-id>   # Remove an account
 ```
 
-### 🛠️ MCP Server Management
+### MCP Server Management
 
 Manage Model Context Protocol servers across Claude, Codex, Gemini, OpenCode, and Hermes.
 
@@ -354,7 +354,7 @@ cc-switch mcp sync                   # Sync to live files
 cc-switch mcp import --app claude    # Import from live config
 ```
 
-### 💬 Prompts Management
+### Prompts Management
 
 Manage system prompt presets for AI coding assistants.
 
@@ -372,7 +372,7 @@ cc-switch prompts show <id>          # Display full content
 cc-switch prompts delete <id>        # Delete prompt
 ```
 
-### 🎯 Skills Management
+### Skills Management
 
 Manage and extend Claude Code/Codex/Gemini/OpenCode/Hermes capabilities with community skills.
 
@@ -398,7 +398,7 @@ cc-switch skills repos enable <repo> # Enable repo without changing branch
 cc-switch skills repos disable <repo> # Disable repo without changing branch
 ```
 
-### 🕘 Session History & Usage Statistics
+### Session History & Usage Statistics
 
 Review saved assistant sessions, resume a session with one command, delete old records, and import local session logs into token/cost statistics.
 
@@ -412,7 +412,7 @@ cc-switch sessions delete <id>       # Delete a saved session
 cc-switch sessions sync-usage --all  # Sync local logs into usage statistics
 ```
 
-### ⚙️ Configuration Management
+### Configuration Management
 
 Manage configuration backups, imports, and exports.
 
@@ -454,7 +454,7 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # Reset to default configuration
 ```
 
-### 🌉 Proxy Management & Model Relay
+### Proxy Management & Model Relay
 
 Inspect and control daemon-managed per-app proxy routes for supported apps.
 
@@ -482,7 +482,7 @@ Normal CLI/TUI proxy enable/disable actions are routed through the daemon. The d
 >
 > `proxy show` and `proxy config` work on all platforms. See [#294](https://github.com/SaladDay/cc-switch-cli/issues/294).
 
-### 🧪 Environment & Local Tools
+### Environment & Local Tools
 
 Inspect environment conflicts and whether required local CLIs are installed.
 
@@ -492,14 +492,14 @@ cc-switch env list                   # List relevant environment variables
 cc-switch env tools                  # Check Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLIs
 ```
 
-### 🌐 Multi-language Support
+### Multi-language Support
 
 Interactive mode supports English and Chinese, language settings are automatically saved.
 
 - Default language: English
-- Go to `⚙️ Settings` menu to switch language
+- Go to ` Settings` menu to switch language
 
-### 🔧 Utilities
+### Utilities
 
 Shell completions, environment management, and other utilities.
 
@@ -525,7 +525,7 @@ Automated install/activation currently targets `bash` and `zsh` only. Other shel
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ### Core Design
 
@@ -558,7 +558,7 @@ When `CC_SWITCH_CONFIG_DIR` is set, CC-Switch uses that directory as its config 
 
 ---
 
-## ❓ FAQ (Frequently Asked Questions)
+## FAQ (Frequently Asked Questions)
 
 <details>
 <summary><b>Why doesn't my configuration take effect after switching providers?</b></summary>
@@ -675,7 +675,7 @@ Please open an issue on our [GitHub Issues](https://github.com/saladday/cc-switc
 
 ---
 
-## 🛠️ Development
+## Development
 
 ### Requirements
 
@@ -712,19 +712,19 @@ src-tauri/src/
 ```
 
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! This fork focuses on CLI functionality.
 
 **Before submitting PRs:**
-- ✅ Pass format check: `cargo fmt --check`
-- ✅ Pass linter: `cargo clippy`
-- ✅ Pass tests: `cargo test`
-- 💡 Open an issue for discussion first
+-  Pass format check: `cargo fmt --check`
+-  Pass linter: `cargo clippy`
+-  Pass tests: `cargo test`
+-  Open an issue for discussion first
 
 ---
 
-## 📜 License
+## License
 
 - MIT © Original Author: Jason Young
 - CLI Fork Maintainer: saladday

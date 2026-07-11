@@ -853,7 +853,7 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     } else {
         println!("{}", success(&texts::switched_to_provider(id)));
     }
-    println!("{}", info(&format!("  Application: {}", app_str)));
+    println!("{}", info(&format!("Application: {}", app_str)));
     if skip_live_sync {
         println!(
             "{}",
@@ -894,7 +894,7 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     // 执行删除
     ProviderService::delete(&state, app_type, id)?;
 
-    println!("{}", success(&format!("✓ Deleted provider '{}'", id)));
+    println!("{}", success(&format!("OK Deleted provider '{}'", id)));
 
     Ok(())
 }
@@ -1668,7 +1668,7 @@ fn import_live_config(app_type: AppType) -> Result<(), AppError> {
         println!(
             "{}",
             success(&format!(
-                "✓ Imported {imported} provider(s) from {} live config",
+                "OK Imported {imported} provider(s) from {} live config",
                 app_type.as_str()
             ))
         );
@@ -1690,7 +1690,7 @@ fn remove_from_config(app_type: AppType, id: &str) -> Result<(), AppError> {
     println!(
         "{}",
         success(&format!(
-            "✓ Removed provider '{}' from {} live config",
+            "OK Removed provider '{}' from {} live config",
             id,
             app_type.as_str()
         ))
@@ -1704,7 +1704,7 @@ fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Res
     println!(
         "{}",
         success(&format!(
-            "✓ Set '{}' as default for {}",
+            "OK Set '{}' as default for {}",
             default,
             app_type.as_str()
         ))
@@ -1799,7 +1799,7 @@ fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Resu
     println!(
         "{}",
         success(&format!(
-            "✓ Exported provider '{}' to {}",
+            "OK Exported provider '{}' to {}",
             id,
             output_path.display()
         ))
@@ -2215,7 +2215,7 @@ wire_api = "chat"
             ..Default::default()
         });
 
-        apply_codex_oauth_provider_options(&mut provider, Some(" acc-123 ".to_string()), true);
+        apply_codex_oauth_provider_options(&mut provider, Some("acc-123 ".to_string()), true);
 
         let meta = provider.meta.expect("metadata should be present");
         assert_eq!(meta.apply_common_config, Some(true));
@@ -2263,7 +2263,7 @@ wire_api = "chat"
             ..Default::default()
         });
 
-        apply_codex_oauth_provider_options(&mut provider, Some(" \n ".to_string()), false);
+        apply_codex_oauth_provider_options(&mut provider, Some("\n ".to_string()), false);
 
         let meta = provider.meta.expect("metadata should be present");
         assert_eq!(meta.provider_type.as_deref(), Some("codex_oauth"));

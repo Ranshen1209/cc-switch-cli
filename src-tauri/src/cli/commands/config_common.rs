@@ -43,7 +43,7 @@ pub enum CommonConfigCommand {
     },
     /// Set common config snippet for the selected app
     #[command(
-        after_long_help = "Compatibility:\n  --json <SNIPPET>  Legacy alias for --snippet <SNIPPET>."
+        after_long_help = "Compatibility:\n --json <SNIPPET> Legacy alias for --snippet <SNIPPET>."
     )]
     Set {
         /// Inline snippet text (Claude/Gemini/OpenCode: JSON object; Codex: TOML)
@@ -322,7 +322,7 @@ fn clear(app_type: AppType, _apply: bool) -> Result<(), AppError> {
     println!(
         "{}",
         success(&format!(
-            "✓ Common config snippet cleared for app '{}'",
+            "OK Common config snippet cleared for app '{}'",
             app_type.as_str()
         ))
     );
@@ -569,7 +569,7 @@ mod tests {
 
         assert_eq!(
             formatted,
-            "{\n  \"env\": {\n    \"CC_SWITCH_TEST\": \"1\"\n  }\n}"
+            "{\n \"env\": {\n \"CC_SWITCH_TEST\": \"1\"\n }\n}"
         );
     }
 
@@ -601,12 +601,12 @@ mod tests {
             None,
             Some(
                 r#"{
-                    "env": {
-                        "ANTHROPIC_BASE_URL": "https://provider.example",
-                        "ANTHROPIC_AUTH_TOKEN": "sk-test",
-                        "CC_SWITCH_SHARED": "1"
-                    }
-                }"#,
+ "env": {
+ "ANTHROPIC_BASE_URL": "https://provider.example",
+ "ANTHROPIC_AUTH_TOKEN": "sk-test",
+ "CC_SWITCH_SHARED": "1"
+ }
+ }"#,
             ),
             None,
             true,

@@ -106,20 +106,20 @@ fn show_path() -> Result<(), AppError> {
 
     println!("{}", highlight("Configuration Paths"));
     println!("{}", "=".repeat(50));
-    println!("DB file:      {}", db_path.display());
-    println!("Legacy JSON:  {}", legacy_config_path.display());
-    println!("Config dir:   {}", config_dir.display());
+    println!("DB file: {}", db_path.display());
+    println!("Legacy JSON: {}", legacy_config_path.display());
+    println!("Config dir: {}", config_dir.display());
 
     // Check if DB file exists
     if db_path.exists() {
-        println!("\n{} Database exists", success("✓"));
+        println!("\n{} Database exists", success("OK"));
 
         // Show file size
         if let Ok(metadata) = fs::metadata(&db_path) {
-            println!("File size:    {} bytes", metadata.len());
+            println!("File size: {} bytes", metadata.len());
         }
     } else {
-        println!("\n{} Database file does not exist", error("✗"));
+        println!("\n{} Database file does not exist", error("FAIL"));
         println!("{}", info("Run cc-switch once to create the database."));
     }
 
@@ -128,8 +128,8 @@ fn show_path() -> Result<(), AppError> {
     if backup_dir.exists() {
         if let Ok(entries) = fs::read_dir(&backup_dir) {
             let count = entries.filter_map(|e| e.ok()).count();
-            println!("\nBackups dir:  {}", backup_dir.display());
-            println!("Backups:      {} backup(s) found", count);
+            println!("\nBackups dir: {}", backup_dir.display());
+            println!("Backups: {} backup(s) found", count);
         }
     }
 
@@ -168,7 +168,7 @@ fn export_config(file: &Path) -> Result<(), AppError> {
 
     println!(
         "{}",
-        success(&format!("✓ Configuration exported to {}", file.display()))
+        success(&format!("OK Configuration exported to {}", file.display()))
     );
 
     Ok(())
@@ -219,10 +219,13 @@ fn import_config(file: &Path) -> Result<(), AppError> {
 
     println!(
         "{}",
-        success(&format!("✓ Configuration imported from {}", file.display()))
+        success(&format!(
+            "OK Configuration imported from {}",
+            file.display()
+        ))
     );
     if !backup_id.is_empty() {
-        println!("{}", info(&format!("  Backup created: {}", backup_id)));
+        println!("{}", info(&format!("Backup created: {}", backup_id)));
     }
     println!();
     println!(
@@ -253,7 +256,7 @@ fn backup_config(custom_name: Option<&str>) -> Result<(), AppError> {
         let backup_dir = config_path.parent().unwrap().join("backups");
         let backup_file = backup_dir.join(format!("{}.sql", backup_id));
 
-        println!("{}", success(&format!("✓ Backup created: {}", backup_id)));
+        println!("{}", success(&format!("OK Backup created: {}", backup_id)));
         println!("Location: {}", backup_file.display());
     }
 
@@ -288,12 +291,12 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
 
         println!(
             "{}",
-            success(&format!("✓ Configuration restored from backup '{}'", id))
+            success(&format!("OK Configuration restored from backup '{}'", id))
         );
         if !pre_restore_backup.is_empty() {
             println!(
                 "{}",
-                info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+                info(&format!("Pre-restore backup: {}", pre_restore_backup))
             );
         }
         println!();
@@ -348,12 +351,15 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
 
         println!(
             "{}",
-            success(&format!("✓ Configuration restored from {}", file.display()))
+            success(&format!(
+                "OK Configuration restored from {}",
+                file.display()
+            ))
         );
         if !pre_restore_backup.is_empty() {
             println!(
                 "{}",
-                info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+                info(&format!("Pre-restore backup: {}", pre_restore_backup))
             );
         }
         println!();
@@ -423,14 +429,14 @@ fn restore_config(backup_id: Option<&str>, file_path: Option<&Path>) -> Result<(
     println!(
         "{}",
         success(&format!(
-            "✓ Configuration restored from: {}",
+            "OK Configuration restored from: {}",
             selected_backup.display_name
         ))
     );
     if !pre_restore_backup.is_empty() {
         println!(
             "{}",
-            info(&format!("  Pre-restore backup: {}", pre_restore_backup))
+            info(&format!("Pre-restore backup: {}", pre_restore_backup))
         );
     }
     println!();
@@ -450,16 +456,16 @@ fn validate_config() -> Result<(), AppError> {
     println!();
 
     if !db_path.exists() {
-        println!("{}", error("✗ Database file does not exist"));
+        println!("{}", error("FAIL Database file does not exist"));
         println!("Path: {}", db_path.display());
         return Ok(());
     }
 
-    println!("{} Database file exists", success("✓"));
+    println!("{} Database file exists", success("OK"));
     println!("Path: {}", db_path.display());
 
     let db = crate::Database::init()?;
-    println!("{} Database schema is readable", success("✓"));
+    println!("{} Database schema is readable", success("OK"));
 
     // Show some stats
     let claude_count = db.get_all_providers("claude")?.len();
@@ -470,14 +476,14 @@ fn validate_config() -> Result<(), AppError> {
 
     println!();
     println!("{}", highlight("Database Summary:"));
-    println!("Claude providers:  {}", claude_count);
-    println!("Codex providers:   {}", codex_count);
-    println!("Gemini providers:  {}", gemini_count);
-    println!("MCP servers:       {}", mcp_count);
-    println!("Skills installed:  {}", skills_count);
+    println!("Claude providers: {}", claude_count);
+    println!("Codex providers: {}", codex_count);
+    println!("Gemini providers: {}", gemini_count);
+    println!("MCP servers: {}", mcp_count);
+    println!("Skills installed: {}", skills_count);
 
     println!();
-    println!("{}", success("✓ Database validation passed"));
+    println!("{}", success("OK Database validation passed"));
 
     Ok(())
 }
@@ -491,7 +497,7 @@ fn reset_config() -> Result<(), AppError> {
     println!("All your providers, MCP servers, and settings will be lost.");
     println!();
     println!("{}", info("Consider creating a backup first:"));
-    println!("  cc-switch config backup");
+    println!("cc-switch config backup");
     println!();
 
     let confirm = inquire::Confirm::new("Are you sure you want to reset to default configuration?")
@@ -517,12 +523,12 @@ fn reset_config() -> Result<(), AppError> {
     // Recreate empty DB
     let _ = crate::Database::init()?;
 
-    println!("{}", success("✓ Configuration reset to defaults"));
+    println!("{}", success("OK Configuration reset to defaults"));
     if !backup_id.is_empty() {
-        println!("{}", info(&format!("  Backup created: {}", backup_id)));
+        println!("{}", info(&format!("Backup created: {}", backup_id)));
         println!(
             "{}",
-            info("  You can restore it later using: cc-switch config restore")
+            info("You can restore it later using: cc-switch config restore")
         );
     }
 

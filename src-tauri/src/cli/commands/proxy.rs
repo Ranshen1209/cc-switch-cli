@@ -326,7 +326,7 @@ fn serve_proxy(
                 .map_err(AppError::Message)?;
             println!(
                 "{}",
-                success(crate::t!("✓ Proxy stopped.", "✓ 代理已停止。"))
+                success(crate::t!("OK Proxy stopped.", "OK 代理已停止。"))
             );
 
             Ok(())
@@ -448,7 +448,7 @@ fn build_proxy_route_lines(
                 worker.port,
                 worker
                     .pid
-                    .map(|pid| format!(" pid={pid}"))
+                    .map(|pid| format!("pid={pid}"))
                     .unwrap_or_default()
             ),
             None => format!(

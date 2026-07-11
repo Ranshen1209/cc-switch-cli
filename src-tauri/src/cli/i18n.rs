@@ -177,34 +177,34 @@ pub mod texts {
 
     pub fn entity_added_success(entity_type: &str, name: &str) -> String {
         if is_chinese() {
-            format!("✓ 成功添加{} '{}'", entity_type, name)
+            format!("OK 成功添加{} '{}'", entity_type, name)
         } else {
-            format!("✓ Successfully added {} '{}'", entity_type, name)
+            format!("OK Successfully added {} '{}'", entity_type, name)
         }
     }
 
     pub fn entity_updated_success(entity_type: &str, name: &str) -> String {
         if is_chinese() {
-            format!("✓ 成功更新{} '{}'", entity_type, name)
+            format!("OK 成功更新{} '{}'", entity_type, name)
         } else {
-            format!("✓ Successfully updated {} '{}'", entity_type, name)
+            format!("OK Successfully updated {} '{}'", entity_type, name)
         }
     }
 
     pub fn entity_deleted_success(entity_type: &str, name: &str) -> String {
         if is_chinese() {
-            format!("✓ 成功删除{} '{}'", entity_type, name)
+            format!("OK 成功删除{} '{}'", entity_type, name)
         } else {
-            format!("✓ Successfully deleted {} '{}'", entity_type, name)
+            format!("OK Successfully deleted {} '{}'", entity_type, name)
         }
     }
 
     pub fn provider_duplicated_success(source_id: &str, duplicate_id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已复制供应商 '{}' 为 '{}'", source_id, duplicate_id)
+            format!("OK 已复制供应商 '{}' 为 '{}'", source_id, duplicate_id)
         } else {
             format!(
-                "✓ Duplicated provider '{}' as '{}'",
+                "OK Duplicated provider '{}' as '{}'",
                 source_id, duplicate_id
             )
         }
@@ -265,9 +265,9 @@ pub mod texts {
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
         if is_chinese() {
-            "🎯 CC-Switch 交互模式"
+            "CC-Switch 交互模式"
         } else {
-            "🎯 CC-Switch Interactive Mode"
+            "CC-Switch Interactive Mode"
         }
     }
 
@@ -281,9 +281,9 @@ pub mod texts {
 
     pub fn goodbye() -> &'static str {
         if is_chinese() {
-            "👋 再见！"
+            "再见！"
         } else {
-            "👋 Goodbye!"
+            "Goodbye!"
         }
     }
 
@@ -334,11 +334,11 @@ pub mod texts {
     }
 
     pub fn tui_filter_icon() -> &'static str {
-        "🔎 "
+        "/ "
     }
 
     pub fn tui_marker_active() -> &'static str {
-        "✓"
+        "OK"
     }
 
     pub fn tui_marker_inactive() -> &'static str {
@@ -346,23 +346,23 @@ pub mod texts {
     }
 
     pub fn tui_highlight_symbol() -> &'static str {
-        "➤ "
+        "> "
     }
 
     pub fn tui_toast_prefix_info() -> &'static str {
-        " ℹ "
+        "i "
     }
 
     pub fn tui_toast_prefix_success() -> &'static str {
-        " ✓ "
+        "OK "
     }
 
     pub fn tui_toast_prefix_warning() -> &'static str {
-        " ! "
+        "! "
     }
 
     pub fn tui_toast_prefix_error() -> &'static str {
-        " ✗ "
+        "FAIL "
     }
 
     pub fn tui_toast_invalid_json(details: &str) -> String {
@@ -406,7 +406,7 @@ pub mod texts {
     }
 
     pub fn tui_icon_app() -> &'static str {
-        "📱"
+        ""
     }
 
     pub fn tui_default_config_filename() -> &'static str {
@@ -453,9 +453,9 @@ pub mod texts {
 
     pub fn tui_footer_global() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  ←→ 切换菜单/内容  ↑↓ 移动  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 ←→ 切换菜单/内容 ↑↓ 移动 Enter 详情 Space 切换 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  ←→ focus menu/content  ↑↓ move  Enter details  Space switch  / filter  Esc back  ? help"
+            "[ ] switch app ←→ focus menu/content ↑↓ move Enter details Space switch / filter Esc back ? help"
         }
     }
 
@@ -477,81 +477,81 @@ pub mod texts {
 
     pub fn tui_footer_nav_keys() -> &'static str {
         if is_chinese() {
-            "←→ 菜单/内容  ↑↓ 移动"
+            "←→ 菜单/内容 ↑↓ 移动"
         } else {
-            "←→ menu/content  ↑↓ move"
+            "←→ menu/content ↑↓ move"
         }
     }
 
     pub fn tui_footer_action_keys() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 Enter 详情 Space 切换 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  Enter details  Space switch  / filter  Esc back  ? help"
+            "[ ] switch app Enter details Space switch / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_main() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  / filter  Esc back  ? help"
+            "[ ] switch app / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_providers() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Space 切换  a 新增  e 编辑  d 删除  t 测试  r 刷新  o 临时启动  f 管理故障转移  x 设为默认  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 Space 切换 a 新增 e 编辑 d 删除 t 测试 r 刷新 o 临时启动 f 管理故障转移 x 设为默认 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  Space switch  a add  e edit  d delete  t test  r refresh  o launch temp  f manage failover  x set default  / filter  Esc back  ? help"
+            "[ ] switch app Space switch a add e edit d delete t test r refresh o launch temp f manage failover x set default / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_mcp() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  x 启用/禁用  m 应用  a 添加  e 编辑  i 导入  d 删除  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 x 启用/禁用 m 应用 a 添加 e 编辑 i 导入 d 删除 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  x toggle  m apps  a add  e edit  i import  d delete  / filter  Esc back  ? help"
+            "[ ] switch app x toggle m apps a add e edit i import d delete / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_prompts() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Space 启用/禁用  a 新增  Enter 查看  e 编辑  d 删除  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 Space 启用/禁用 a 新增 Enter 查看 e 编辑 d 删除 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  Space toggle  a add  Enter view  e edit  d delete  / filter  Esc back  ? help"
+            "[ ] switch app Space toggle a add Enter view e edit d delete / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_config() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 打开  e 编辑片段  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 Enter 打开 e 编辑片段 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  Enter open  e edit snippet  / filter  Esc back  ? help"
+            "[ ] switch app Enter open e edit snippet / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_common_snippet_view() -> &'static str {
         if is_chinese() {
-            "a 应用  c 清空  e 编辑  ↑↓ 滚动  Esc 返回"
+            "a 应用 c 清空 e 编辑 ↑↓ 滚动 Esc 返回"
         } else {
-            "a apply  c clear  e edit  ↑↓ scroll  Esc back"
+            "a apply c clear e edit ↑↓ scroll Esc back"
         }
     }
 
     pub fn tui_footer_action_keys_settings() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  Enter 应用  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 Enter 应用 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  Enter apply  / filter  Esc back  ? help"
+            "[ ] switch app Enter apply / filter Esc back ? help"
         }
     }
 
     pub fn tui_footer_action_keys_global() -> &'static str {
         if is_chinese() {
-            "[ ] 切换应用  / 过滤  Esc 返回  ? 帮助"
+            "[ ] 切换应用 / 过滤 Esc 返回 ? 帮助"
         } else {
-            "[ ] switch app  / filter  Esc back  ? help"
+            "[ ] switch app / filter Esc back ? help"
         }
     }
 
@@ -577,9 +577,9 @@ pub mod texts {
     /// static bullets returned by the `tui_help_line_*` functions.
     pub fn tui_help_prelude() -> &'static str {
         if is_chinese() {
-            "[ ]  切换应用\n←→  切换菜单/内容焦点\n↑↓ 或 h/j/k/l  移动\n/   过滤\nEsc  返回\n?   显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）："
+            "[ ] 切换应用\n←→ 切换菜单/内容焦点\n↑↓ 或 h/j/k/l 移动\n/ 过滤\nEsc 返回\n? 显示/关闭帮助\n\n文本输入：Ctrl+A/E 行首/行尾，Ctrl+U/K 删除行片段，Ctrl+W 删除前词，Alt+B/F 按词移动\n\n页面快捷键（在页面内容区顶部显示）："
         } else {
-            "[ ]  switch app\n←→  focus menu/content\n↑↓ or h/j/k/l  move\n/   filter\nEsc  back\n?   toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):"
+            "[ ] switch app\n←→ focus menu/content\n↑↓ or h/j/k/l move\n/ filter\nEsc back\n? toggle help\n\nText input: Ctrl+A/E move line, Ctrl+U/K delete line parts, Ctrl+W delete word, Alt+B/F move word\n\nPage keys (shown at the top of each page):"
         }
     }
 
@@ -662,9 +662,9 @@ pub mod texts {
 
     pub fn tui_confirm_no_hint() -> &'static str {
         if is_chinese() {
-            "n/Esc   = 否"
+            "n/Esc = 否"
         } else {
-            "n/Esc   = No"
+            "n/Esc = No"
         }
     }
 
@@ -694,17 +694,17 @@ pub mod texts {
 
     pub fn tui_editor_hint_view() -> &'static str {
         if is_chinese() {
-            "Enter 编辑  ↑↓ 滚动  Ctrl+S 保存  Esc 返回"
+            "Enter 编辑 ↑↓ 滚动 Ctrl+S 保存 Esc 返回"
         } else {
-            "Enter edit  ↑↓ scroll  Ctrl+S save  Esc back"
+            "Enter edit ↑↓ scroll Ctrl+S save Esc back"
         }
     }
 
     pub fn tui_editor_hint_edit() -> &'static str {
         if is_chinese() {
-            "编辑中：Esc 退出编辑  Ctrl+S 保存"
+            "编辑中：Esc 退出编辑 Ctrl+S 保存"
         } else {
-            "Editing: Esc stop editing  Ctrl+S save"
+            "Editing: Esc stop editing Ctrl+S save"
         }
     }
 
@@ -776,9 +776,9 @@ pub mod texts {
         let mut text = tui_header_proxy_status(enabled);
         if enabled && failover_enabled {
             if is_chinese() {
-                text.push_str(" · 故障转移");
+                text.push_str("· 故障转移");
             } else {
-                text.push_str(" · Failover");
+                text.push_str("· Failover");
             }
         }
         text
@@ -2941,9 +2941,9 @@ pub mod texts {
 
     pub fn tui_usage_query_tips() -> &'static str {
         if is_chinese() {
-            "💡 提示："
+            "提示："
         } else {
-            "💡 Tips:"
+            "Tips:"
         }
     }
 
@@ -3201,9 +3201,9 @@ pub mod texts {
 
     pub fn tui_hint_auto_fetch_models_from_api() -> &'static str {
         if is_chinese() {
-            " 从 API 自动获取模型。"
+            "从 API 自动获取模型。"
         } else {
-            " to auto-fetch models from API."
+            "to auto-fetch models from API."
         }
     }
 
@@ -4039,27 +4039,17 @@ pub mod texts {
 
     pub fn tui_provider_list_keys() -> &'static str {
         if is_chinese() {
-            "按键：a=新增  e=编辑  Space=切换  /=搜索"
+            "按键：a=新增 e=编辑 Space=切换 /=搜索"
         } else {
-            "Keys: a=add  e=edit  Space=switch  /=filter"
+            "Keys: a=add e=edit Space=switch /=filter"
         }
-    }
-
-    pub fn tui_home_ascii_logo() -> &'static str {
-        // Same ASCII art across languages.
-        r#"                                  _  _         _
-   ___  ___        ___ __      __(_)| |_  ___ | |__
-  / __|/ __|_____ / __|\ \ /\ / /| || __|/ __|| '_ \
- | (__| (__|_____|\__ \ \ V  V / | || |_| (__ | | | |
-  \___|\___|      |___/  \_/\_/  |_| \__|\___||_| |_|
-                                                      "#
     }
 
     pub fn tui_common_snippet_keys() -> &'static str {
         if is_chinese() {
-            "按键：e=编辑  c=清除  a=应用  Esc=返回"
+            "按键：e=编辑 c=清除 a=应用 Esc=返回"
         } else {
-            "Keys: e=edit  c=clear  a=apply  Esc=back"
+            "Keys: e=edit c=clear a=apply Esc=back"
         }
     }
 
@@ -4081,9 +4071,9 @@ pub mod texts {
 
     pub fn tui_view_config_api_url(url: &str) -> String {
         if is_chinese() {
-            format!("API URL:  {}", url)
+            format!("API URL: {}", url)
         } else {
-            format!("API URL:  {}", url)
+            format!("API URL: {}", url)
         }
     }
 
@@ -4149,39 +4139,6 @@ pub mod texts {
             format!("主题已切换为{mode_name}")
         } else {
             format!("Theme set to {mode_name}")
-        }
-    }
-
-    pub fn tui_settings_icons_label() -> &'static str {
-        if is_chinese() {
-            "图标"
-        } else {
-            "Icons"
-        }
-    }
-
-    pub fn tui_settings_icon_mode_name(mode: crate::cli::tui::icons::IconMode) -> &'static str {
-        use crate::cli::tui::icons::IconMode;
-        if is_chinese() {
-            match mode {
-                IconMode::Auto => "自动",
-                IconMode::Emoji => "表情",
-                IconMode::Ascii => "ASCII",
-            }
-        } else {
-            match mode {
-                IconMode::Auto => "Auto",
-                IconMode::Emoji => "Emoji",
-                IconMode::Ascii => "ASCII",
-            }
-        }
-    }
-
-    pub fn tui_toast_icons_changed(mode_name: &str) -> String {
-        if is_chinese() {
-            format!("图标已切换为{mode_name}")
-        } else {
-            format!("Icons set to {mode_name}")
         }
     }
 
@@ -4968,9 +4925,9 @@ pub mod texts {
 
     pub fn tui_skills_installed_summary(installed: usize, enabled: usize, app: &str) -> String {
         if is_chinese() {
-            format!("已安装: {installed}   当前应用({app})已启用: {enabled}")
+            format!("已安装: {installed} 当前应用({app})已启用: {enabled}")
         } else {
-            format!("Installed: {installed}   Enabled for {app}: {enabled}")
+            format!("Installed: {installed} Enabled for {app}: {enabled}")
         }
     }
 
@@ -6288,11 +6245,11 @@ pub mod texts {
     pub fn tui_confirm_remove_provider_message(name: &str) -> String {
         if is_chinese() {
             format!(
-                "确定要从配置中移除供应商 \"{name}\" 吗？\n\n移除后该供应商将不再生效，但配置数据会保留在 CC Switch 中，您可以随时重新添加。"
+                "确定要从配置中移除供应商 \"{name}\"吗？\n\n移除后该供应商将不再生效，但配置数据会保留在 CC Switch 中，您可以随时重新添加。"
             )
         } else {
             format!(
-                "Are you sure you want to remove provider \"{name}\" from the configuration?\n\nAfter removal, this provider will no longer be active, but the configuration data will be retained in CC Switch. You can re-add it at any time."
+                "Are you sure you want to remove provider \"{name}\"from the configuration?\n\nAfter removal, this provider will no longer be active, but the configuration data will be retained in CC Switch. You can re-add it at any time."
             )
         }
     }
@@ -6565,9 +6522,9 @@ pub mod texts {
 
     pub fn tui_config_paths_config_dir(path: &str) -> String {
         if is_chinese() {
-            format!("配置目录:  {}", path)
+            format!("配置目录: {}", path)
         } else {
-            format!("Config dir:  {}", path)
+            format!("Config dir: {}", path)
         }
     }
 
@@ -6753,39 +6710,39 @@ pub mod texts {
 
     pub fn tui_stream_check_line_status(status: &str) -> String {
         if is_chinese() {
-            format!("状态:   {status}")
+            format!("状态: {status}")
         } else {
-            format!("Status:  {status}")
+            format!("Status: {status}")
         }
     }
 
     pub fn tui_stream_check_line_response_time(response_time: &str) -> String {
         if is_chinese() {
-            format!("耗时:   {response_time}")
+            format!("耗时: {response_time}")
         } else {
-            format!("Time:    {response_time}")
+            format!("Time: {response_time}")
         }
     }
 
     pub fn tui_stream_check_line_http_status(status: &str) -> String {
         if is_chinese() {
-            format!("HTTP:   {status}")
+            format!("HTTP: {status}")
         } else {
-            format!("HTTP:    {status}")
+            format!("HTTP: {status}")
         }
     }
 
     pub fn tui_stream_check_line_model(model: &str) -> String {
         if is_chinese() {
-            format!("模型:   {model}")
+            format!("模型: {model}")
         } else {
-            format!("Model:   {model}")
+            format!("Model: {model}")
         }
     }
 
     pub fn tui_stream_check_line_retries(retries: &str) -> String {
         if is_chinese() {
-            format!("重试:   {retries}")
+            format!("重试: {retries}")
         } else {
             format!("Retries: {retries}")
         }
@@ -6793,7 +6750,7 @@ pub mod texts {
 
     pub fn tui_stream_check_line_message(message: &str) -> String {
         if is_chinese() {
-            format!("信息:   {message}")
+            format!("信息: {message}")
         } else {
             format!("Message: {message}")
         }
@@ -6801,7 +6758,7 @@ pub mod texts {
 
     pub fn tui_speedtest_line_latency(latency: &str) -> String {
         if is_chinese() {
-            format!("延迟:   {latency}")
+            format!("延迟: {latency}")
         } else {
             format!("Latency: {latency}")
         }
@@ -6809,17 +6766,17 @@ pub mod texts {
 
     pub fn tui_speedtest_line_status(status: &str) -> String {
         if is_chinese() {
-            format!("状态:   {status}")
+            format!("状态: {status}")
         } else {
-            format!("Status:  {status}")
+            format!("Status: {status}")
         }
     }
 
     pub fn tui_speedtest_line_error(err: &str) -> String {
         if is_chinese() {
-            format!("错误:   {err}")
+            format!("错误: {err}")
         } else {
-            format!("Error:   {err}")
+            format!("Error: {err}")
         }
     }
 
@@ -7794,25 +7751,25 @@ pub mod texts {
 
     pub fn tui_config_validation_ok() -> &'static str {
         if is_chinese() {
-            "✓ 配置是有效的 JSON"
+            "OK 配置是有效的 JSON"
         } else {
-            "✓ Configuration is valid JSON"
+            "OK Configuration is valid JSON"
         }
     }
 
     pub fn tui_config_validation_provider_count(app: &str, count: usize) -> String {
         if is_chinese() {
-            format!("{app} 供应商:  {count}")
+            format!("{app} 供应商: {count}")
         } else {
-            format!("{app} providers:  {count}")
+            format!("{app} providers: {count}")
         }
     }
 
     pub fn tui_config_validation_mcp_servers(count: usize) -> String {
         if is_chinese() {
-            format!("MCP 服务器:       {count}")
+            format!("MCP 服务器: {count}")
         } else {
-            format!("MCP servers:       {count}")
+            format!("MCP servers: {count}")
         }
     }
 
@@ -7850,7 +7807,7 @@ pub mod texts {
     }
 
     pub fn menu_home_variants() -> (&'static str, &'static str) {
-        ("🏠 Home", "🏠 首页")
+        ("Home", "首页")
     }
 
     pub fn menu_manage_providers() -> &'static str {
@@ -7863,7 +7820,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_providers_variants() -> (&'static str, &'static str) {
-        ("🔑 Providers", "🔑 供应商")
+        ("Providers", "供应商")
     }
 
     pub fn menu_usage() -> &'static str {
@@ -7876,7 +7833,7 @@ pub mod texts {
     }
 
     pub fn menu_usage_variants() -> (&'static str, &'static str) {
-        ("📊 Usage", "📊 使用统计")
+        ("Usage", "使用统计")
     }
 
     pub fn menu_pricing() -> &'static str {
@@ -7889,7 +7846,7 @@ pub mod texts {
     }
 
     pub fn menu_pricing_variants() -> (&'static str, &'static str) {
-        ("💵 Pricing", "💵 模型定价")
+        ("Pricing", "模型定价")
     }
 
     pub fn menu_manage_sessions() -> &'static str {
@@ -7902,7 +7859,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_sessions_variants() -> (&'static str, &'static str) {
-        ("🕘 Sessions", "🕘 会话")
+        ("Sessions", "会话")
     }
 
     pub fn menu_manage_mcp() -> &'static str {
@@ -7915,7 +7872,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_mcp_variants() -> (&'static str, &'static str) {
-        ("🔌 MCP Servers", "🔌 MCP 服务器")
+        ("MCP Servers", "MCP 服务器")
     }
 
     pub fn menu_manage_prompts() -> &'static str {
@@ -7928,7 +7885,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_prompts_variants() -> (&'static str, &'static str) {
-        ("💬 Prompts", "💬 提示词")
+        ("Prompts", "提示词")
     }
 
     pub fn menu_manage_config() -> &'static str {
@@ -7941,7 +7898,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_config_variants() -> (&'static str, &'static str) {
-        ("📋 Configuration", "📋 配置")
+        ("Configuration", "配置")
     }
 
     pub fn menu_manage_skills() -> &'static str {
@@ -7954,7 +7911,7 @@ pub mod texts {
     }
 
     pub fn menu_manage_skills_variants() -> (&'static str, &'static str) {
-        ("🧩 Skills", "🧩 技能")
+        ("Skills", "技能")
     }
 
     pub fn menu_openclaw_workspace() -> &'static str {
@@ -7967,7 +7924,7 @@ pub mod texts {
     }
 
     pub fn menu_openclaw_workspace_variants() -> (&'static str, &'static str) {
-        ("📁 Workspace Files", "📁 Workspace 文件管理")
+        ("Workspace Files", "Workspace 文件管理")
     }
 
     pub fn menu_openclaw_env() -> &'static str {
@@ -7980,7 +7937,7 @@ pub mod texts {
     }
 
     pub fn menu_openclaw_env_variants() -> (&'static str, &'static str) {
-        ("🌱 Env Variables", "🌱 环境变量")
+        ("Env Variables", "环境变量")
     }
 
     pub fn menu_openclaw_tools() -> &'static str {
@@ -7993,7 +7950,7 @@ pub mod texts {
     }
 
     pub fn menu_openclaw_tools_variants() -> (&'static str, &'static str) {
-        ("🔐 Tool Permissions", "🔐 工具权限")
+        ("Tool Permissions", "工具权限")
     }
 
     pub fn menu_openclaw_agents() -> &'static str {
@@ -8006,7 +7963,7 @@ pub mod texts {
     }
 
     pub fn menu_openclaw_agents_variants() -> (&'static str, &'static str) {
-        ("🤖 Agents Config", "🤖 Agents 配置")
+        ("Agents Config", "Agents 配置")
     }
 
     pub fn menu_hermes_memory() -> &'static str {
@@ -8019,7 +7976,7 @@ pub mod texts {
     }
 
     pub fn menu_hermes_memory_variants() -> (&'static str, &'static str) {
-        ("🧠 Memory", "🧠 记忆管理")
+        ("Memory", "记忆管理")
     }
 
     pub fn menu_settings() -> &'static str {
@@ -8032,7 +7989,7 @@ pub mod texts {
     }
 
     pub fn menu_settings_variants() -> (&'static str, &'static str) {
-        ("🔧 Settings", "🔧 设置")
+        ("Settings", "设置")
     }
 
     pub fn menu_exit() -> &'static str {
@@ -8045,7 +8002,7 @@ pub mod texts {
     }
 
     pub fn menu_exit_variants() -> (&'static str, &'static str) {
-        ("🚪 Exit", "🚪 退出")
+        ("Exit", "退出")
     }
 
     pub fn tui_sessions_title() -> &'static str {
@@ -8108,9 +8065,9 @@ pub mod texts {
         let mut title = tui_sessions_messages_title().to_string();
         if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
             if is_chinese() {
-                title.push_str(&format!(" · 搜索: {}", query.trim()));
+                title.push_str(&format!("· 搜索: {}", query.trim()));
             } else {
-                title.push_str(&format!(" · Search: {}", query.trim()));
+                title.push_str(&format!("· Search: {}", query.trim()));
             }
         }
         title
@@ -8444,57 +8401,57 @@ pub mod texts {
 
     pub fn skills_discover() -> &'static str {
         if is_chinese() {
-            "🔎 发现/搜索 Skills"
+            "发现/搜索 Skills"
         } else {
-            "🔎 Discover/Search Skills"
+            "Discover/Search Skills"
         }
     }
 
     pub fn skills_install() -> &'static str {
         if is_chinese() {
-            "⬇️  安装 Skill"
+            "⬇ 安装 Skill"
         } else {
-            "⬇️  Install Skill"
+            "⬇ Install Skill"
         }
     }
 
     pub fn skills_uninstall() -> &'static str {
         if is_chinese() {
-            "🗑️  卸载 Skill"
+            "卸载 Skill"
         } else {
-            "🗑️  Uninstall Skill"
+            "Uninstall Skill"
         }
     }
 
     pub fn skills_toggle_for_app() -> &'static str {
         if is_chinese() {
-            "✅ 启用/禁用（当前应用）"
+            "启用/禁用（当前应用）"
         } else {
-            "✅ Enable/Disable (Current App)"
+            "Enable/Disable (Current App)"
         }
     }
 
     pub fn skills_show_info() -> &'static str {
         if is_chinese() {
-            "ℹ️  查看 Skill 信息"
+            "i 查看 Skill 信息"
         } else {
-            "ℹ️  Skill Info"
+            "i Skill Info"
         }
     }
 
     pub fn skills_sync_now() -> &'static str {
         if is_chinese() {
-            "🔄 同步 Skills 到本地"
+            "同步 Skills 到本地"
         } else {
-            "🔄 Sync Skills to Live"
+            "Sync Skills to Live"
         }
     }
 
     pub fn skills_sync_method() -> &'static str {
         if is_chinese() {
-            "🔗 同步方式（auto/symlink/copy）"
+            "同步方式（auto/symlink/copy）"
         } else {
-            "🔗 Sync Method (auto/symlink/copy)"
+            "Sync Method (auto/symlink/copy)"
         }
     }
 
@@ -8524,25 +8481,25 @@ pub mod texts {
 
     pub fn skills_scan_unmanaged() -> &'static str {
         if is_chinese() {
-            "🕵️  查找已有技能"
+            "查找已有技能"
         } else {
-            "🕵️  Find Existing Skills"
+            "Find Existing Skills"
         }
     }
 
     pub fn skills_import_from_apps() -> &'static str {
         if is_chinese() {
-            "📥 导入已有技能"
+            "导入已有技能"
         } else {
-            "📥 Import Existing Skills"
+            "Import Existing Skills"
         }
     }
 
     pub fn skills_manage_repos() -> &'static str {
         if is_chinese() {
-            "📦 管理技能仓库"
+            "管理技能仓库"
         } else {
-            "📦 Manage Skill Repos"
+            "Manage Skill Repos"
         }
     }
 
@@ -8626,25 +8583,25 @@ pub mod texts {
 
     pub fn skills_repo_list() -> &'static str {
         if is_chinese() {
-            "📋 查看仓库列表"
+            "查看仓库列表"
         } else {
-            "📋 List Repos"
+            "List Repos"
         }
     }
 
     pub fn skills_repo_add() -> &'static str {
         if is_chinese() {
-            "➕ 添加仓库"
+            "添加仓库"
         } else {
-            "➕ Add Repo"
+            "Add Repo"
         }
     }
 
     pub fn skills_repo_remove() -> &'static str {
         if is_chinese() {
-            "➖ 移除仓库"
+            "移除仓库"
         } else {
-            "➖ Remove Repo"
+            "Remove Repo"
         }
     }
 
@@ -8662,9 +8619,9 @@ pub mod texts {
 
     pub fn provider_management() -> &'static str {
         if is_chinese() {
-            "🔌 供应商管理"
+            "供应商管理"
         } else {
-            "🔌 Provider Management"
+            "Provider Management"
         }
     }
 
@@ -8678,25 +8635,25 @@ pub mod texts {
 
     pub fn view_current_provider() -> &'static str {
         if is_chinese() {
-            "📋 查看当前供应商详情"
+            "查看当前供应商详情"
         } else {
-            "📋 View Current Provider Details"
+            "View Current Provider Details"
         }
     }
 
     pub fn switch_provider() -> &'static str {
         if is_chinese() {
-            "🔄 切换供应商"
+            "切换供应商"
         } else {
-            "🔄 Switch Provider"
+            "Switch Provider"
         }
     }
 
     pub fn add_provider() -> &'static str {
         if is_chinese() {
-            "➕ 新增供应商"
+            "新增供应商"
         } else {
-            "➕ Add Provider"
+            "Add Provider"
         }
     }
 
@@ -8726,17 +8683,17 @@ pub mod texts {
 
     pub fn delete_provider() -> &'static str {
         if is_chinese() {
-            "🗑️  删除供应商"
+            "删除供应商"
         } else {
-            "🗑️  Delete Provider"
+            "Delete Provider"
         }
     }
 
     pub fn back_to_main() -> &'static str {
         if is_chinese() {
-            "⬅️  返回主菜单"
+            "⬅ 返回主菜单"
         } else {
-            "⬅️  Back to Main Menu"
+            "⬅ Back to Main Menu"
         }
     }
 
@@ -8798,17 +8755,17 @@ pub mod texts {
 
     pub fn switched_to_provider(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已切换到供应商 '{}'", id)
+            format!("OK 已切换到供应商 '{}'", id)
         } else {
-            format!("✓ Switched to provider '{}'", id)
+            format!("OK Switched to provider '{}'", id)
         }
     }
 
     pub fn provider_added_to_app_config(id: &str, app: &str) -> String {
         if is_chinese() {
-            format!("✓ 已将供应商 '{}' 添加到 {} 配置", id, app)
+            format!("OK 已将供应商 '{}' 添加到 {} 配置", id, app)
         } else {
-            format!("✓ Added provider '{}' to {} config", id, app)
+            format!("OK Added provider '{}' to {} config", id, app)
         }
     }
 
@@ -8822,9 +8779,9 @@ pub mod texts {
 
     pub fn live_sync_skipped_uninitialized_warning(app: &str) -> String {
         if is_chinese() {
-            format!("⚠ 未检测到 {app} 客户端本地配置，已跳过写入 live 文件；先运行一次 {app} 初始化后再试。")
+            format!("WARN 未检测到 {app} 客户端本地配置，已跳过写入 live 文件；先运行一次 {app} 初始化后再试。")
         } else {
-            format!("⚠ Live sync skipped: {app} client not initialized; run it once to initialize, then retry.")
+            format!("WARN Live sync skipped: {app} client not initialized; run it once to initialize, then retry.")
         }
     }
 
@@ -8950,9 +8907,9 @@ pub mod texts {
 
     pub fn deleted_provider(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已删除供应商 '{}'", id)
+            format!("OK 已删除供应商 '{}'", id)
         } else {
-            format!("✓ Deleted provider '{}'", id)
+            format!("OK Deleted provider '{}'", id)
         }
     }
 
@@ -9084,9 +9041,9 @@ pub mod texts {
 
     pub fn current_provider_synced_warning() -> &'static str {
         if is_chinese() {
-            "⚠ 此供应商当前已激活，修改已同步到 live 配置"
+            "WARN 此供应商当前已激活，修改已同步到 live 配置"
         } else {
-            "⚠ This provider is currently active, changes synced to live config"
+            "WARN This provider is currently active, changes synced to live config"
         }
     }
 
@@ -9304,9 +9261,9 @@ pub mod texts {
     // Codex 0.64+ Configuration
     pub fn codex_auth_mode_info() -> &'static str {
         if is_chinese() {
-            "⚠ 请选择 Codex 的鉴权方式（决定 API Key 从哪里读取）"
+            "WARN 请选择 Codex 的鉴权方式（决定 API Key 从哪里读取）"
         } else {
-            "⚠ Choose how Codex authenticates (where the API key is read from)"
+            "WARN Choose how Codex authenticates (where the API key is read from)"
         }
     }
 
@@ -9352,9 +9309,9 @@ pub mod texts {
 
     pub fn codex_env_key_info() -> &'static str {
         if is_chinese() {
-            "⚠ 环境变量模式：Codex 将从指定的环境变量读取 API Key"
+            "WARN 环境变量模式：Codex 将从指定的环境变量读取 API Key"
         } else {
-            "⚠ Env var mode: Codex will read the API key from the specified environment variable"
+            "WARN Env var mode: Codex will read the API key from the specified environment variable"
         }
     }
 
@@ -9393,12 +9350,12 @@ pub mod texts {
     pub fn codex_env_reminder(env_key: &str) -> String {
         if is_chinese() {
             format!(
-                "⚠ 请确保已设置环境变量 {} 并包含您的 API 密钥\n  例如: export {}=\"your-api-key\"",
+                "WARN 请确保已设置环境变量 {} 并包含您的 API 密钥\n 例如: export {}=\"your-api-key\"",
                 env_key, env_key
             )
         } else {
             format!(
-                "⚠ Make sure to set the {} environment variable with your API key\n  Example: export {}=\"your-api-key\"",
+                "WARN Make sure to set the {} environment variable with your API key\n Example: export {}=\"your-api-key\"",
                 env_key, env_key
             )
         }
@@ -9406,27 +9363,27 @@ pub mod texts {
 
     pub fn codex_openai_auth_info() -> &'static str {
         if is_chinese() {
-            "✓ OpenAI 认证模式：Codex 将使用 auth.json/系统凭据存储，无需设置 OPENAI_API_KEY 环境变量"
+            "OK OpenAI 认证模式：Codex 将使用 auth.json/系统凭据存储，无需设置 OPENAI_API_KEY 环境变量"
         } else {
-            "✓ OpenAI auth mode: Codex will use auth.json/credential store; no OPENAI_API_KEY env var required"
+            "OK OpenAI auth mode: Codex will use auth.json/credential store; no OPENAI_API_KEY env var required"
         }
     }
 
     pub fn codex_dual_write_info(env_key: &str, _api_key: &str) -> String {
         if is_chinese() {
             format!(
-                "✓ 双写模式已启用（兼容所有 Codex 版本）\n\
-                  • 旧版本 Codex: 将使用 auth.json 中的 API Key\n\
-                  • Codex 0.64+: 可使用环境变量 {} (更安全)\n\
-                    例如: export {}=\"your-api-key\"",
+                "OK 双写模式已启用（兼容所有 Codex 版本）\n\
+ • 旧版本 Codex: 将使用 auth.json 中的 API Key\n\
+ • Codex 0.64+: 可使用环境变量 {} (更安全)\n\
+ 例如: export {}=\"your-api-key\"",
                 env_key, env_key
             )
         } else {
             format!(
-                "✓ Dual-write mode enabled (compatible with all Codex versions)\n\
-                  • Legacy Codex: Will use API Key from auth.json\n\
-                  • Codex 0.64+: Can use env variable {} (more secure)\n\
-                    Example: export {}=\"your-api-key\"",
+                "OK Dual-write mode enabled (compatible with all Codex versions)\n\
+ • Legacy Codex: Will use API Key from auth.json\n\
+ • Codex 0.64+: Can use env variable {} (more secure)\n\
+ Example: export {}=\"your-api-key\"",
                 env_key, env_key
             )
         }
@@ -10042,9 +9999,9 @@ pub mod texts {
     // Interactive Provider - Menu Options
     pub fn edit_provider_menu() -> &'static str {
         if is_chinese() {
-            "➕ 编辑供应商"
+            "编辑供应商"
         } else {
-            "➕ Edit Provider"
+            "Edit Provider"
         }
     }
 
@@ -10098,25 +10055,25 @@ pub mod texts {
 
     pub fn edit_mode_interactive() -> &'static str {
         if is_chinese() {
-            "📝 交互式编辑 (分步提示)"
+            "交互式编辑 (分步提示)"
         } else {
-            "📝 Interactive editing (step-by-step prompts)"
+            "Interactive editing (step-by-step prompts)"
         }
     }
 
     pub fn edit_mode_json_editor() -> &'static str {
         if is_chinese() {
-            "✏️  JSON 编辑 (使用外部编辑器)"
+            "JSON 编辑 (使用外部编辑器)"
         } else {
-            "✏️  JSON editing (use external editor)"
+            "JSON editing (use external editor)"
         }
     }
 
     pub fn cancel() -> &'static str {
         if is_chinese() {
-            "❌ 取消"
+            "取消"
         } else {
-            "❌ Cancel"
+            "Cancel"
         }
     }
 
@@ -10288,9 +10245,9 @@ pub mod texts {
 
     pub fn mcp_management() -> &'static str {
         if is_chinese() {
-            "🛠️  MCP 服务器管理"
+            "MCP 服务器管理"
         } else {
-            "🛠️  MCP Server Management"
+            "MCP Server Management"
         }
     }
 
@@ -10304,17 +10261,17 @@ pub mod texts {
 
     pub fn sync_all_servers() -> &'static str {
         if is_chinese() {
-            "🔄 同步所有服务器"
+            "同步所有服务器"
         } else {
-            "🔄 Sync All Servers"
+            "Sync All Servers"
         }
     }
 
     pub fn synced_successfully() -> &'static str {
         if is_chinese() {
-            "✓ 所有 MCP 服务器同步成功"
+            "OK 所有 MCP 服务器同步成功"
         } else {
-            "✓ All MCP servers synced successfully"
+            "OK All MCP servers synced successfully"
         }
     }
 
@@ -10324,9 +10281,9 @@ pub mod texts {
 
     pub fn prompts_management() -> &'static str {
         if is_chinese() {
-            "💬 提示词管理"
+            "提示词管理"
         } else {
-            "💬 Prompt Management"
+            "Prompt Management"
         }
     }
 
@@ -10340,9 +10297,9 @@ pub mod texts {
 
     pub fn switch_active_prompt() -> &'static str {
         if is_chinese() {
-            "🔄 切换活动提示词"
+            "切换活动提示词"
         } else {
-            "🔄 Switch Active Prompt"
+            "Switch Active Prompt"
         }
     }
 
@@ -10364,17 +10321,17 @@ pub mod texts {
 
     pub fn activated_prompt(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已激活提示词 '{}'", id)
+            format!("OK 已激活提示词 '{}'", id)
         } else {
-            format!("✓ Activated prompt '{}'", id)
+            format!("OK Activated prompt '{}'", id)
         }
     }
 
     pub fn deactivated_prompt(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已取消激活提示词 '{}'", id)
+            format!("OK 已取消激活提示词 '{}'", id)
         } else {
-            format!("✓ Deactivated prompt '{}'", id)
+            format!("OK Deactivated prompt '{}'", id)
         }
     }
 
@@ -10397,9 +10354,9 @@ pub mod texts {
     // Configuration View
     pub fn current_configuration() -> &'static str {
         if is_chinese() {
-            "👁️  当前配置"
+            "当前配置"
         } else {
-            "👁️  Current Configuration"
+            "Current Configuration"
         }
     }
 
@@ -10482,17 +10439,17 @@ pub mod texts {
     // Settings
     pub fn settings_title() -> &'static str {
         if is_chinese() {
-            "⚙️  设置"
+            "设置"
         } else {
-            "⚙️  Settings"
+            "Settings"
         }
     }
 
     pub fn change_language() -> &'static str {
         if is_chinese() {
-            "🌐 切换语言"
+            "切换语言"
         } else {
-            "🌐 Change Language"
+            "Change Language"
         }
     }
 
@@ -10523,9 +10480,9 @@ pub mod texts {
 
     pub fn skip_claude_onboarding() -> &'static str {
         if is_chinese() {
-            "🚫 跳过 Claude Code 初次安装确认"
+            "跳过 Claude Code 初次安装确认"
         } else {
-            "🚫 Skip Claude Code onboarding confirmation"
+            "Skip Claude Code onboarding confirmation"
         }
     }
 
@@ -10562,22 +10519,22 @@ pub mod texts {
     pub fn skip_claude_onboarding_changed(enable: bool) -> String {
         if is_chinese() {
             if enable {
-                "✓ 已启用：跳过 Claude Code 初次安装确认".to_string()
+                "OK 已启用：跳过 Claude Code 初次安装确认".to_string()
             } else {
-                "✓ 已恢复 Claude Code 初次安装确认".to_string()
+                "OK 已恢复 Claude Code 初次安装确认".to_string()
             }
         } else if enable {
-            "✓ Skip Claude Code onboarding confirmation enabled".to_string()
+            "OK Skip Claude Code onboarding confirmation enabled".to_string()
         } else {
-            "✓ Claude Code onboarding confirmation restored".to_string()
+            "OK Claude Code onboarding confirmation restored".to_string()
         }
     }
 
     pub fn enable_claude_plugin_integration() -> &'static str {
         if is_chinese() {
-            "🔌 接管 Claude Code for VSCode 插件"
+            "接管 Claude Code for VSCode 插件"
         } else {
-            "🔌 Apply to Claude Code for VSCode"
+            "Apply to Claude Code for VSCode"
         }
     }
 
@@ -10600,7 +10557,7 @@ pub mod texts {
             }
         } else if enable {
             format!(
-                "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\" to {path}"
+                "Enable Claude Code for VSCode integration?\nWrites primaryApiKey=\"any\"to {path}"
             )
         } else {
             format!(
@@ -10612,22 +10569,22 @@ pub mod texts {
     pub fn enable_claude_plugin_integration_changed(enable: bool) -> String {
         if is_chinese() {
             if enable {
-                "✓ 已启用 Claude Code for VSCode 插件联动".to_string()
+                "OK 已启用 Claude Code for VSCode 插件联动".to_string()
             } else {
-                "✓ 已关闭 Claude Code for VSCode 插件联动".to_string()
+                "OK 已关闭 Claude Code for VSCode 插件联动".to_string()
             }
         } else if enable {
-            "✓ Claude Code for VSCode integration enabled".to_string()
+            "OK Claude Code for VSCode integration enabled".to_string()
         } else {
-            "✓ Claude Code for VSCode integration disabled".to_string()
+            "OK Claude Code for VSCode integration disabled".to_string()
         }
     }
 
     pub fn claude_plugin_sync_failed_warning(err: &str) -> String {
         if is_chinese() {
-            format!("⚠ Claude Code for VSCode 插件联动失败: {err}")
+            format!("WARN Claude Code for VSCode 插件联动失败: {err}")
         } else {
-            format!("⚠ Claude Code for VSCode integration failed: {err}")
+            format!("WARN Claude Code for VSCode integration failed: {err}")
         }
     }
 
@@ -10664,9 +10621,9 @@ pub mod texts {
 
     pub fn switched_to_app(app: &str) -> String {
         if is_chinese() {
-            format!("✓ 已切换到 {}", app)
+            format!("OK 已切换到 {}", app)
         } else {
-            format!("✓ Switched to {}", app)
+            format!("OK Switched to {}", app)
         }
     }
 
@@ -10715,57 +10672,57 @@ pub mod texts {
     // Config Management
     pub fn config_management() -> &'static str {
         if is_chinese() {
-            "⚙️  配置文件管理"
+            "配置文件管理"
         } else {
-            "⚙️  Configuration Management"
+            "Configuration Management"
         }
     }
 
     pub fn config_export() -> &'static str {
         if is_chinese() {
-            "📤 导出配置"
+            "导出配置"
         } else {
-            "📤 Export Config"
+            "Export Config"
         }
     }
 
     pub fn config_import() -> &'static str {
         if is_chinese() {
-            "📥 导入配置"
+            "导入配置"
         } else {
-            "📥 Import Config"
+            "Import Config"
         }
     }
 
     pub fn config_backup() -> &'static str {
         if is_chinese() {
-            "💾 备份配置"
+            "备份配置"
         } else {
-            "💾 Backup Config"
+            "Backup Config"
         }
     }
 
     pub fn config_restore() -> &'static str {
         if is_chinese() {
-            "♻️  恢复配置"
+            "恢复配置"
         } else {
-            "♻️  Restore Config"
+            "Restore Config"
         }
     }
 
     pub fn config_validate() -> &'static str {
         if is_chinese() {
-            "✓ 验证配置"
+            "OK 验证配置"
         } else {
-            "✓ Validate Config"
+            "OK Validate Config"
         }
     }
 
     pub fn config_common_snippet() -> &'static str {
         if is_chinese() {
-            "🧩 通用配置片段"
+            "通用配置片段"
         } else {
-            "🧩 Common Config Snippet"
+            "Common Config Snippet"
         }
     }
 
@@ -10787,9 +10744,9 @@ pub mod texts {
 
     pub fn config_common_snippet_set_for_app(app: &str) -> String {
         if is_chinese() {
-            format!("✓ 已为应用 '{}' 设置通用配置片段", app)
+            format!("OK 已为应用 '{}' 设置通用配置片段", app)
         } else {
-            format!("✓ Common config snippet set for app '{}'", app)
+            format!("OK Common config snippet set for app '{}'", app)
         }
     }
 
@@ -10803,25 +10760,25 @@ pub mod texts {
 
     pub fn config_reset() -> &'static str {
         if is_chinese() {
-            "🔄 重置配置"
+            "重置配置"
         } else {
-            "🔄 Reset Config"
+            "Reset Config"
         }
     }
 
     pub fn config_show_full() -> &'static str {
         if is_chinese() {
-            "👁️  查看完整配置"
+            "查看完整配置"
         } else {
-            "👁️  Show Full Config"
+            "Show Full Config"
         }
     }
 
     pub fn config_show_path() -> &'static str {
         if is_chinese() {
-            "📍 显示配置路径"
+            "显示配置路径"
         } else {
-            "📍 Show Config Path"
+            "Show Config Path"
         }
     }
 
@@ -10956,9 +10913,9 @@ pub mod texts {
 
     pub fn common_config_snippet_applied() -> &'static str {
         if is_chinese() {
-            "✓ 已在适用时刷新 live 配置（请重启对应客户端）"
+            "OK 已在适用时刷新 live 配置（请重启对应客户端）"
         } else {
-            "✓ Refreshed live config when applicable (restart the client)"
+            "OK Refreshed live config when applicable (restart the client)"
         }
     }
 
@@ -11006,14 +10963,14 @@ pub mod texts {
         if is_chinese() {
             format!(
                 "通用配置适合保存多个 {app} 供应商共享的插件、环境变量和工具配置。\
-                 \n\n有可用片段时，新建供应商会默认勾选“添加通用配置”。\
-                 \n\n如果在当前表单里新增了插件、hooks 或环境变量，可以在“通用配置”编辑器里按 F4 从当前编辑内容提取，再按 Ctrl+S 保存片段。"
+ \n\n有可用片段时，新建供应商会默认勾选“添加通用配置”。\
+ \n\n如果在当前表单里新增了插件、hooks 或环境变量，可以在“通用配置”编辑器里按 F4 从当前编辑内容提取，再按 Ctrl+S 保存片段。"
             )
         } else {
             format!(
                 "Common Config is for plugin, environment, and tool settings shared by multiple {app} providers.\
-                 \n\nWhen a usable snippet exists, new providers will default to attaching it.\
-                 \n\nAfter adding plugins, hooks, or environment variables in this form, open Common Config, press F4 to extract from the current edits, then press Ctrl+S to save the snippet."
+ \n\nWhen a usable snippet exists, new providers will default to attaching it.\
+ \n\nAfter adding plugins, hooks, or environment variables in this form, open Common Config, press F4 to extract from the current edits, then press Ctrl+S to save the snippet."
             )
         }
     }
@@ -11036,49 +10993,49 @@ pub mod texts {
 
     pub fn exported_to(path: &str) -> String {
         if is_chinese() {
-            format!("✓ 已导出到 '{}'", path)
+            format!("OK 已导出到 '{}'", path)
         } else {
-            format!("✓ Exported to '{}'", path)
+            format!("OK Exported to '{}'", path)
         }
     }
 
     pub fn imported_from(path: &str) -> String {
         if is_chinese() {
-            format!("✓ 已从 '{}' 导入", path)
+            format!("OK 已从 '{}' 导入", path)
         } else {
-            format!("✓ Imported from '{}'", path)
+            format!("OK Imported from '{}'", path)
         }
     }
 
     pub fn backup_created(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已创建备份，ID: {}", id)
+            format!("OK 已创建备份，ID: {}", id)
         } else {
-            format!("✓ Backup created, ID: {}", id)
+            format!("OK Backup created, ID: {}", id)
         }
     }
 
     pub fn restored_from(path: &str) -> String {
         if is_chinese() {
-            format!("✓ 已从 '{}' 恢复", path)
+            format!("OK 已从 '{}' 恢复", path)
         } else {
-            format!("✓ Restored from '{}'", path)
+            format!("OK Restored from '{}'", path)
         }
     }
 
     pub fn config_valid() -> &'static str {
         if is_chinese() {
-            "✓ 配置文件有效"
+            "OK 配置文件有效"
         } else {
-            "✓ Configuration is valid"
+            "OK Configuration is valid"
         }
     }
 
     pub fn config_reset_done() -> &'static str {
         if is_chinese() {
-            "✓ 配置已重置为默认值"
+            "OK 配置已重置为默认值"
         } else {
-            "✓ Configuration reset to defaults"
+            "OK Configuration reset to defaults"
         }
     }
 
@@ -11093,41 +11050,41 @@ pub mod texts {
     // MCP Management Additional
     pub fn mcp_delete_server() -> &'static str {
         if is_chinese() {
-            "🗑️  删除服务器"
+            "删除服务器"
         } else {
-            "🗑️  Delete Server"
+            "Delete Server"
         }
     }
 
     pub fn mcp_enable_server() -> &'static str {
         if is_chinese() {
-            "✅ 启用服务器"
+            "启用服务器"
         } else {
-            "✅ Enable Server"
+            "Enable Server"
         }
     }
 
     pub fn mcp_disable_server() -> &'static str {
         if is_chinese() {
-            "❌ 禁用服务器"
+            "禁用服务器"
         } else {
-            "❌ Disable Server"
+            "Disable Server"
         }
     }
 
     pub fn mcp_import_servers() -> &'static str {
         if is_chinese() {
-            "📥 导入已有 MCP 服务器"
+            "导入已有 MCP 服务器"
         } else {
-            "📥 Import Existing MCP Servers"
+            "Import Existing MCP Servers"
         }
     }
 
     pub fn mcp_validate_command() -> &'static str {
         if is_chinese() {
-            "✓ 验证命令"
+            "OK 验证命令"
         } else {
-            "✓ Validate Command"
+            "OK Validate Command"
         }
     }
 
@@ -11181,74 +11138,74 @@ pub mod texts {
 
     pub fn server_deleted(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已删除服务器 '{}'", id)
+            format!("OK 已删除服务器 '{}'", id)
         } else {
-            format!("✓ Deleted server '{}'", id)
+            format!("OK Deleted server '{}'", id)
         }
     }
 
     pub fn server_enabled(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已启用服务器 '{}'", id)
+            format!("OK 已启用服务器 '{}'", id)
         } else {
-            format!("✓ Enabled server '{}'", id)
+            format!("OK Enabled server '{}'", id)
         }
     }
 
     pub fn server_disabled(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已禁用服务器 '{}'", id)
+            format!("OK 已禁用服务器 '{}'", id)
         } else {
-            format!("✓ Disabled server '{}'", id)
+            format!("OK Disabled server '{}'", id)
         }
     }
 
     pub fn servers_imported(count: usize) -> String {
         if is_chinese() {
-            format!("✓ 已导入 {count} 个 MCP 服务器")
+            format!("OK 已导入 {count} 个 MCP 服务器")
         } else {
-            format!("✓ Imported {count} MCP server(s)")
+            format!("OK Imported {count} MCP server(s)")
         }
     }
 
     pub fn command_valid(cmd: &str) -> String {
         if is_chinese() {
-            format!("✓ 命令 '{}' 有效", cmd)
+            format!("OK 命令 '{}' 有效", cmd)
         } else {
-            format!("✓ Command '{}' is valid", cmd)
+            format!("OK Command '{}' is valid", cmd)
         }
     }
 
     pub fn command_invalid(cmd: &str) -> String {
         if is_chinese() {
-            format!("✗ 命令 '{}' 未找到", cmd)
+            format!("FAIL 命令 '{}' 未找到", cmd)
         } else {
-            format!("✗ Command '{}' not found", cmd)
+            format!("FAIL Command '{}' not found", cmd)
         }
     }
 
     // Prompts Management Additional
     pub fn prompts_show_content() -> &'static str {
         if is_chinese() {
-            "👁️  查看完整内容"
+            "查看完整内容"
         } else {
-            "👁️  View Full Content"
+            "View Full Content"
         }
     }
 
     pub fn prompts_delete() -> &'static str {
         if is_chinese() {
-            "🗑️  删除提示词"
+            "删除提示词"
         } else {
-            "🗑️  Delete Prompt"
+            "Delete Prompt"
         }
     }
 
     pub fn prompts_view_current() -> &'static str {
         if is_chinese() {
-            "📋 查看当前提示词"
+            "查看当前提示词"
         } else {
-            "📋 View Current Prompt"
+            "View Current Prompt"
         }
     }
 
@@ -11270,9 +11227,9 @@ pub mod texts {
 
     pub fn prompt_deleted(id: &str) -> String {
         if is_chinese() {
-            format!("✓ 已删除提示词 '{}'", id)
+            format!("OK 已删除提示词 '{}'", id)
         } else {
-            format!("✓ Deleted prompt '{}'", id)
+            format!("OK Deleted prompt '{}'", id)
         }
     }
 
@@ -11311,9 +11268,9 @@ pub mod texts {
     // Provider Speedtest
     pub fn speedtest_endpoint() -> &'static str {
         if is_chinese() {
-            "🚀 测试端点速度"
+            "测试端点速度"
         } else {
-            "🚀 Speedtest endpoint"
+            "Speedtest endpoint"
         }
     }
 
@@ -11371,9 +11328,9 @@ pub mod texts {
 
     pub fn tui_update_version_info(current: &str, new: &str) -> String {
         if is_chinese() {
-            format!("当前: v{current}  →  最新: {new}")
+            format!("当前: v{current} → 最新: {new}")
         } else {
-            format!("Current: v{current}  →  Latest: {new}")
+            format!("Current: v{current} → Latest: {new}")
         }
     }
 
@@ -11403,9 +11360,9 @@ pub mod texts {
 
     pub fn tui_update_downloading_progress(pct: u64, downloaded_kb: u64, total_kb: u64) -> String {
         if is_chinese() {
-            format!("{pct}%  ({downloaded_kb} / {total_kb} KB)")
+            format!("{pct}% ({downloaded_kb} / {total_kb} KB)")
         } else {
-            format!("{pct}%  ({downloaded_kb} / {total_kb} KB)")
+            format!("{pct}% ({downloaded_kb} / {total_kb} KB)")
         }
     }
 
@@ -11545,17 +11502,17 @@ pub mod texts {
 
     pub fn config_permissions_insecure_header() -> &'static str {
         if is_chinese() {
-            "⚠ 检测到以下文件/目录权限不安全："
+            "WARN 检测到以下文件/目录权限不安全："
         } else {
-            "⚠ Insecure file/directory permissions detected:"
+            "WARN Insecure file/directory permissions detected:"
         }
     }
 
     pub fn config_permissions_detail(path: &str, current: u32, expected: u32) -> String {
         if is_chinese() {
-            format!("  {path}  当前 {current:04o}，期望 {expected:04o}")
+            format!("{path} 当前 {current:04o}，期望 {expected:04o}")
         } else {
-            format!("  {path}  current {current:04o}, expected {expected:04o}")
+            format!("{path} current {current:04o}, expected {expected:04o}")
         }
     }
 
@@ -11569,25 +11526,25 @@ pub mod texts {
 
     pub fn config_permissions_fixed() -> &'static str {
         if is_chinese() {
-            "✓ 权限已修复"
+            "OK 权限已修复"
         } else {
-            "✓ Permissions fixed"
+            "OK Permissions fixed"
         }
     }
 
     pub fn config_permissions_fix_warn_interactive() -> &'static str {
         if is_chinese() {
-            "⚠ 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
+            "WARN 未来版本将拒绝在权限不安全的情况下启动，请尽快修复。"
         } else {
-            "⚠ Future versions will refuse to start with insecure permissions. Please fix soon."
+            "WARN Future versions will refuse to start with insecure permissions. Please fix soon."
         }
     }
 
     pub fn config_permissions_fix_warn_noninteractive() -> &'static str {
         if is_chinese() {
-            "⚠ 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
+            "WARN 检测到配置文件权限不安全（非交互模式），跳过修复。未来版本将拒绝启动。"
         } else {
-            "⚠ Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
+            "WARN Insecure config permissions detected (non-interactive). Skipped. Future versions will refuse to start."
         }
     }
 
@@ -11636,14 +11593,14 @@ mod tests {
 
         assert_eq!(
             texts::provider_duplicated_success("source", "source-copy"),
-            "✓ 已复制供应商 'source' 为 'source-copy'"
+            "OK 已复制供应商 'source' 为 'source-copy'"
         );
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");
         assert_eq!(texts::tui_label_mcp_servers_active(), "已启用");
         assert_eq!(texts::skills_management(), "技能管理");
-        assert_eq!(texts::menu_manage_mcp(), "🔌 MCP 服务器");
+        assert_eq!(texts::menu_manage_mcp(), "MCP 服务器");
 
         // The per-page bullets for MCP/Prompts/Sessions/Skills/Usage are now
         // generated from the keymap registry (covered in cli::tui::help

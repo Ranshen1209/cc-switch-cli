@@ -14,61 +14,61 @@ const DEFAULT_USAGE_AUTO_QUERY_INTERVAL: u64 = 5;
 const MAX_USAGE_AUTO_QUERY_INTERVAL: u64 = 1440;
 const CODEX_OAUTH_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_USAGE_GENERAL_PRESET: &str = r#"({
-  request: {
-    url: "{{baseUrl}}/user/balance",
-    method: "GET",
-    headers: {
-      "Authorization": "Bearer {{apiKey}}",
-      "User-Agent": "cc-switch/1.0"
-    }
-  },
-  extractor: function(response) {
-    return {
-      isValid: response.is_active || true,
-      remaining: response.balance,
-      unit: "USD"
-    };
-  }
+ request: {
+ url: "{{baseUrl}}/user/balance",
+ method: "GET",
+ headers: {
+ "Authorization": "Bearer {{apiKey}}",
+ "User-Agent": "cc-switch/1.0"
+ }
+ },
+ extractor: function(response) {
+ return {
+ isValid: response.is_active || true,
+ remaining: response.balance,
+ unit: "USD"
+ };
+ }
 })"#;
 const DEFAULT_USAGE_CUSTOM_PRESET: &str = r#"({
-  request: {
-    url: "",
-    method: "GET",
-    headers: {}
-  },
-  extractor: function(response) {
-    return {
-      remaining: 0,
-      unit: "USD"
-    };
-  }
+ request: {
+ url: "",
+ method: "GET",
+ headers: {}
+ },
+ extractor: function(response) {
+ return {
+ remaining: 0,
+ unit: "USD"
+ };
+ }
 })"#;
 const DEFAULT_USAGE_NEWAPI_PRESET: &str = r#"({
-  request: {
-    url: "{{baseUrl}}/api/user/self",
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer {{accessToken}}",
-      "User-Agent": "cc-switch/1.0",
-      "New-Api-User": "{{userId}}"
-    },
-  },
-  extractor: function (response) {
-    if (response.success && response.data) {
-      return {
-        planName: response.data.group || "Default Plan",
-        remaining: response.data.quota / 500000,
-        used: response.data.used_quota / 500000,
-        total: (response.data.quota + response.data.used_quota) / 500000,
-        unit: "USD",
-      };
-    }
-    return {
-      isValid: false,
-      invalidMessage: response.message || "Query failed"
-    };
-  },
+ request: {
+ url: "{{baseUrl}}/api/user/self",
+ method: "GET",
+ headers: {
+ "Content-Type": "application/json",
+ "Authorization": "Bearer {{accessToken}}",
+ "User-Agent": "cc-switch/1.0",
+ "New-Api-User": "{{userId}}"
+ },
+ },
+ extractor: function (response) {
+ if (response.success && response.data) {
+ return {
+ planName: response.data.group || "Default Plan",
+ remaining: response.data.quota / 500000,
+ used: response.data.used_quota / 500000,
+ total: (response.data.quota + response.data.used_quota) / 500000,
+ unit: "USD",
+ };
+ }
+ return {
+ isValid: false,
+ invalidMessage: response.message || "Query failed"
+ };
+ },
 })"#;
 
 #[derive(Subcommand)]
@@ -186,16 +186,16 @@ fn show(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
     };
 
     println!("Usage Query");
-    println!("  Provider: {id}");
-    println!("  Enabled: {}", script.enabled);
-    println!("  Language: {}", script.language);
-    println!("  Template: {}", effective_template_type(script, &provider));
+    println!("Provider: {id}");
+    println!("Enabled: {}", script.enabled);
+    println!("Language: {}", script.language);
+    println!("Template: {}", effective_template_type(script, &provider));
     println!(
-        "  Timeout: {}",
+        "Timeout: {}",
         script.timeout.unwrap_or(DEFAULT_USAGE_TIMEOUT)
     );
     println!(
-        "  Auto Query Interval: {}",
+        "Auto Query Interval: {}",
         script
             .auto_query_interval
             .unwrap_or(DEFAULT_USAGE_AUTO_QUERY_INTERVAL)
@@ -209,7 +209,7 @@ fn show(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
         script.coding_plan_provider.as_deref(),
     );
     println!(
-        "  Code: {}",
+        "Code: {}",
         if script.code.is_empty() {
             "<empty>"
         } else {
@@ -278,7 +278,7 @@ fn set(app_type: AppType, command: ProviderUsageQuerySetCommand) -> Result<(), A
         .usage_script = Some(script);
     ProviderService::update(&state, app_type, provider)?;
 
-    println!("{}", success("✓ Usage Query configuration updated"));
+    println!("{}", success("OK Usage Query configuration updated"));
     Ok(())
 }
 
@@ -290,7 +290,7 @@ fn clear(app_type: AppType, id: &str) -> Result<(), AppError> {
     }
     ProviderService::update(&state, app_type, provider)?;
 
-    println!("{}", success("✓ Usage Query configuration cleared"));
+    println!("{}", success("OK Usage Query configuration cleared"));
     Ok(())
 }
 
@@ -421,7 +421,7 @@ fn usage_query_custom_variable_comment(app_type: &AppType, provider: &Provider) 
 }
 
 fn usage_query_comment_value(value: &str) -> String {
-    value.trim().replace(['\r', '\n'], " ").trim().to_string()
+    value.trim().replace(['\r', '\n'], "").trim().to_string()
 }
 
 fn apply_template_code(
@@ -516,7 +516,7 @@ fn set_trimmed_option(target: &mut Option<String>, value: Option<&str>) {
 fn print_optional(label: &str, value: Option<&str>) {
     if let Some(value) = value {
         if !value.is_empty() {
-            println!("  {label}: {value}");
+            println!("{label}: {value}");
         }
     }
 }
@@ -524,7 +524,7 @@ fn print_optional(label: &str, value: Option<&str>) {
 fn print_optional_masked(label: &str, value: Option<&str>) {
     if let Some(value) = value {
         if !value.is_empty() {
-            println!("  {label}: {}", mask_secret(value));
+            println!("{label}: {}", mask_secret(value));
         }
     }
 }
@@ -835,7 +835,7 @@ mod tests {
 
         assert!(validate_usage_script_for_save(&script).is_ok());
 
-        script.code = "   ".to_string();
+        script.code = "".to_string();
         assert!(validate_usage_script_for_save(&script).is_err());
 
         script.code = "({ request: { url: 'https://usage.example.com' } })".to_string();
@@ -914,8 +914,8 @@ mod tests {
             "Demo".to_string(),
             serde_json::json!({
                 "env": {
-                    "ANTHROPIC_AUTH_TOKEN": " sk-demo\nsecret ",
-                    "ANTHROPIC_BASE_URL": " https://usage.example.com/v1 "
+                    "ANTHROPIC_AUTH_TOKEN": "sk-demo\nsecret ",
+                    "ANTHROPIC_BASE_URL": "https://usage.example.com/v1 "
                 }
             }),
             None,
@@ -1135,7 +1135,7 @@ mod tests {
             ..default_usage_script()
         };
         let mut command = set_command(Some(UsageQueryTemplate::General));
-        command.api_key = Some("   ".to_string());
+        command.api_key = Some("".to_string());
         command.base_url = None;
 
         apply_template_credentials(&mut script, "general", &command);

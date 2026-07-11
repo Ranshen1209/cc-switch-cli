@@ -136,7 +136,7 @@ impl AppState {
                     log::debug!("○ Codex history provider bucket migration skipped: {reason}");
                 } else {
                     log::info!(
-                        "✓ Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
+                        "OK Codex history provider bucket migration completed: sources={}, jsonl_files={}, state_rows={}",
                         outcome.source_provider_ids.len(),
                         outcome.migrated_jsonl_files,
                         outcome.migrated_state_rows
@@ -144,7 +144,7 @@ impl AppState {
                 }
             }
             Err(error) => {
-                log::warn!("✗ Codex history provider bucket migration failed: {error}");
+                log::warn!("FAIL Codex history provider bucket migration failed: {error}");
             }
         }
 
@@ -155,13 +155,13 @@ impl AppState {
                     log::debug!("○ Codex provider template bucket migration skipped: {reason}");
                 } else if !outcome.migrated_provider_ids.is_empty() {
                     log::info!(
-                        "✓ Codex provider template bucket migration completed: providers={}",
+                        "OK Codex provider template bucket migration completed: providers={}",
                         outcome.migrated_provider_ids.len()
                     );
                 }
             }
             Err(error) => {
-                log::warn!("✗ Codex provider template bucket migration failed: {error}");
+                log::warn!("FAIL Codex provider template bucket migration failed: {error}");
             }
         }
 
@@ -172,53 +172,55 @@ impl AppState {
                     log::debug!("○ Codex official history unify migration skipped: {reason}");
                 } else {
                     log::info!(
-                        "✓ Codex official history unify migration completed: jsonl_files={}, state_rows={}",
+                        "OK Codex official history unify migration completed: jsonl_files={}, state_rows={}",
                         outcome.migrated_jsonl_files,
                         outcome.migrated_state_rows
                     );
                 }
             }
             Err(error) => {
-                log::warn!("✗ Codex official history unify migration failed: {error}");
+                log::warn!("FAIL Codex official history unify migration failed: {error}");
             }
         }
 
         if let Err(error) = self.refresh_config_from_db() {
-            log::warn!("✗ Failed to refresh config after Codex provider bucket migration: {error}");
+            log::warn!(
+                "FAIL Failed to refresh config after Codex provider bucket migration: {error}"
+            );
         }
     }
 
     fn import_live_provider_configs_on_startup(&self) -> Result<(), AppError> {
         match self.db.init_default_official_providers() {
-            Ok(count) if count > 0 => log::info!("✓ Seeded {count} official provider(s)"),
+            Ok(count) if count > 0 => log::info!("OK Seeded {count} official provider(s)"),
             Ok(_) => {}
-            Err(error) => log::warn!("✗ Failed to seed official providers: {error}"),
+            Err(error) => log::warn!("FAIL Failed to seed official providers: {error}"),
         }
 
         match crate::services::provider::ProviderService::import_opencode_providers_from_live(self)
         {
             Ok(count) if count > 0 => {
-                log::info!("✓ Imported {count} OpenCode provider(s) from live config");
+                log::info!("OK Imported {count} OpenCode provider(s) from live config");
             }
             Ok(_) => log::debug!("○ No new OpenCode providers to import"),
-            Err(error) => log::warn!("✗ Failed to import OpenCode providers: {error}"),
+            Err(error) => log::warn!("FAIL Failed to import OpenCode providers: {error}"),
         }
 
         match crate::services::provider::ProviderService::import_hermes_providers_from_live(self) {
             Ok(count) if count > 0 => {
-                log::info!("✓ Imported {count} Hermes provider(s) from live config");
+                log::info!("OK Imported {count} Hermes provider(s) from live config");
             }
             Ok(_) => log::debug!("○ No new Hermes providers to import"),
-            Err(error) => log::warn!("✗ Failed to import Hermes providers: {error}"),
+            Err(error) => log::warn!("FAIL Failed to import Hermes providers: {error}"),
         }
 
         match crate::services::provider::ProviderService::import_openclaw_providers_from_live(self)
         {
             Ok(count) if count > 0 => {
-                log::info!("✓ Imported {count} OpenClaw provider(s) from live config");
+                log::info!("OK Imported {count} OpenClaw provider(s) from live config");
             }
             Ok(_) => log::debug!("○ No new OpenClaw providers to import"),
-            Err(error) => log::warn!("✗ Failed to import OpenClaw providers: {error}"),
+            Err(error) => log::warn!("FAIL Failed to import OpenClaw providers: {error}"),
         }
 
         self.refresh_config_from_db()
@@ -248,7 +250,7 @@ impl AppState {
                 Ok(false) => continue,
                 Err(error) => {
                     log::warn!(
-                        "✗ Failed to check auto-extract gate for {}: {error}",
+                        "FAIL Failed to check auto-extract gate for {}: {error}",
                         app_type.as_str()
                     );
                     continue;
@@ -267,7 +269,7 @@ impl AppState {
                 Ok(snippet) => snippet,
                 Err(error) => {
                     log::warn!(
-                        "✗ Failed to extract common config snippet for {}: {error}",
+                        "FAIL Failed to extract common config snippet for {}: {error}",
                         app_type.as_str()
                     );
                     continue;
@@ -287,12 +289,12 @@ impl AppState {
                     let _ = self.db.set_config_snippet_cleared(app_type.as_str(), false);
                     seeded = true;
                     log::info!(
-                        "✓ Auto-extracted common config snippet for {}",
+                        "OK Auto-extracted common config snippet for {}",
                         app_type.as_str()
                     );
                 }
                 Err(error) => log::warn!(
-                    "✗ Failed to save common config snippet for {}: {error}",
+                    "FAIL Failed to save common config snippet for {}: {error}",
                     app_type.as_str()
                 ),
             }
@@ -301,7 +303,7 @@ impl AppState {
         if seeded {
             if let Err(error) = self.refresh_config_from_db() {
                 log::warn!(
-                    "✗ Failed to refresh config after seeding common config snippets: {error}"
+                    "FAIL Failed to refresh config after seeding common config snippets: {error}"
                 );
             }
         }
@@ -325,7 +327,7 @@ impl AppState {
                 app_type.clone(),
             ) {
                 Ok(true) => log::info!(
-                    "✓ Imported live config for {} as default provider",
+                    "OK Imported live config for {} as default provider",
                     app_type.as_str()
                 ),
                 Ok(false) => log::debug!(

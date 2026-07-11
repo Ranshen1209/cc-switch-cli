@@ -123,7 +123,7 @@ pub(super) fn render_page_frame(
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", icons::strip_icon(title)));
+        .title(format!(" {} ", title));
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -154,7 +154,7 @@ pub(super) fn render_page_frame(
 pub(super) fn breadcrumb_title(segments: &[&str]) -> String {
     // Hand-rolled callers don't pass through `render_page_frame`, so strip the
     // leading emoji here too (no-op in emoji mode / for non-emoji segments).
-    format!(" {} ", icons::strip_icon(&breadcrumb_path(segments)))
+    format!(" {} ", breadcrumb_path(segments))
 }
 
 /// Breadcrumb path without the surrounding padding that `breadcrumb_title`

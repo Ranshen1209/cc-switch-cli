@@ -108,11 +108,11 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
     server_list.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     for (id, server) in server_list {
-        let claude_marker = if server.apps.claude { "✓" } else { " " };
-        let codex_marker = if server.apps.codex { "✓" } else { " " };
-        let gemini_marker = if server.apps.gemini { "✓" } else { " " };
-        let opencode_marker = if server.apps.opencode { "✓" } else { " " };
-        let hermes_marker = if server.apps.hermes { "✓" } else { " " };
+        let claude_marker = if server.apps.claude { "OK" } else { "" };
+        let codex_marker = if server.apps.codex { "OK" } else { "" };
+        let gemini_marker = if server.apps.gemini { "OK" } else { "" };
+        let opencode_marker = if server.apps.opencode { "OK" } else { "" };
+        let hermes_marker = if server.apps.hermes { "OK" } else { "" };
         let tags = server.tags.join(", ");
 
         let row = vec![
@@ -132,10 +132,10 @@ fn list_servers(app_type: AppType) -> Result<(), AppError> {
     println!("{}", table);
     println!(
         "\n{} Viewing from: {} perspective",
-        info("ℹ"),
+        info("i"),
         app_type.as_str()
     );
-    println!("{} ✓ = Enabled for this app", info("→"));
+    println!("{} OK = Enabled for this app", info("→"));
 
     Ok(())
 }
@@ -151,7 +151,7 @@ fn delete_server(id: &str) -> Result<(), AppError> {
 
     // 显示将要删除的服务器信息
     println!("{}", highlight("Server to be deleted:"));
-    println!("ID:   {}", id);
+    println!("ID: {}", id);
     println!("Name: {}", server.name);
 
     let enabled_apps: Vec<&str> = vec![
@@ -208,11 +208,11 @@ fn delete_server(id: &str) -> Result<(), AppError> {
     let deleted = McpService::delete_server(&state, id)?;
 
     if deleted {
-        println!("{}", success(&format!("✓ Deleted MCP server '{}'", id)));
+        println!("{}", success(&format!("OK Deleted MCP server '{}'", id)));
         if !enabled_apps.is_empty() {
             println!(
                 "{}",
-                info(&format!("  Removed from: {}", enabled_apps.join(", ")))
+                info(&format!("Removed from: {}", enabled_apps.join(", ")))
             );
         }
     } else {
@@ -244,7 +244,7 @@ fn set_server_enabled(
     println!(
         "{}",
         success(&format!(
-            "✓ {} MCP server '{}' for {}",
+            "OK {} MCP server '{}' for {}",
             if enabled { "Enabled" } else { "Disabled" },
             id,
             app_target_names(&apps)
@@ -277,7 +277,7 @@ fn set_server_apps(id: &str, raw_apps: &[String]) -> Result<(), AppError> {
     println!(
         "{}",
         success(&format!(
-            "✓ Set MCP server '{}' apps to {}",
+            "OK Set MCP server '{}' apps to {}",
             id,
             app_target_names(&targets)
         ))
@@ -297,7 +297,7 @@ fn sync_servers() -> Result<(), AppError> {
 
     McpService::sync_all_enabled(&state)?;
 
-    println!("{}", success("✓ All MCP servers synced successfully"));
+    println!("{}", success("OK All MCP servers synced successfully"));
     println!(
         "{}",
         info("Note: Live configuration files have been updated.")
@@ -320,7 +320,7 @@ fn import_servers() -> Result<(), AppError> {
         println!(
             "{}",
             success(&format!(
-                "✓ Imported {} MCP server(s) from supported apps",
+                "OK Imported {} MCP server(s) from supported apps",
                 count
             ))
         );
@@ -374,7 +374,7 @@ fn add_server(_app_type: AppType) -> Result<(), AppError> {
 
     McpService::upsert_server(&state, server)?;
 
-    println!("{}", success("✓ MCP server saved"));
+    println!("{}", success("OK MCP server saved"));
     println!(
         "{}",
         info("Tip: Use 'cc-switch mcp list' to view all servers.")
@@ -414,7 +414,7 @@ fn edit_server(_app_type: AppType, id: &str) -> Result<(), AppError> {
 
     McpService::upsert_server(&state, server)?;
 
-    println!("{}", success("✓ MCP server updated"));
+    println!("{}", success("OK MCP server updated"));
     Ok(())
 }
 
@@ -425,12 +425,12 @@ fn validate_command(command: &str) -> Result<(), AppError> {
     if which::which(command).is_ok() {
         println!(
             "{}",
-            success(&format!("✓ Command '{}' is available in PATH", command))
+            success(&format!("OK Command '{}' is available in PATH", command))
         );
     } else {
         println!(
             "{}",
-            error(&format!("✗ Command '{}' not found in PATH", command))
+            error(&format!("FAIL Command '{}' not found in PATH", command))
         );
         println!(
             "{}",

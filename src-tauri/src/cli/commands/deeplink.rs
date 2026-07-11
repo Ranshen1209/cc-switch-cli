@@ -46,11 +46,11 @@ fn import_provider(
     println!(
         "{}",
         success(&format!(
-            "✓ Imported provider '{name}' (id: {provider_id}) for {app_label}"
+            "OK Imported provider '{name}' (id: {provider_id}) for {app_label}"
         ))
     );
     if switched {
-        println!("{}", info(&format!("  Switched to '{provider_id}'")));
+        println!("{}", info(&format!("Switched to '{provider_id}'")));
     }
     Ok(())
 }
@@ -62,17 +62,17 @@ fn import_mcp(state: &AppState, request: crate::DeepLinkImportRequest) -> Result
     println!(
         "{}",
         success(&format!(
-            "✓ Imported {} MCP server(s) for {apps_label}",
+            "OK Imported {} MCP server(s) for {apps_label}",
             result.imported_count
         ))
     );
     for id in &result.imported_ids {
-        println!("{}", info(&format!("  • {id}")));
+        println!("{}", info(&format!("• {id}")));
     }
     for failure in &result.failed {
         println!(
             "{}",
-            crate::cli::ui::warning(&format!("  ✗ {}: {}", failure.id, failure.error))
+            crate::cli::ui::warning(&format!("FAIL {}: {}", failure.id, failure.error))
         );
     }
     Ok(())
@@ -88,11 +88,11 @@ fn import_prompt(state: &AppState, request: crate::DeepLinkImportRequest) -> Res
     println!(
         "{}",
         success(&format!(
-            "✓ Imported prompt '{name}' (id: {prompt_id}) for {app_label}"
+            "OK Imported prompt '{name}' (id: {prompt_id}) for {app_label}"
         ))
     );
     if enabled {
-        println!("{}", info(&format!("  Enabled '{prompt_id}'")));
+        println!("{}", info(&format!("Enabled '{prompt_id}'")));
     }
     Ok(())
 }
@@ -100,7 +100,7 @@ fn import_prompt(state: &AppState, request: crate::DeepLinkImportRequest) -> Res
 fn import_skill(state: &AppState, request: crate::DeepLinkImportRequest) -> Result<(), AppError> {
     let repo_id = crate::import_skill_from_deeplink(state, request)?;
 
-    println!("{}", success(&format!("✓ Added skill repo '{repo_id}'")));
+    println!("{}", success(&format!("OK Added skill repo '{repo_id}'")));
     Ok(())
 }
 

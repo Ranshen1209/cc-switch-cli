@@ -2,7 +2,6 @@ mod app;
 mod data;
 mod form;
 pub(crate) mod help;
-pub(crate) mod icons;
 mod keymap;
 mod route;
 mod runtime_actions;

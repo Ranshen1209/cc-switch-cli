@@ -742,31 +742,6 @@ impl App {
                     }
                     Action::None
                 }
-                Some(SettingsItem::Icons) => {
-                    // Cycle the *persisted* setting, not configured_icon_mode()
-                    // (which prefers the CC_SWITCH_ICONS override), so repeated
-                    // presses advance predictably even when an env override is
-                    // masking the effective mode.
-                    let current = crate::settings::get_icon_mode()
-                        .as_deref()
-                        .and_then(crate::cli::tui::icons::IconMode::parse)
-                        .unwrap_or_default();
-                    let next = current.next();
-                    match crate::settings::set_icon_mode(next.code()) {
-                        Ok(()) => {
-                            self.push_toast(
-                                texts::tui_toast_icons_changed(texts::tui_settings_icon_mode_name(
-                                    next,
-                                )),
-                                ToastKind::Success,
-                            );
-                        }
-                        Err(err) => {
-                            self.push_toast(err.to_string(), ToastKind::Error);
-                        }
-                    }
-                    Action::None
-                }
                 Some(SettingsItem::VisibleAppsMode) => {
                     let current = crate::settings::get_visible_apps_settings().mode;
                     let next = match current {

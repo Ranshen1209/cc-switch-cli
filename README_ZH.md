@@ -19,9 +19,9 @@
 
 ---
 
-## 📖 关于本项目
+## 关于本项目
 
-本项目是原版 [CC-Switch](https://github.com/farion1231/cc-switch) 的 **CLI 分支**。🔄 WebDAV 同步功能与上游项目完全兼容。
+本项目是原版 [CC-Switch](https://github.com/farion1231/cc-switch) 的 **CLI 分支**。 WebDAV 同步功能与上游项目完全兼容。
 
 
 **致谢：** 原始架构和核心功能来自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
@@ -30,7 +30,7 @@
 
 ---
 
-## ❤️赞助商
+## 赞助商
 
 <table>
   <tr>
@@ -125,7 +125,7 @@
 
 ---
 
-## 📸 截图预览
+## 截图预览
 
 <div align="center">
   <h3>首页</h3>
@@ -145,7 +145,7 @@
   </tr>
 </table>
 
-## 🚀 快速开始
+## 快速开始
 
 **TUI 模式（推荐）**
 ```bash
@@ -183,7 +183,7 @@ cc-switch --app openclaw provider list  # 管理 OpenClaw 供应商
 
 ---
 
-## 📥 安装
+## 安装
 
 ### 方法 1：快速安装（macOS / Linux）
 
@@ -302,9 +302,9 @@ copy target\release\cc-switch.exe C:\Windows\System32\
 
 ---
 
-## ✨ 功能特性
+## 功能特性
 
-### 🔌 供应商管理
+### 供应商管理
 
 管理 **Claude Code**、**Codex**、**Gemini**、**OpenCode**、**Hermes** 与 **OpenClaw** 的 API 配置。
 
@@ -326,7 +326,7 @@ cc-switch provider fetch-models <id> # 拉取远端模型列表
 cc-switch provider export <id> --output ~/.claude/settings-demo.json # 自定义 settings 文件路径
 ```
 
-### 🔐 托管账号
+### 托管账号
 
 本地管理 ChatGPT/Codex OAuth 账号，并在供应商配置中复用；也可以通过本地代理将 Codex OAuth 账号作为 Claude Code 供应商使用。
 
@@ -340,7 +340,7 @@ cc-switch auth default <account-id>  # 设置默认账号
 cc-switch auth remove <account-id>   # 移除账号
 ```
 
-### 🛠️ MCP 服务器管理
+### MCP 服务器管理
 
 跨 Claude、Codex、Gemini、OpenCode 与 Hermes 管理模型上下文协议服务器。
 
@@ -358,7 +358,7 @@ cc-switch mcp sync                   # 同步到实时文件
 cc-switch mcp import --app claude    # 从实时配置导入
 ```
 
-### 💬 Prompts 管理
+### Prompts 管理
 
 管理 AI 编码助手的系统提示词预设。
 
@@ -376,7 +376,7 @@ cc-switch prompts show <id>          # 显示完整内容
 cc-switch prompts delete <id>        # 删除提示词
 ```
 
-### 🎯 Skills 管理
+### Skills 管理
 
 通过社区技能扩展 Claude Code/Codex/Gemini/OpenCode/Hermes 的能力。
 
@@ -401,7 +401,7 @@ cc-switch skills repos enable <repo> # 启用仓库但保留当前分支
 cc-switch skills repos disable <repo> # 禁用仓库但保留当前分支
 ```
 
-### 🕘 历史会话与用量统计
+### 历史会话与用量统计
 
 查看历史会话，一键 resume，删除旧会话，并将本地会话日志导入 token / cost 统计，方便管理用量。
 
@@ -415,7 +415,7 @@ cc-switch sessions delete <id>       # 删除会话
 cc-switch sessions sync-usage --all  # 同步本地日志到用量统计
 ```
 
-### ⚙️ 配置管理
+### 配置管理
 
 管理配置文件的备份、导入和导出。
 
@@ -457,7 +457,7 @@ cc-switch config webdav migrate-v1-to-v2
 cc-switch config reset               # 重置为默认配置
 ```
 
-### 🌉 代理管理与模型接入
+### 代理管理与模型接入
 
 查看并控制由守护进程管理的按应用代理路由。
 
@@ -485,7 +485,7 @@ cc-switch proxy serve --takeover claude           # 前台调试模式；存在 
 >
 > `proxy show` 与 `proxy config` 在所有平台均可用。参见 [#294](https://github.com/SaladDay/cc-switch-cli/issues/294)。
 
-### 🧪 环境与本地工具
+### 环境与本地工具
 
 检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI 是否已经装好。
 
@@ -495,14 +495,14 @@ cc-switch env list                   # 列出相关环境变量
 cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI
 ```
 
-### 🌐 多语言支持
+### 多语言支持
 
 交互模式支持中英文切换，语言设置会自动保存。
 
 - 默认语言：English
-- 进入 `⚙️ 设置` 菜单切换语言
+- 进入 ` 设置` 菜单切换语言
 
-### 🔧 实用工具
+### 实用工具
 
 Shell 补全、环境管理等实用功能。
 
@@ -528,7 +528,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 ---
 
-## 🏗️ 架构
+## 架构
 
 ### 核心设计
 
@@ -561,7 +561,7 @@ cc-switch update --version vX.Y.Z    # 更新到指定版本
 
 ---
 
-## ❓ 常见问题 (FAQ)
+## 常见问题 (FAQ)
 
 <details>
 <summary><b>为什么切换供应商后配置没有生效？</b></summary>
@@ -678,7 +678,7 @@ cc-switch --app codex provider list
 
 ---
 
-## 🛠️ 开发
+## 开发
 
 ### 环境要求
 
@@ -715,19 +715,19 @@ src-tauri/src/
 ```
 
 
-## 🤝 贡献
+## 贡献
 
 欢迎贡献！本分支专注于 CLI 功能。
 
 **提交 PR 前：**
-- ✅ 通过格式检查：`cargo fmt --check`
-- ✅ 通过代码检查：`cargo clippy`
-- ✅ 通过测试：`cargo test`
-- 💡 先开 issue 讨论
+-  通过格式检查：`cargo fmt --check`
+-  通过代码检查：`cargo clippy`
+-  通过测试：`cargo test`
+-  先开 issue 讨论
 
 ---
 
-## 📜 许可证
+## 许可证
 
 - MIT © 原作者：Jason Young
 - CLI 分支维护者：saladday

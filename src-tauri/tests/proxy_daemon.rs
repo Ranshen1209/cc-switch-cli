@@ -508,7 +508,7 @@ fn set_managed_session_for_app_does_not_deadlock_on_state_mutation_lock() {
 }
 
 /// Regression for the symptom the user reported on the TUI:
-/// "✗ daemon ensure worker failed: Resource temporarily unavailable (os error 35)"
+/// "FAIL daemon ensure worker failed: Resource temporarily unavailable (os error 35)"
 /// when toggling proxy on and off via the main TUI proxy action.
 ///
 /// The TUI's `SetManagedProxyForCurrentApp` action funnels into

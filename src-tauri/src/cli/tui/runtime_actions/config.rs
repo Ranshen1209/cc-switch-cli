@@ -36,10 +36,7 @@ pub(super) fn show_full(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppErr
     let config = state.config.read().map_err(AppError::from)?;
     let content = serde_json::to_string_pretty(&*config)
         .map_err(|e| AppError::Message(texts::failed_to_serialize_json(&e.to_string())))?;
-    let title = texts::config_show_full()
-        .trim_start_matches("👁️")
-        .trim()
-        .to_string();
+    let title = texts::config_show_full().trim().to_string();
     ctx.app.overlay = Overlay::TextView(TextViewState {
         title,
         lines: content.lines().map(|s| s.to_string()).collect(),

@@ -122,7 +122,7 @@ fn list_prompts(app_type: AppType) -> Result<(), AppError> {
     prompt_list.sort_by(|(_, a), (_, b)| b.updated_at.unwrap_or(0).cmp(&a.updated_at.unwrap_or(0)));
 
     for (id, prompt) in prompt_list {
-        let enabled_marker = if prompt.enabled { "✓" } else { " " };
+        let enabled_marker = if prompt.enabled { "OK" } else { "" };
         let updated = prompt
             .updated_at
             .map(|ts| {
@@ -158,8 +158,8 @@ fn list_prompts(app_type: AppType) -> Result<(), AppError> {
     }
 
     println!("{}", table);
-    println!("\n{} Application: {}", info("ℹ"), app_type.as_str());
-    println!("{} ✓ = Currently active", info("→"));
+    println!("\n{} Application: {}", info("i"), app_type.as_str());
+    println!("{} OK = Currently active", info("→"));
 
     Ok(())
 }
@@ -187,13 +187,13 @@ fn show_current(app_type: AppType) -> Result<(), AppError> {
 
             println!("{}", highlight("Current Active Prompt"));
             println!("{}", "=".repeat(50));
-            println!("ID:          {}", id);
-            println!("Name:        {}", prompt.name);
+            println!("ID: {}", id);
+            println!("Name: {}", prompt.name);
             if let Some(desc) = &prompt.description {
                 println!("Description: {}", desc);
             }
-            println!("Updated:     {}", updated);
-            println!("App:         {}", app_type.as_str());
+            println!("Updated: {}", updated);
+            println!("App: {}", app_type.as_str());
             println!();
             println!("{}", highlight("Content Preview:"));
             println!("{}", "-".repeat(50));
@@ -260,10 +260,10 @@ fn import_prompt(app_type: AppType) -> Result<(), AppError> {
 
     println!(
         "{}",
-        success(&format!("✓ Imported live prompt file as preset '{}'", id))
+        success(&format!("OK Imported live prompt file as preset '{}'", id))
     );
-    println!("{}", info(&format!("  Name: {}", name)));
-    println!("{}", info(&format!("  Application: {}", app_type.as_str())));
+    println!("{}", info(&format!("Name: {}", name)));
+    println!("{}", info(&format!("Application: {}", app_type.as_str())));
     println!(
         "{}",
         info(&format!(
@@ -293,9 +293,9 @@ fn activate_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     println!(
         "{}",
-        success(&format!("✓ Activated prompt preset '{}'", id))
+        success(&format!("OK Activated prompt preset '{}'", id))
     );
-    println!("{}", info(&format!("  Application: {}", app_str)));
+    println!("{}", info(&format!("Application: {}", app_str)));
     println!();
     println!(
         "{}",
@@ -324,7 +324,7 @@ fn delete_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     // 显示将要删除的 prompt 信息
     println!("{}", highlight("Prompt to be deleted:"));
-    println!("ID:   {}", id);
+    println!("ID: {}", id);
     println!("Name: {}", prompt.name);
     if let Some(desc) = &prompt.description {
         println!("Desc: {}", desc);
@@ -348,7 +348,7 @@ fn delete_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
     // 执行删除
     PromptService::delete_prompt(&state, app_type, id)?;
 
-    println!("{}", success(&format!("✓ Deleted prompt preset '{}'", id)));
+    println!("{}", success(&format!("OK Deleted prompt preset '{}'", id)));
 
     Ok(())
 }
@@ -372,27 +372,27 @@ fn show_prompt(app_type: AppType, id: &str) -> Result<(), AppError> {
 
     println!("{}", highlight(&format!("Prompt Preset: {}", prompt.name)));
     println!("{}", "=".repeat(50));
-    println!("ID:          {}", id);
-    println!("Name:        {}", prompt.name);
+    println!("ID: {}", id);
+    println!("Name: {}", prompt.name);
     if let Some(desc) = &prompt.description {
         println!("Description: {}", desc);
     }
     println!(
-        "Status:      {}",
+        "Status: {}",
         if prompt.enabled {
             highlight("Active")
         } else {
             "Inactive".to_string()
         }
     );
-    println!("Updated:     {}", updated);
+    println!("Updated: {}", updated);
     println!();
     println!("{}", highlight("Content:"));
     println!("{}", "-".repeat(50));
     println!("{}", prompt.content);
     println!("{}", "-".repeat(50));
     println!("Lines: {}", prompt.content.lines().count());
-    println!("Size:  {} bytes", prompt.content.len());
+    println!("Size: {} bytes", prompt.content.len());
 
     Ok(())
 }
@@ -436,10 +436,10 @@ fn create_prompt(
 
     println!(
         "{}",
-        success(&format!("✓ Created prompt preset '{}'", prompt.id))
+        success(&format!("OK Created prompt preset '{}'", prompt.id))
     );
-    println!("{}", info(&format!("  Name: {}", prompt.name)));
-    println!("{}", info(&format!("  Application: {}", app_type.as_str())));
+    println!("{}", info(&format!("Name: {}", prompt.name)));
+    println!("{}", info(&format!("Application: {}", app_type.as_str())));
     println!(
         "{}",
         info("Tip: Use 'cc-switch prompts list' to view all presets.")
@@ -464,9 +464,9 @@ fn deactivate_prompt(app_type: AppType) -> Result<(), AppError> {
 
             println!(
                 "{}",
-                success(&format!("✓ Deactivated prompt preset '{}'", id))
+                success(&format!("OK Deactivated prompt preset '{}'", id))
             );
-            println!("{}", info(&format!("  Application: {}", app_type.as_str())));
+            println!("{}", info(&format!("Application: {}", app_type.as_str())));
             println!();
             println!(
                 "{}",
@@ -510,7 +510,7 @@ fn edit_prompt(_app_type: AppType, id: &str) -> Result<(), AppError> {
 
     PromptService::upsert_prompt(&state, _app_type.clone(), id, prompt)?;
 
-    println!("{}", success(&format!("✓ Updated prompt preset '{id}'")));
+    println!("{}", success(&format!("OK Updated prompt preset '{id}'")));
     Ok(())
 }
 
@@ -565,9 +565,9 @@ fn rename_prompt(
 
     println!(
         "{}",
-        success(&format!("✓ Updated prompt preset '{}'", prompt.id))
+        success(&format!("OK Updated prompt preset '{}'", prompt.id))
     );
-    println!("{}", info(&format!("  Name: {}", prompt.name)));
-    println!("{}", info(&format!("  Application: {}", app_type.as_str())));
+    println!("{}", info(&format!("Name: {}", prompt.name)));
+    println!("{}", info(&format!("Application: {}", app_type.as_str())));
     Ok(())
 }
