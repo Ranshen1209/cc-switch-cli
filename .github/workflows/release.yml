@@ -4,15 +4,22 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (for example, v5.9.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
   RUST_VERSION: 1.91.1
+  RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -252,7 +259,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release-assets
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${RELEASE_VERSION}"
 
           # macOS Universal
           if [ -f "artifacts/cc-switch-cli-darwin-universal/cc-switch" ]; then
@@ -342,7 +349,7 @@ jobs:
                 -s "${key_file}" \
                 -m "${asset}" \
                 -x "${asset}.minisig" \
-                -t "cc-switch-cli ${GITHUB_REF_NAME}"
+                -t "cc-switch-cli ${RELEASE_VERSION}"
             done
 
             for asset in release-assets/cc-switch-cli-*.tar.gz release-assets/cc-switch-cli-*.zip; do
@@ -353,10 +360,10 @@ jobs:
 
             python3 scripts/generate_latest_json.py \
               release-assets \
-              "${GITHUB_REF_NAME}" \
+              "${RELEASE_VERSION}" \
               "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-              "https://github.com/Ranshen1209/cc-switch-cli/releases/download/${GITHUB_REF_NAME}" \
-              "CC Switch CLI ${GITHUB_REF_NAME}"
+              "https://github.com/Ranshen1209/cc-switch-cli/releases/download/${RELEASE_VERSION}" \
+              "CC Switch CLI ${RELEASE_VERSION}"
 
             rm -f release-assets/*.minisig
           else
@@ -372,8 +379,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: CC Switch CLI ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_VERSION }}
+          name: CC Switch CLI ${{ env.RELEASE_VERSION }}
           draft: false
           prerelease: false
           generate_release_notes: true
