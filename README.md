@@ -190,7 +190,7 @@ See the "Features" section for full command list.
 > Windows users: see Manual Installation below.
 
 ```bash
-curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/Ranshen1209/cc-switch-cli/releases/latest/download/install.sh | bash
 ```
 
 This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to change the target directory.
@@ -205,7 +205,7 @@ This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to chan
 
 ```bash
 # Download Universal Binary (recommended, supports Apple Silicon + Intel)
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-darwin-universal.tar.gz
+curl -LO https://github.com/Ranshen1209/cc-switch-cli/releases/latest/download/cc-switch-cli-darwin-universal.tar.gz
 
 # Extract
 tar -xzf cc-switch-cli-darwin-universal.tar.gz
@@ -224,7 +224,7 @@ xattr -cr /usr/local/bin/cc-switch
 
 ```bash
 # Download
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-x64-musl.tar.gz
+curl -LO https://github.com/Ranshen1209/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-x64-musl.tar.gz
 
 # Extract
 tar -xzf cc-switch-cli-linux-x64-musl.tar.gz
@@ -240,7 +240,7 @@ sudo mv cc-switch /usr/local/bin/
 
 ```bash
 # For Raspberry Pi or ARM servers
-curl -LO https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-arm64-musl.tar.gz
+curl -LO https://github.com/Ranshen1209/cc-switch-cli/releases/latest/download/cc-switch-cli-linux-arm64-musl.tar.gz
 tar -xzf cc-switch-cli-linux-arm64-musl.tar.gz
 chmod +x cc-switch
 sudo mv cc-switch /usr/local/bin/
@@ -250,7 +250,7 @@ sudo mv cc-switch /usr/local/bin/
 
 ```powershell
 # Download the zip file
-# https://github.com/saladday/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
+# https://github.com/Ranshen1209/cc-switch-cli/releases/latest/download/cc-switch-cli-windows-x64.zip
 
 # After extracting, move cc-switch.exe to a PATH directory, e.g.:
 move cc-switch.exe C:\Windows\System32\
@@ -280,7 +280,7 @@ If you installed cc-switch via Homebrew, please use Homebrew to upgrade cc-switc
 
 **Build:**
 ```bash
-git clone https://github.com/saladday/cc-switch-cli.git
+git clone https://github.com/Ranshen1209/cc-switch-cli.git
 cd cc-switch-cli/src-tauri
 cargo build --release
 

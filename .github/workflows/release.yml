@@ -330,39 +330,38 @@ jobs:
           CC_SWITCH_MINISIGN_SECRET_KEY: ${{ secrets.CC_SWITCH_MINISIGN_SECRET_KEY }}
         run: |
           set -euxo pipefail
-          if [ -z "${CC_SWITCH_MINISIGN_SECRET_KEY}" ]; then
-            echo "CC_SWITCH_MINISIGN_SECRET_KEY is not configured" >&2
-            exit 1
+          if [ -n "${CC_SWITCH_MINISIGN_SECRET_KEY}" ]; then
+            key_file="$(mktemp)"
+            trap 'rm -f "${key_file}"' EXIT
+            printf '%s' "${CC_SWITCH_MINISIGN_SECRET_KEY}" > "${key_file}"
+            chmod 600 "${key_file}"
+
+            shopt -s nullglob
+            for asset in release-assets/cc-switch-cli-*.tar.gz release-assets/cc-switch-cli-*.zip; do
+              minisign -S \
+                -s "${key_file}" \
+                -m "${asset}" \
+                -x "${asset}.minisig" \
+                -t "cc-switch-cli ${GITHUB_REF_NAME}"
+            done
+
+            for asset in release-assets/cc-switch-cli-*.tar.gz release-assets/cc-switch-cli-*.zip; do
+              minisign -Vm "${asset}" \
+                -p src-tauri/updater/minisign.pub \
+                -x "${asset}.minisig"
+            done
+
+            python3 scripts/generate_latest_json.py \
+              release-assets \
+              "${GITHUB_REF_NAME}" \
+              "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+              "https://github.com/Ranshen1209/cc-switch-cli/releases/download/${GITHUB_REF_NAME}" \
+              "CC Switch CLI ${GITHUB_REF_NAME}"
+
+            rm -f release-assets/*.minisig
+          else
+            echo "CC_SWITCH_MINISIGN_SECRET_KEY is not configured; skipping updater metadata"
           fi
-
-          key_file="$(mktemp)"
-          trap 'rm -f "${key_file}"' EXIT
-          printf '%s' "${CC_SWITCH_MINISIGN_SECRET_KEY}" > "${key_file}"
-          chmod 600 "${key_file}"
-
-          shopt -s nullglob
-          for asset in release-assets/cc-switch-cli-*.tar.gz release-assets/cc-switch-cli-*.zip; do
-            minisign -S \
-              -s "${key_file}" \
-              -m "${asset}" \
-              -x "${asset}.minisig" \
-              -t "cc-switch-cli ${GITHUB_REF_NAME}"
-          done
-
-          for asset in release-assets/cc-switch-cli-*.tar.gz release-assets/cc-switch-cli-*.zip; do
-            minisign -Vm "${asset}" \
-              -p src-tauri/updater/minisign.pub \
-              -x "${asset}.minisig"
-          done
-
-          python3 scripts/generate_latest_json.py \
-            release-assets \
-            "${GITHUB_REF_NAME}" \
-            "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-            "https://github.com/SaladDay/cc-switch-cli/releases/download/${GITHUB_REF_NAME}" \
-            "CC Switch CLI ${GITHUB_REF_NAME}"
-
-          rm -f release-assets/*.minisig
 
           (
             cd release-assets
@@ -384,7 +383,7 @@ jobs:
             Install on macOS/Linux:
 
             ```bash
-            curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh | bash
+            curl -fsSL https://github.com/Ranshen1209/cc-switch-cli/releases/latest/download/install.sh | bash
             ```
           files: release-assets/*
         env:
