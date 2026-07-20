@@ -81,9 +81,10 @@ impl ClaudeApiFormat {
         ClaudeApiFormat::OpenAiResponses,
         ClaudeApiFormat::GeminiNative,
     ];
-    pub const CODEX: [Self; 2] = [
+    pub const CODEX: [Self; 3] = [
         ClaudeApiFormat::OpenAiResponses,
         ClaudeApiFormat::OpenAiChat,
+        ClaudeApiFormat::Anthropic,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -133,7 +134,10 @@ impl ClaudeApiFormat {
 
     pub fn requires_proxy_for_app(self, app_type: &AppType) -> bool {
         match app_type {
-            AppType::Codex => matches!(self, ClaudeApiFormat::OpenAiChat),
+            AppType::Codex => matches!(
+                self,
+                ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::Anthropic
+            ),
             _ => self.requires_proxy(),
         }
     }

@@ -332,6 +332,8 @@ mod tests {
                 template_type: Some("general".to_string()),
                 auto_query_interval: Some(5),
                 coding_plan_provider: None,
+                team_organization_id: None,
+                team_project_id: None,
             }),
             ..Default::default()
         });

@@ -34,7 +34,7 @@ const PROXY_RUNTIME_SESSION_KEY: &str = "proxy_runtime_session";
 const PROXY_RUNTIME_KIND_ENV_KEY: &str = "CC_SWITCH_PROXY_RUNTIME_KIND";
 const PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY: &str = "CC_SWITCH_PROXY_SESSION_TOKEN";
 
-const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 9] = [
+const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 12] = [
     "ANTHROPIC_MODEL",
     "ANTHROPIC_REASONING_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -43,18 +43,23 @@ const CLAUDE_MODEL_OVERRIDE_ENV_KEYS: [&str; 9] = [
     "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
     "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
 ];
 
 const CLAUDE_TAKEOVER_HAIKU_MODEL: &str = "claude-haiku-4-5";
 const CLAUDE_TAKEOVER_SONNET_MODEL: &str = "claude-sonnet-4-6";
 const CLAUDE_TAKEOVER_OPUS_MODEL: &str = "claude-opus-4-8";
+const CLAUDE_TAKEOVER_FABLE_MODEL: &str = "claude-fable-5";
 const CLAUDE_ONE_M_MARKER_FOR_CLIENT: &str = "[1M]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeTakeoverAuthPolicy {
     PreserveExistingOrAuthToken,
-    ManagedAccount,
+    ManagedApiKey,
+    ManagedAuthToken,
 }
 
 #[derive(Clone)]
@@ -253,8 +258,10 @@ impl ProxyService {
         provider: &Provider,
     ) {
         let uses_managed_account = provider.uses_managed_account_auth();
-        let auth_policy = if uses_managed_account {
-            ClaudeTakeoverAuthPolicy::ManagedAccount
+        let auth_policy = if provider.is_codex_oauth() {
+            ClaudeTakeoverAuthPolicy::ManagedAuthToken
+        } else if uses_managed_account {
+            ClaudeTakeoverAuthPolicy::ManagedApiKey
         } else {
             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken
         };
@@ -342,14 +349,17 @@ impl ProxyService {
                     );
                 }
             }
-            ClaudeTakeoverAuthPolicy::ManagedAccount => {
+            ClaudeTakeoverAuthPolicy::ManagedApiKey
+            | ClaudeTakeoverAuthPolicy::ManagedAuthToken => {
                 for key in token_keys {
                     env.remove(key);
                 }
-                env.insert(
-                    "ANTHROPIC_API_KEY".to_string(),
-                    json!(PROXY_TOKEN_PLACEHOLDER),
-                );
+                let placeholder_key = match auth_policy {
+                    ClaudeTakeoverAuthPolicy::ManagedAuthToken => "ANTHROPIC_AUTH_TOKEN",
+                    ClaudeTakeoverAuthPolicy::ManagedApiKey => "ANTHROPIC_API_KEY",
+                    ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken => unreachable!(),
+                };
+                env.insert(placeholder_key.to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
             }
         }
     }
@@ -370,8 +380,10 @@ impl ProxyService {
         let opus_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL")
             .or(default_model)
             .or(small_fast_model);
+        let fable_model = Self::claude_env_string(env, "ANTHROPIC_DEFAULT_FABLE_MODEL");
+        let subagent_model = Self::claude_env_string(env, "CLAUDE_CODE_SUBAGENT_MODEL");
 
-        let mut fields = Vec::with_capacity(6);
+        let mut fields = Vec::with_capacity(9);
         Self::push_claude_takeover_role_fields(
             &mut fields,
             env,
@@ -399,6 +411,18 @@ impl ProxyService {
             true,
             opus_model,
         );
+        Self::push_claude_takeover_role_fields(
+            &mut fields,
+            env,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            CLAUDE_TAKEOVER_FABLE_MODEL,
+            true,
+            fable_model,
+        );
+        if let Some(subagent_model) = subagent_model {
+            fields.push(("CLAUDE_CODE_SUBAGENT_MODEL", subagent_model.to_string()));
+        }
         fields
     }
 
@@ -2234,7 +2258,9 @@ impl ProxyService {
                     (None, _) => Ok(incoming_snapshot),
                 }
             }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(backup_snapshot),
+            AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+                Ok(backup_snapshot)
+            }
         }
     }
 
@@ -4145,8 +4171,42 @@ mod tests {
             "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
             Some("GPT 5.4 Ultra"),
         );
-        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
-        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[test]
+    fn managed_account_claude_takeover_codex_from_third_party_keeps_single_auth_key() {
+        let mut provider = Provider::with_id(
+            "codex".to_string(),
+            "Codex".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            ..Default::default()
+        });
+
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "sk-third-party"
+            }
+        });
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = env_object(&live_config);
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
     }
 
     #[test]
@@ -5517,8 +5577,12 @@ mod tests {
             "ANTHROPIC_BASE_URL",
             Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
         );
-        assert_env_str(live_env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
-        assert_env_str(live_env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(live_env, "ANTHROPIC_API_KEY", None);
+        assert_env_str(
+            live_env,
+            "ANTHROPIC_AUTH_TOKEN",
+            Some(PROXY_TOKEN_PLACEHOLDER),
+        );
     }
 
     #[tokio::test]
@@ -7980,8 +8044,8 @@ requires_openai_auth = true
             "ANTHROPIC_BASE_URL",
             Some(format!("http://127.0.0.1:{preferred_port}").as_str()),
         );
-        assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
-        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", None);
+        assert_env_str(env, "ANTHROPIC_API_KEY", None);
+        assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
         assert_env_str(env, "OPENROUTER_API_KEY", None);
         assert_env_str(env, "OPENAI_API_KEY", None);
         assert_env_str(env, "ANTHROPIC_MODEL", None);

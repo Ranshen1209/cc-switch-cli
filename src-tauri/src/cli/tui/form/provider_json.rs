@@ -43,7 +43,7 @@ impl ProviderAddFormState {
             .expect("settingsConfig must be a JSON object");
 
         match self.app_type {
-            AppType::Claude => {
+            AppType::Claude | AppType::ClaudeDesktop => {
                 let env_value = settings_obj
                     .entry("env".to_string())
                     .or_insert_with(|| json!({}));
@@ -580,12 +580,14 @@ impl ProviderAddFormState {
             && !self.is_claude_codex_oauth_provider()
             && self.claude_api_key_field == ClaudeApiKeyField::ApiKey;
         let is_codex_oauth = self.is_claude_codex_oauth_provider();
+        let is_claude_desktop = matches!(self.app_type, AppType::ClaudeDesktop);
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
             && !should_write_codex_api_format
             && !should_write_claude_api_key_field
             && !is_codex_oauth
+            && !is_claude_desktop
             && !self.has_usage_script_meta()
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
@@ -604,6 +606,11 @@ impl ProviderAddFormState {
         };
 
         meta_obj.remove("applyCommonConfig");
+        if is_claude_desktop {
+            meta_obj.insert("claudeDesktopMode".to_string(), json!("direct"));
+            meta_obj.remove("apiFormat");
+            meta_obj.remove("apiKeyField");
+        }
         if should_write_common_config_meta {
             meta_obj.insert(
                 "commonConfigEnabled".to_string(),
@@ -652,6 +659,7 @@ impl ProviderAddFormState {
             } else {
                 let api_format = match self.claude_api_format {
                     ClaudeApiFormat::OpenAiChat => "openai_chat",
+                    ClaudeApiFormat::Anthropic => "anthropic",
                     _ => "openai_responses",
                 };
                 meta_obj.insert("apiFormat".to_string(), json!(api_format));
@@ -957,7 +965,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+        AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

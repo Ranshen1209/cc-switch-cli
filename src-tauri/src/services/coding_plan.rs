@@ -81,9 +81,22 @@ fn make_error(msg: String) -> SubscriptionQuota {
     }
 }
 
+fn coding_plan_not_found(error: Option<String>) -> SubscriptionQuota {
+    SubscriptionQuota {
+        tool: "coding_plan".to_string(),
+        credential_status: CredentialStatus::NotFound,
+        credential_message: None,
+        success: false,
+        tiers: vec![],
+        extra_usage: None,
+        error,
+        queried_at: None,
+    }
+}
+
 // ── Kimi For Coding ─────────────────────────────────────────
 
-async fn query_kimi(api_key: &str) -> SubscriptionQuota {
+async fn query_kimi(api_key: &str) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
     let resp = client
@@ -96,12 +109,12 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return make_error(format!("Network error: {e}")),
+        Err(e) => return Err(format!("Network error: {e}")),
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return SubscriptionQuota {
+        return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
             credential_message: Some("Invalid API key".to_string()),
@@ -110,17 +123,21 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
-        };
+        });
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return make_error(format!("API error (HTTP {status}): {body}"));
+        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
-    let body: serde_json::Value = match resp.json().await {
+    let raw = match resp.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(format!("Failed to read response: {e}")),
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
         Ok(v) => v,
-        Err(e) => return make_error(format!("Failed to parse response: {e}")),
+        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
 
     let mut tiers = Vec::new();
@@ -167,7 +184,7 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
         });
     }
 
-    SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -176,17 +193,22 @@ async fn query_kimi(api_key: &str) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    }
+    })
 }
 
 // ── 智谱 GLM ────────────────────────────────────────────────
 
-async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
+async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
-    // 统一走 api.z.ai 国际站（中国站 bigmodel.cn 有反爬机制）
+    let quota_base = if base_url.to_ascii_lowercase().contains("bigmodel.cn") {
+        "https://open.bigmodel.cn"
+    } else {
+        "https://api.z.ai"
+    };
+    let url = format!("{quota_base}/api/monitor/usage/quota/limit");
     let resp = client
-        .get("https://api.z.ai/api/monitor/usage/quota/limit")
+        .get(url)
         .header("Authorization", api_key) // 注意：智谱不加 Bearer 前缀
         .header("Content-Type", "application/json")
         .header("Accept-Language", "en-US,en")
@@ -196,12 +218,12 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return make_error(format!("Network error: {e}")),
+        Err(e) => return Err(format!("Network error: {e}")),
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return SubscriptionQuota {
+        return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
             credential_message: Some("Invalid API key".to_string()),
@@ -210,17 +232,21 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
-        };
+        });
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return make_error(format!("API error (HTTP {status}): {body}"));
+        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
-    let body: serde_json::Value = match resp.json().await {
+    let raw = match resp.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(format!("Failed to read response: {e}")),
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
         Ok(v) => v,
-        Err(e) => return make_error(format!("Failed to parse response: {e}")),
+        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
 
     // 检查业务级别错误
@@ -229,15 +255,17 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
             .get("msg")
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown error");
-        return make_error(format!("API error: {msg}"));
+        return Ok(make_error(format!("API error: {msg}")));
     }
 
     let data = match body.get("data") {
         Some(d) => d,
-        None => return make_error("Missing 'data' field in response".to_string()),
+        None => return Ok(make_error("Missing 'data' field in response".to_string())),
     };
 
-    let mut tiers = Vec::new();
+    let mut five_hour = None;
+    let mut weekly = None;
+    let mut fallback = Vec::new();
 
     if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
         for limit_item in limits {
@@ -254,14 +282,33 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
                 .and_then(|v| v.as_i64())
                 .and_then(millis_to_iso8601);
 
-            if limit_type != "TOKENS_LIMIT" {
+            if !limit_type.eq_ignore_ascii_case("TOKENS_LIMIT") {
                 continue;
             }
 
+            let tier = (percentage, next_reset);
+            match limit_item.get("unit").and_then(|value| value.as_i64()) {
+                Some(3) if five_hour.is_none() => five_hour = Some(tier),
+                Some(6) if weekly.is_none() => weekly = Some(tier),
+                _ => fallback.push(tier),
+            }
+        }
+    }
+
+    for tier in fallback {
+        if five_hour.is_none() {
+            five_hour = Some(tier);
+        } else if weekly.is_none() {
+            weekly = Some(tier);
+        }
+    }
+    let mut tiers = Vec::new();
+    for (name, tier) in [("five_hour", five_hour), ("weekly_limit", weekly)] {
+        if let Some((utilization, resets_at)) = tier {
             tiers.push(QuotaTier {
-                name: "five_hour".to_string(),
-                utilization: percentage,
-                resets_at: next_reset,
+                name: name.to_string(),
+                utilization,
+                resets_at,
             });
         }
     }
@@ -272,7 +319,7 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: level,
@@ -281,12 +328,12 @@ async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    }
+    })
 }
 
 // ── MiniMax ─────────────────────────────────────────────────
 
-async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
+async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
     let api_domain = if is_cn {
@@ -306,12 +353,12 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return make_error(format!("Network error: {e}")),
+        Err(e) => return Err(format!("Network error: {e}")),
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return SubscriptionQuota {
+        return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
             credential_message: Some("Invalid API key".to_string()),
@@ -320,17 +367,21 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
-        };
+        });
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return make_error(format!("API error (HTTP {status}): {body}"));
+        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
-    let body: serde_json::Value = match resp.json().await {
+    let raw = match resp.bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(format!("Failed to read response: {e}")),
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
         Ok(v) => v,
-        Err(e) => return make_error(format!("Failed to parse response: {e}")),
+        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
 
     // 检查业务级别错误
@@ -344,7 +395,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
                 .get("status_msg")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error");
-            return make_error(format!("API error (code {status_code}): {msg}"));
+            return Ok(make_error(format!("API error (code {status_code}): {msg}")));
         }
     }
 
@@ -393,7 +444,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
         }
     }
 
-    SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -402,50 +453,279 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    }
+    })
 }
 
 // ── 公开入口 ────────────────────────────────────────────────
 
-pub async fn get_coding_plan_quota(
-    base_url: &str,
+const ZHIPU_TEAM_QUOTA_URL: &str = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
+
+async fn query_zhipu_team(
     api_key: &str,
+    organization_id: &str,
+    project_id: &str,
 ) -> Result<SubscriptionQuota, String> {
-    if api_key.trim().is_empty() {
+    query_zhipu_team_at(ZHIPU_TEAM_QUOTA_URL, api_key, organization_id, project_id).await
+}
+
+async fn query_zhipu_team_at(
+    quota_url_base: &str,
+    api_key: &str,
+    organization_id: &str,
+    project_id: &str,
+) -> Result<SubscriptionQuota, String> {
+    let response = crate::proxy::http_client::get()
+        .get(format!("{quota_url_base}?type=2"))
+        .header("Authorization", api_key)
+        .header("bigmodel-organization", organization_id)
+        .header("bigmodel-project", project_id)
+        .header("Content-Type", "application/json")
+        .header("Accept-Language", "en-US,en")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| format!("Network error: {error}"))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
-            credential_status: CredentialStatus::NotFound,
-            credential_message: None,
+            credential_status: CredentialStatus::Expired,
+            credential_message: Some("Invalid API key".to_string()),
             success: false,
             tiers: vec![],
             extra_usage: None,
-            error: None,
-            queried_at: None,
+            error: Some(format!("Authentication failed (HTTP {status})")),
+            queried_at: Some(now_millis()),
         });
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
+    }
+
+    let raw = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read response: {error}"))?;
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(body) => body,
+        Err(error) => return Ok(make_error(format!("Failed to parse response: {error}"))),
+    };
+
+    if body.get("success").and_then(|value| value.as_bool()) == Some(false) {
+        let message = body
+            .get("msg")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Unknown error");
+        return Ok(make_error(format!("API error: {message}")));
+    }
+
+    let Some(data) = body.get("data") else {
+        return Ok(make_error("Missing 'data' field in response".to_string()));
+    };
+    let mut quota = SubscriptionQuota {
+        tool: "coding_plan".to_string(),
+        credential_status: CredentialStatus::Valid,
+        credential_message: data
+            .get("level")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        success: true,
+        tiers: vec![],
+        extra_usage: None,
+        error: None,
+        queried_at: Some(now_millis()),
+    };
+    let personal_shape = serde_json::json!({ "success": true, "data": data });
+    if let Some(data) = personal_shape.get("data") {
+        let mut five_hour = None;
+        let mut weekly = None;
+        if let Some(limits) = data.get("limits").and_then(|value| value.as_array()) {
+            for item in limits {
+                if !item
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("TOKENS_LIMIT"))
+                {
+                    continue;
+                }
+                let entry = (
+                    item.get("percentage")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or(0.0),
+                    item.get("nextResetTime")
+                        .and_then(|value| value.as_i64())
+                        .and_then(millis_to_iso8601),
+                );
+                match item.get("unit").and_then(|value| value.as_i64()) {
+                    Some(6) => weekly = Some(entry),
+                    _ => five_hour = Some(entry),
+                }
+            }
+        }
+        for (name, entry) in [("five_hour", five_hour), ("weekly_limit", weekly)] {
+            if let Some((utilization, resets_at)) = entry {
+                quota.tiers.push(QuotaTier {
+                    name: name.to_string(),
+                    utilization,
+                    resets_at,
+                });
+            }
+        }
+    }
+    Ok(quota)
+}
+
+pub async fn get_coding_plan_quota(
+    base_url: &str,
+    api_key: &str,
+    coding_plan_provider: Option<&str>,
+    team_organization_id: Option<&str>,
+    team_project_id: Option<&str>,
+) -> Result<SubscriptionQuota, String> {
+    if coding_plan_provider.is_some_and(|value| value.eq_ignore_ascii_case("zhipu_team")) {
+        let organization_id = team_organization_id.unwrap_or("").trim();
+        let project_id = team_project_id.unwrap_or("").trim();
+        if api_key.trim().is_empty() || organization_id.is_empty() || project_id.is_empty() {
+            return Ok(coding_plan_not_found(Some(
+                "Zhipu team plan needs the API key + organization ID + project ID".to_string(),
+            )));
+        }
+        return query_zhipu_team(api_key, organization_id, project_id).await;
+    }
+
+    if api_key.trim().is_empty() {
+        return Ok(coding_plan_not_found(None));
     }
 
     let provider = match detect_provider(base_url) {
         Some(p) => p,
         None => {
-            return Ok(SubscriptionQuota {
-                tool: "coding_plan".to_string(),
-                credential_status: CredentialStatus::NotFound,
-                credential_message: None,
-                success: false,
-                tiers: vec![],
-                extra_usage: None,
-                error: None,
-                queried_at: None,
-            })
+            return Ok(coding_plan_not_found(Some(format!(
+                "No supported coding-plan quota endpoint for {base_url}"
+            ))))
         }
     };
 
     let quota = match provider {
         CodingPlanProvider::Kimi => query_kimi(api_key).await,
-        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => query_zhipu(api_key).await,
+        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => {
+            query_zhipu(base_url, api_key).await
+        }
         CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true).await,
         CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false).await,
     };
 
-    Ok(quota)
+    quota
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn ensure_no_proxy_for_loopback() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+            std::env::set_var("no_proxy", "127.0.0.1,localhost");
+        });
+    }
+
+    #[tokio::test]
+    async fn zhipu_team_requires_all_credentials_before_network_io() {
+        let quota = get_coding_plan_quota(
+            "https://open.bigmodel.cn/api/coding",
+            "key",
+            Some("zhipu_team"),
+            Some("org"),
+            None,
+        )
+        .await
+        .expect("deterministic missing credential result");
+        assert!(!quota.success);
+        assert!(matches!(
+            quota.credential_status,
+            CredentialStatus::NotFound
+        ));
+        assert!(quota
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("organization ID + project ID")));
+    }
+
+    #[tokio::test]
+    async fn zhipu_team_request_uses_type2_and_team_headers() {
+        ensure_no_proxy_for_loopback();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_server = captured.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 2048];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read request");
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            *captured_server.lock().expect("capture lock") =
+                String::from_utf8_lossy(&bytes).to_string();
+            let body = serde_json::json!({
+                "success": true,
+                "data": {
+                    "level": "team",
+                    "limits": [
+                        {"type": "TOKENS_LIMIT", "unit": 3, "percentage": 25.0},
+                        {"type": "TOKENS_LIMIT", "unit": 6, "percentage": 50.0}
+                    ]
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let quota = query_zhipu_team_at(
+            &format!("http://{address}/quota"),
+            "team-key",
+            "org-id",
+            "project-id",
+        )
+        .await
+        .expect("team quota request");
+        server.join().expect("server thread");
+
+        let request = captured.lock().expect("capture lock").to_ascii_lowercase();
+        assert!(request.contains("/quota?type=2"));
+        assert!(request.contains("authorization: team-key"));
+        assert!(request.contains("bigmodel-organization: org-id"));
+        assert!(request.contains("bigmodel-project: project-id"));
+        assert_eq!(quota.tiers.len(), 2);
+        assert_eq!(quota.tiers[0].name, "five_hour");
+        assert_eq!(quota.tiers[1].name, "weekly_limit");
+    }
+
+    #[tokio::test]
+    async fn zhipu_team_transport_failure_stays_in_error_channel() {
+        ensure_no_proxy_for_loopback();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        drop(listener);
+
+        let error =
+            query_zhipu_team_at(&format!("http://{address}/quota"), "key", "org", "project")
+                .await
+                .expect_err("connection failure must remain transient");
+        assert!(error.contains("Network error"));
+    }
 }

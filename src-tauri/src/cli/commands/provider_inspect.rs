@@ -635,7 +635,7 @@ fn push_subscription_quota_lines(
             lines.push(format!(
                 "{}: {}",
                 texts::tui_quota_extra_usage(),
-                parts.join("")
+                parts.join(" ")
             ));
         }
     }
@@ -745,7 +745,7 @@ fn model_fetch_target(
     }
 
     match app_type {
-        AppType::Claude => {
+        AppType::Claude | AppType::ClaudeDesktop => {
             let auth_value = StreamCheckService::extract_claude_key(provider).ok_or_else(|| {
                 AppError::Message(format!("Missing API key for provider '{}'", provider.id))
             })?;
@@ -858,7 +858,7 @@ fn one_off_model_fetch_target(
 
 fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetchStrategy {
     match app_type {
-        AppType::Claude => ProviderModelFetchStrategy::Anthropic,
+        AppType::Claude | AppType::ClaudeDesktop => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
         AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
             ProviderModelFetchStrategy::Bearer

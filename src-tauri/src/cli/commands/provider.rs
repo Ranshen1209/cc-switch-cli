@@ -1,4 +1,4 @@
-use clap::{Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use std::{collections::HashSet, path::PathBuf};
 
 use super::{provider_inspect, provider_usage_query};
@@ -16,7 +16,10 @@ use crate::cli::commands::provider_input::{
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
-use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider::{
+    AuthBinding, AuthBindingSource, ClaudeApiKeyField, ClaudeDesktopMode, ClaudeDesktopModelRoute,
+    Provider, ProviderMeta,
+};
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use indexmap::IndexMap;
@@ -64,6 +67,9 @@ fn normalize_claude_api_format(raw: &str) -> &'static str {
 
 fn normalize_codex_api_format(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "anthropic_messages" | "anthropic-messages" | "messages" => {
+            CLAUDE_API_FORMAT_ANTHROPIC
+        }
         "chat"
         | "chat_completions"
         | "chat-completions"
@@ -253,6 +259,17 @@ fn apply_codex_api_format(provider: &mut Provider, api_format: &str) {
 }
 
 fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
+    if matches!(app_type, AppType::ClaudeDesktop) {
+        if matches!(
+            crate::claude_desktop_config::provider_mode(provider),
+            ClaudeDesktopMode::Direct
+        ) {
+            apply_claude_api_format(provider, CLAUDE_API_FORMAT_ANTHROPIC);
+            return true;
+        }
+        return false;
+    }
+
     if !matches!(app_type, AppType::Claude) {
         return true;
     }
@@ -368,7 +385,9 @@ fn prompt_and_apply_provider_api_format(
     provider: &mut Provider,
 ) -> Result<(), AppError> {
     match app_type {
-        AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
+        AppType::Claude | AppType::ClaudeDesktop => {
+            prompt_and_apply_claude_api_format(app_type, provider)
+        }
         AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
         AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
     }
@@ -541,6 +560,85 @@ impl From<ClaudeApiKeyFieldArg> for ClaudeApiKeyField {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ClaudeDesktopModeArg {
+    Direct,
+    Proxy,
+}
+
+impl From<ClaudeDesktopModeArg> for ClaudeDesktopMode {
+    fn from(value: ClaudeDesktopModeArg) -> Self {
+        match value {
+            ClaudeDesktopModeArg::Direct => Self::Direct,
+            ClaudeDesktopModeArg::Proxy => Self::Proxy,
+        }
+    }
+}
+
+#[derive(Args)]
+pub struct ProviderAddCommand {
+    /// Provider template to apply before creation
+    #[arg(long, value_enum)]
+    pub template: Option<ProviderAddTemplate>,
+    /// Provider display name (required)
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Explicit provider ID (default: generated from the name)
+    #[arg(long)]
+    pub id: Option<String>,
+    /// API endpoint base URL (Claude/Codex/Gemini field mode)
+    #[arg(long, conflicts_with_all = ["config", "config_file"])]
+    pub base_url: Option<String>,
+    /// API key or token (Claude/Codex/Gemini field mode)
+    #[arg(long, conflicts_with_all = ["config", "config_file"])]
+    pub api_key: Option<String>,
+    /// Default model (Claude/Codex/Gemini field mode, optional)
+    #[arg(long, conflicts_with_all = ["config", "config_file"])]
+    pub model: Option<String>,
+    /// Raw settings_config as a JSON string (any app, advanced use)
+    #[arg(long, conflicts_with = "config_file")]
+    pub config: Option<String>,
+    /// Raw settings_config read from a JSON file (any app, advanced use)
+    #[arg(long)]
+    pub config_file: Option<PathBuf>,
+    /// Website URL (optional)
+    #[arg(long)]
+    pub website_url: Option<String>,
+    /// Notes (optional)
+    #[arg(long)]
+    pub notes: Option<String>,
+    /// Sort index (optional)
+    #[arg(long)]
+    pub sort_index: Option<usize>,
+    /// Claude API-key field to populate (default: auth-token)
+    #[arg(long, value_enum)]
+    pub api_key_field: Option<ClaudeApiKeyFieldArg>,
+    /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: anthropic|responses|chat)
+    #[arg(long)]
+    pub api_format: Option<String>,
+    /// Codex Anthropic upstream: emulate the Claude Code client fingerprint
+    #[arg(long)]
+    pub impersonate_claude_code: bool,
+    /// Codex Anthropic upstream: override Anthropic max_tokens
+    #[arg(long)]
+    pub max_output_tokens: Option<u64>,
+    /// Attach the app-level common config snippet (Claude/Codex/Gemini)
+    #[arg(long)]
+    pub common_config: bool,
+    /// Codex OAuth managed account ID (required for the codex-oauth template)
+    #[arg(long)]
+    pub account_id: Option<String>,
+    /// Enable Codex fast mode (codex-oauth template)
+    #[arg(long)]
+    pub fast_mode: bool,
+    /// Claude Desktop provider mode
+    #[arg(long, value_enum)]
+    pub desktop_mode: Option<ClaudeDesktopModeArg>,
+    /// Claude Desktop model-route map as JSON
+    #[arg(long)]
+    pub desktop_routes: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum ProviderCommand {
     /// List all providers
@@ -553,56 +651,7 @@ pub enum ProviderCommand {
         id: String,
     },
     /// Add a new provider (non-interactive; use the TUI for interactive add)
-    Add {
-        /// Provider template to apply before creation
-        #[arg(long, value_enum)]
-        template: Option<ProviderAddTemplate>,
-        /// Provider display name (required)
-        #[arg(long)]
-        name: Option<String>,
-        /// Explicit provider ID (default: generated from the name)
-        #[arg(long)]
-        id: Option<String>,
-        /// API endpoint base URL (Claude/Codex/Gemini field mode)
-        #[arg(long, conflicts_with_all = ["config", "config_file"])]
-        base_url: Option<String>,
-        /// API key or token (Claude/Codex/Gemini field mode)
-        #[arg(long, conflicts_with_all = ["config", "config_file"])]
-        api_key: Option<String>,
-        /// Default model (Claude/Codex/Gemini field mode, optional)
-        #[arg(long, conflicts_with_all = ["config", "config_file"])]
-        model: Option<String>,
-        /// Raw settings_config as a JSON string (any app, advanced use)
-        #[arg(long, conflicts_with = "config_file")]
-        config: Option<String>,
-        /// Raw settings_config read from a JSON file (any app, advanced use)
-        #[arg(long)]
-        config_file: Option<PathBuf>,
-        /// Website URL (optional)
-        #[arg(long)]
-        website_url: Option<String>,
-        /// Notes (optional)
-        #[arg(long)]
-        notes: Option<String>,
-        /// Sort index (optional)
-        #[arg(long)]
-        sort_index: Option<usize>,
-        /// Claude API-key field to populate (default: auth-token)
-        #[arg(long, value_enum)]
-        api_key_field: Option<ClaudeApiKeyFieldArg>,
-        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat)
-        #[arg(long)]
-        api_format: Option<String>,
-        /// Attach the app-level common config snippet (Claude/Codex/Gemini)
-        #[arg(long)]
-        common_config: bool,
-        /// Codex OAuth managed account ID (required for the codex-oauth template)
-        #[arg(long)]
-        account_id: Option<String>,
-        /// Enable Codex fast mode (codex-oauth template)
-        #[arg(long)]
-        fast_mode: bool,
-    },
+    Add(Box<ProviderAddCommand>),
     /// Edit a provider
     Edit {
         /// Provider ID to edit
@@ -690,26 +739,8 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::List => provider_inspect::list_providers(app_type),
         ProviderCommand::Current => provider_inspect::show_current(app_type),
         ProviderCommand::Switch { id } => switch_provider(app_type, &id),
-        ProviderCommand::Add {
-            template,
-            name,
-            id,
-            base_url,
-            api_key,
-            model,
-            config,
-            config_file,
-            website_url,
-            notes,
-            sort_index,
-            api_key_field,
-            api_format,
-            common_config,
-            account_id,
-            fast_mode,
-        } => add_provider(
-            app_type,
-            AddProviderArgs {
+        ProviderCommand::Add(command) => {
+            let ProviderAddCommand {
                 template,
                 name,
                 id,
@@ -721,13 +752,42 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 website_url,
                 notes,
                 sort_index,
-                api_key_field: api_key_field.map(ClaudeApiKeyField::from),
+                api_key_field,
                 api_format,
+                impersonate_claude_code,
+                max_output_tokens,
                 common_config,
                 account_id,
                 fast_mode,
-            },
-        ),
+                desktop_mode,
+                desktop_routes,
+            } = *command;
+            add_provider(
+                app_type,
+                AddProviderArgs {
+                    template,
+                    name,
+                    id,
+                    base_url,
+                    api_key,
+                    model,
+                    config,
+                    config_file,
+                    website_url,
+                    notes,
+                    sort_index,
+                    api_key_field: api_key_field.map(ClaudeApiKeyField::from),
+                    api_format,
+                    impersonate_claude_code,
+                    max_output_tokens,
+                    common_config,
+                    account_id,
+                    fast_mode,
+                    desktop_mode,
+                    desktop_routes,
+                },
+            )
+        }
         ProviderCommand::Edit { id } => edit_provider(app_type, &id),
         ProviderCommand::Delete { id } => delete_provider(app_type, &id),
         ProviderCommand::Duplicate { id, edit } => duplicate_provider(app_type, &id, edit),
@@ -914,9 +974,90 @@ struct AddProviderArgs {
     sort_index: Option<usize>,
     api_key_field: Option<ClaudeApiKeyField>,
     api_format: Option<String>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
+    desktop_mode: Option<ClaudeDesktopModeArg>,
+    desktop_routes: Option<String>,
+}
+
+fn apply_codex_anthropic_options(
+    app_type: &AppType,
+    provider: &mut Provider,
+    api_key_field: Option<ClaudeApiKeyField>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
+) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Codex) {
+        if impersonate_claude_code || max_output_tokens.is_some() {
+            return Err(AppError::InvalidInput(
+                "--impersonate-claude-code and --max-output-tokens require --app codex".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let is_anthropic = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        == Some(CLAUDE_API_FORMAT_ANTHROPIC);
+    if !is_anthropic && (impersonate_claude_code || max_output_tokens.is_some()) {
+        return Err(AppError::InvalidInput(
+            "Codex Anthropic options require --api-format anthropic".to_string(),
+        ));
+    }
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_key_field = if is_anthropic && api_key_field == Some(ClaudeApiKeyField::ApiKey) {
+        Some("ANTHROPIC_API_KEY".to_string())
+    } else {
+        None
+    };
+    meta.impersonate_claude_code = is_anthropic.then_some(impersonate_claude_code);
+    meta.max_output_tokens = is_anthropic
+        .then_some(max_output_tokens)
+        .flatten()
+        .filter(|value| *value > 0);
+    prune_empty_provider_meta(provider);
+    Ok(())
+}
+
+fn apply_claude_desktop_options(
+    app_type: &AppType,
+    provider: &mut Provider,
+    mode: Option<ClaudeDesktopModeArg>,
+    routes_json: Option<&str>,
+) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::ClaudeDesktop) {
+        if mode.is_some() || routes_json.is_some() {
+            return Err(AppError::InvalidInput(
+                "--desktop-mode and --desktop-routes require --app claude-desktop".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    let routes = match routes_json.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => {
+            serde_json::from_str::<std::collections::HashMap<String, ClaudeDesktopModelRoute>>(raw)
+                .map_err(|error| {
+                    AppError::InvalidInput(format!("invalid --desktop-routes JSON: {error}"))
+                })?
+        }
+        None => provider
+            .meta
+            .as_ref()
+            .map(|meta| meta.claude_desktop_model_routes.clone())
+            .unwrap_or_default(),
+    };
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.claude_desktop_mode = Some(mode.map(Into::into).unwrap_or(ClaudeDesktopMode::Direct));
+    meta.claude_desktop_model_routes = routes;
+    Ok(())
 }
 
 /// Trim a flag value and drop it when empty.
@@ -1085,7 +1226,7 @@ fn build_add_settings_config(
 ) -> Result<serde_json::Value, AppError> {
     // Raw config wins for every app type.
     if let Some(raw) = raw_config {
-        if matches!(app_type, AppType::Claude) {
+        if matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) {
             let field = args
                 .api_key_field
                 .unwrap_or_else(|| ClaudeApiKeyField::from_meta_and_settings(None, raw));
@@ -1098,7 +1239,7 @@ fn build_add_settings_config(
     }
 
     match app_type {
-        AppType::Claude => {
+        AppType::Claude | AppType::ClaudeDesktop => {
             let base_url = non_empty(args.base_url.clone())
                 .or_else(|| claude_current_base_url(current))
                 .ok_or_else(|| add_missing_field_error("--base-url"))?;
@@ -1183,6 +1324,9 @@ fn validate_claude_api_format(raw: &str) -> Result<&'static str, AppError> {
 
 fn validate_codex_api_format(raw: &str) -> Result<&'static str, AppError> {
     match raw.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "anthropic_messages" | "anthropic-messages" | "messages" => {
+            Ok(CLAUDE_API_FORMAT_ANTHROPIC)
+        }
         "chat"
         | "chat_completions"
         | "chat-completions"
@@ -1192,7 +1336,10 @@ fn validate_codex_api_format(raw: &str) -> Result<&'static str, AppError> {
         "responses" | "openai_responses" | "openai-responses" => {
             Ok(CLAUDE_API_FORMAT_OPENAI_RESPONSES)
         }
-        other => Err(add_invalid_api_format_error(other, "responses, chat")),
+        other => Err(add_invalid_api_format_error(
+            other,
+            "anthropic, responses, chat",
+        )),
     }
 }
 
@@ -1205,7 +1352,7 @@ fn apply_add_provider_api_format(
     api_format: Option<&str>,
 ) -> Result<(), AppError> {
     match app_type {
-        AppType::Claude => {
+        AppType::Claude | AppType::ClaudeDesktop => {
             if apply_fixed_claude_api_format_if_needed(app_type, provider) {
                 return Ok(());
             }
@@ -1213,6 +1360,17 @@ fn apply_add_provider_api_format(
                 Some(raw) => validate_claude_api_format(raw)?,
                 None => effective_claude_api_format(provider),
             };
+            if matches!(app_type, AppType::ClaudeDesktop)
+                && matches!(
+                    crate::claude_desktop_config::provider_mode(provider),
+                    ClaudeDesktopMode::Direct
+                )
+                && format != CLAUDE_API_FORMAT_ANTHROPIC
+            {
+                return Err(AppError::InvalidInput(
+                    "Claude Desktop direct mode only supports --api-format anthropic".to_string(),
+                ));
+            }
             apply_claude_api_format(provider, format);
         }
         AppType::Codex => {
@@ -1310,9 +1468,8 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
             || args.api_key.is_some()
             || args.model.is_some();
         if template.requires_settings_prompt() {
-            // Sponsor / third-party templates: fold the CLI field values into the
-            // template's prefilled settings_config (base_url is inherited when
-            // --base-url is omitted).
+            // Configurable templates inherit prefilled settings for omitted fields
+            // and apply explicit CLI overrides on top.
             let current = provider.settings_config.clone();
             provider.settings_config = build_add_settings_config(
                 &app_type,
@@ -1338,10 +1495,23 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         &mut provider,
         settings_prompt_result.as_ref(),
     );
+    apply_claude_desktop_options(
+        &app_type,
+        &mut provider,
+        args.desktop_mode,
+        args.desktop_routes.as_deref(),
+    )?;
     apply_add_provider_api_format(
         &app_type,
         &mut provider,
         non_empty(args.api_format.clone()).as_deref(),
+    )?;
+    apply_codex_anthropic_options(
+        &app_type,
+        &mut provider,
+        args.api_key_field,
+        args.impersonate_claude_code,
+        args.max_output_tokens,
     )?;
     apply_add_codex_oauth_options(
         &app_type,

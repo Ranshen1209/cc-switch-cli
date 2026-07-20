@@ -16,6 +16,10 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+pub fn get_home_dir() -> PathBuf {
+    home_dir().expect("无法获取用户主目录")
+}
+
 /// 获取 Claude Code 配置目录路径
 ///
 /// Priority: `CLAUDE_CONFIG_DIR` env var > cc-switch settings override > `$HOME/.claude`

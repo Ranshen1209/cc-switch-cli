@@ -17,9 +17,12 @@ use super::{
     metrics::estimate_tokens_from_value,
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
-        build_anthropic_stream_response, build_buffered_codex_chat_response,
-        build_buffered_codex_chat_response_with_context, build_buffered_json_response,
-        build_buffered_passthrough_response, build_codex_chat_error_response,
+        build_anthropic_stream_response, build_buffered_codex_anthropic_response_with_context,
+        build_buffered_codex_anthropic_stream_response_with_context,
+        build_buffered_codex_chat_response, build_buffered_codex_chat_response_with_context,
+        build_buffered_json_response, build_buffered_passthrough_response,
+        build_codex_anthropic_response_with_context,
+        build_codex_anthropic_stream_response_with_context, build_codex_chat_error_response,
         build_codex_chat_response_with_context, build_codex_chat_stream_response_with_context,
         build_json_response, build_passthrough_response, is_sse_response, PreparedResponse,
     },
@@ -43,7 +46,43 @@ pub async fn handle_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    handle_claude_request(state, headers, body).await
+    handle_claude_request(state, headers, body, AppType::Claude).await
+}
+
+pub async fn handle_claude_desktop_messages(
+    State(state): State<ProxyServerState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(error) = validate_claude_desktop_gateway_auth(&state, &headers) {
+        return proxy_error_response(error);
+    }
+    handle_claude_request(state, headers, body, AppType::ClaudeDesktop).await
+}
+
+pub async fn handle_claude_desktop_models(
+    State(state): State<ProxyServerState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = validate_claude_desktop_gateway_auth(&state, &headers) {
+        return proxy_error_response(error);
+    }
+
+    let providers = match state
+        .provider_router
+        .select_providers(AppType::ClaudeDesktop.as_str())
+        .await
+    {
+        Ok(providers) => providers,
+        Err(error) => return proxy_error_response(error),
+    };
+    let Some(provider) = providers.first() else {
+        return proxy_error_response(ProxyError::NoAvailableProvider);
+    };
+    match crate::claude_desktop_config::model_list_response(provider) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => proxy_error_response(ProxyError::ConfigError(error.to_string())),
+    }
 }
 
 pub async fn handle_chat_completions(
@@ -122,11 +161,12 @@ async fn handle_claude_request(
     state: ProxyServerState,
     headers: HeaderMap,
     body: Value,
+    app_type: AppType,
 ) -> Response {
     state
         .record_estimated_input_tokens(estimate_tokens_from_value(&body))
         .await;
-    let context = match HandlerContext::load(&state, AppType::Claude, &headers, &body).await {
+    let context = match HandlerContext::load(&state, app_type, &headers, &body).await {
         Ok(context) => context,
         Err(error) => {
             state.record_request_error(&error).await;
@@ -362,6 +402,34 @@ async fn handle_claude_request(
     .await
 }
 
+fn validate_claude_desktop_gateway_auth(
+    state: &ProxyServerState,
+    headers: &HeaderMap,
+) -> Result<(), ProxyError> {
+    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.db.as_ref())
+        .map_err(|error| ProxyError::AuthError(error.to_string()))?;
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .ok_or_else(|| {
+            ProxyError::AuthError(
+                "Claude Desktop gateway request is missing Authorization".to_string(),
+            )
+        })?
+        .to_str()
+        .map_err(|_| ProxyError::AuthError("Invalid Authorization header".to_string()))?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+        .unwrap_or_default()
+        .trim();
+    if token != expected {
+        return Err(ProxyError::AuthError(
+            "Invalid Claude Desktop gateway token".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn build_buffered_claude_transform_response<F>(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -554,12 +622,37 @@ async fn handle_passthrough_request(
             &forward_result.provider,
             &endpoint,
         );
+        let converts_codex_anthropic =
+            super::providers::should_convert_codex_responses_to_anthropic(
+                &forward_result.provider,
+                &endpoint,
+            );
         let success_sync = status.is_success().then(|| SuccessSyncInfo {
             app_type: context.app_type.clone(),
             provider: forward_result.provider.clone(),
             current_provider_id_at_start: context.current_provider_id_at_start.clone(),
         });
         let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response)
+                if converts_codex_anthropic
+                    && status.is_success()
+                    && is_sse_response(&response) =>
+            {
+                build_codex_anthropic_stream_response_with_context(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    context.streaming_idle_timeout(),
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+            }
+            super::forwarder::StreamingResponse::Live(response) if converts_codex_anthropic => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(first_byte_timeout, request_started_at),
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+                .await
+            }
             super::forwarder::StreamingResponse::Live(response)
                 if converts_codex_chat && status.is_success() =>
             {
@@ -597,6 +690,23 @@ async fn handle_passthrough_request(
                 )
                 .await
             }
+            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_anthropic => {
+                if status.is_success() {
+                    build_buffered_codex_anthropic_stream_response_with_context(
+                        status,
+                        &response.headers,
+                        response.body,
+                        codex_tool_context.clone().unwrap_or_default(),
+                    )
+                } else {
+                    build_buffered_codex_anthropic_response_with_context(
+                        status,
+                        &response.headers,
+                        response.body,
+                        codex_tool_context.clone().unwrap_or_default(),
+                    )
+                }
+            }
             super::forwarder::StreamingResponse::Buffered(response) => {
                 build_buffered_passthrough_response(status, &response.headers, response.body)
             }
@@ -605,7 +715,7 @@ async fn handle_passthrough_request(
             &context,
             forward_result.provider.clone(),
             true,
-            if converts_codex_chat {
+            if converts_codex_chat || converts_codex_anthropic {
                 UsageLogPolicy::Transformed
             } else {
                 UsageLogPolicy::Passthrough
@@ -1027,6 +1137,41 @@ async fn finish_codex_live_aware_response(
         };
     }
 
+    if super::providers::should_convert_codex_responses_to_anthropic(&provider, endpoint) {
+        let request_log = Some(RequestLogContext::from_handler(
+            context,
+            provider.clone(),
+            false,
+            UsageLogPolicy::Transformed,
+        ));
+        let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response) => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(non_streaming_timeout, request_started_at),
+                    tool_context,
+                )
+                .await
+            }
+            super::forwarder::StreamingResponse::Buffered(response) => {
+                build_buffered_codex_anthropic_response_with_context(
+                    response.status,
+                    &response.headers,
+                    response.body,
+                    tool_context,
+                )
+            }
+        };
+        return ResponseHandler::finish_buffered(
+            &context.state,
+            response_result,
+            status,
+            success_sync,
+            request_log,
+        )
+        .await;
+    }
+
     match response {
         super::forwarder::StreamingResponse::Live(response) => {
             let first_byte_timeout = if is_sse_response(&response) {
@@ -1115,7 +1260,8 @@ fn passthrough_usage_log_policy(
     endpoint: &str,
 ) -> UsageLogPolicy {
     if matches!(app_type, AppType::Codex)
-        && super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+        && (super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
+            || super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint))
     {
         UsageLogPolicy::Transformed
     } else {

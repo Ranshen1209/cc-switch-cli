@@ -187,14 +187,24 @@ fn provider_requires_local_proxy(
     app_type: &crate::app_config::AppType,
     provider: &crate::provider::Provider,
 ) -> Option<&'static str> {
-    if !matches!(app_type, crate::app_config::AppType::Claude) {
-        return None;
+    match app_type {
+        crate::app_config::AppType::Claude => {
+            let api_format = get_claude_api_format(provider);
+            ClaudeApiFormat::from_raw(api_format)
+                .requires_proxy()
+                .then_some(api_format)
+        }
+        crate::app_config::AppType::Codex => {
+            if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
+                Some("anthropic")
+            } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+                Some("openai_chat")
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
-
-    let api_format = get_claude_api_format(provider);
-    ClaudeApiFormat::from_raw(api_format)
-        .requires_proxy()
-        .then_some(api_format)
 }
 
 fn provider_switch_proxy_notice_api_format(

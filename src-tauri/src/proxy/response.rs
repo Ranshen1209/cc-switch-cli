@@ -20,10 +20,11 @@ use super::{
         codex_chat_history::{record_responses_sse_stream, CodexChatHistoryStore},
         gemini_shadow::GeminiShadowStore,
         streaming::create_anthropic_sse_stream,
+        streaming_codex_anthropic::create_responses_sse_stream_from_anthropic_with_context,
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_responses::create_anthropic_sse_stream_from_responses,
-        transform_codex_chat,
+        transform_codex_anthropic, transform_codex_chat,
         transform_gemini::AnthropicToolSchemaHints,
     },
 };
@@ -384,6 +385,159 @@ pub fn build_codex_chat_stream_response_with_context(
         .map(|response| PreparedResponse::streaming(response, stream_completion))
         .map_err(|error| {
             ProxyError::RequestFailed(format!("build Codex Chat stream response failed: {error}"))
+        })
+}
+
+pub fn build_codex_anthropic_stream_response_with_context(
+    response: reqwest::Response,
+    first_byte_timeout: Option<Duration>,
+    idle_timeout: Option<Duration>,
+    tool_context: transform_codex_chat::CodexToolContext,
+) -> Result<PreparedResponse, ProxyError> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, &headers, true, true);
+
+    let stream_completion = StreamCompletion::default();
+    let timed_stream = with_stream_timeouts(
+        response.bytes_stream(),
+        first_byte_timeout,
+        idle_timeout,
+        Some(stream_completion.clone()),
+    );
+    let responses_stream =
+        create_responses_sse_stream_from_anthropic_with_context(timed_stream, tool_context);
+
+    builder
+        .body(Body::from_stream(responses_stream))
+        .map(|response| PreparedResponse::streaming(response, stream_completion))
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!(
+                "build Codex Anthropic stream response failed: {error}"
+            ))
+        })
+}
+
+pub fn build_buffered_codex_anthropic_stream_response_with_context(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+    tool_context: transform_codex_chat::CodexToolContext,
+) -> Result<PreparedResponse, ProxyError> {
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, headers, true, true);
+    let stream_completion = StreamCompletion::default();
+    let upstream = futures::stream::iter([Ok::<Bytes, std::io::Error>(body)]);
+    let responses_stream =
+        create_responses_sse_stream_from_anthropic_with_context(upstream, tool_context);
+    let recorded_completion = stream_completion.clone();
+    let recorded_stream = async_stream::stream! {
+        tokio::pin!(responses_stream);
+        while let Some(item) = responses_stream.next().await {
+            match item {
+                Ok(chunk) => yield Ok::<Bytes, std::io::Error>(chunk),
+                Err(error) => {
+                    recorded_completion.record_error(error.to_string());
+                    yield Err(error);
+                    return;
+                }
+            }
+        }
+        recorded_completion.record_success();
+    };
+
+    builder
+        .body(Body::from_stream(recorded_stream))
+        .map(|response| PreparedResponse::streaming(response, stream_completion))
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!(
+                "build buffered Codex Anthropic stream response failed: {error}"
+            ))
+        })
+}
+
+pub async fn build_codex_anthropic_response_with_context(
+    response: reqwest::Response,
+    timeout: Option<Duration>,
+    tool_context: transform_codex_chat::CodexToolContext,
+) -> Result<PreparedResponse, ProxyError> {
+    let status = response.status();
+    let (headers, body) = read_decoded_buffered_response(response, timeout).await?;
+    build_buffered_codex_anthropic_response_with_context(status, &headers, body, tool_context)
+}
+
+pub fn build_buffered_codex_anthropic_response_with_context(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+    tool_context: transform_codex_chat::CodexToolContext,
+) -> Result<PreparedResponse, ProxyError> {
+    let upstream_error_summary = if !status.is_success() {
+        summarize_upstream_body_bytes(&body)
+    } else {
+        None
+    };
+
+    let response_body = if status.is_success() {
+        let upstream_body: Value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                let body_text = String::from_utf8_lossy(&body);
+                if body_text.contains("data:") || body_text.contains("event:") {
+                    transform_codex_anthropic::anthropic_sse_to_message_value(&body_text)
+                        .map_err(|aggregate_error| {
+                            ProxyError::RequestFailed(format!(
+                                "parse upstream Anthropic response failed ({error}); SSE aggregation failed: {}",
+                                proxy_error_message(aggregate_error)
+                            ))
+                        })?
+                } else {
+                    return Err(ProxyError::RequestFailed(format!(
+                        "parse upstream Anthropic json failed: {error}"
+                    )));
+                }
+            }
+        };
+        transform_codex_anthropic::anthropic_response_to_responses_with_context(
+            upstream_body,
+            &tool_context,
+        )
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!(
+                "transform upstream Anthropic json failed: {}",
+                proxy_error_message(error)
+            ))
+        })?
+    } else {
+        let parsed_value = parse_codex_chat_error_body(&body);
+        transform_codex_chat::chat_error_to_response_error(Some(&parsed_value))
+    };
+
+    let response_body = serde_json::to_vec(&response_body).map_err(|error| {
+        ProxyError::RequestFailed(format!("serialize Codex Responses json failed: {error}"))
+    })?;
+    let response_bytes = Bytes::from(response_body);
+    let estimated_output_tokens = estimate_tokens_from_bytes(&response_bytes);
+
+    let mut response_headers = headers.clone();
+    response_headers.remove(reqwest::header::CONTENT_TYPE);
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, &response_headers, false, true);
+    builder = builder.header("content-type", "application/json");
+
+    builder
+        .body(Body::from(response_bytes.clone()))
+        .map(|response| {
+            PreparedResponse::buffered(
+                response,
+                estimated_output_tokens,
+                upstream_error_summary,
+                response_bytes,
+            )
+        })
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build Codex Anthropic response failed: {error}"))
         })
 }
 

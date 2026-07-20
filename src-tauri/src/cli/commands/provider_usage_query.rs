@@ -82,7 +82,7 @@ pub enum ProviderUsageQueryCommand {
         json: bool,
     },
     /// Set a provider Usage Query configuration
-    Set(ProviderUsageQuerySetCommand),
+    Set(Box<ProviderUsageQuerySetCommand>),
     /// Clear a provider Usage Query configuration
     Clear {
         /// Provider ID to update
@@ -124,6 +124,15 @@ pub struct ProviderUsageQuerySetCommand {
     /// User ID used by the newapi template
     #[arg(long)]
     pub user_id: Option<String>,
+    /// Coding-plan provider identifier (kimi, zhipu, zhipu_team, minimax)
+    #[arg(long)]
+    pub coding_plan_provider: Option<String>,
+    /// Zhipu team-plan organization ID
+    #[arg(long)]
+    pub team_organization_id: Option<String>,
+    /// Zhipu team-plan project ID
+    #[arg(long)]
+    pub team_project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -131,6 +140,7 @@ pub enum UsageQueryTemplate {
     Custom,
     General,
     Newapi,
+    TokenPlan,
     Balance,
 }
 
@@ -140,6 +150,7 @@ impl UsageQueryTemplate {
             Self::Custom => "custom",
             Self::General => "general",
             Self::Newapi => "newapi",
+            Self::TokenPlan => "token_plan",
             Self::Balance => "balance",
         }
     }
@@ -154,7 +165,7 @@ impl fmt::Display for UsageQueryTemplate {
 pub fn execute(cmd: ProviderUsageQueryCommand, app_type: AppType) -> Result<(), AppError> {
     match cmd {
         ProviderUsageQueryCommand::Show { id, json } => show(app_type, &id, json),
-        ProviderUsageQueryCommand::Set(command) => set(app_type, command),
+        ProviderUsageQueryCommand::Set(command) => set(app_type, *command),
         ProviderUsageQueryCommand::Clear { id } => clear(app_type, &id),
     }
 }
@@ -208,6 +219,11 @@ fn show(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
         "Coding Plan Provider",
         script.coding_plan_provider.as_deref(),
     );
+    print_optional(
+        "Team Organization ID",
+        script.team_organization_id.as_deref(),
+    );
+    print_optional("Team Project ID", script.team_project_id.as_deref());
     println!(
         "Code: {}",
         if script.code.is_empty() {
@@ -330,6 +346,8 @@ fn usage_script_for_template(template: UsageQueryTemplate) -> UsageScript {
         template_type: Some(template.as_str().to_string()),
         auto_query_interval: Some(DEFAULT_USAGE_AUTO_QUERY_INTERVAL),
         coding_plan_provider: None,
+        team_organization_id: None,
+        team_project_id: None,
     }
 }
 
@@ -389,6 +407,7 @@ fn default_code_for_template(template: UsageQueryTemplate) -> &'static str {
         UsageQueryTemplate::Custom => DEFAULT_USAGE_CUSTOM_PRESET,
         UsageQueryTemplate::General => DEFAULT_USAGE_GENERAL_PRESET,
         UsageQueryTemplate::Newapi => DEFAULT_USAGE_NEWAPI_PRESET,
+        UsageQueryTemplate::TokenPlan => "",
         UsageQueryTemplate::Balance => "",
     }
 }
@@ -421,7 +440,7 @@ fn usage_query_custom_variable_comment(app_type: &AppType, provider: &Provider) 
 }
 
 fn usage_query_comment_value(value: &str) -> String {
-    value.trim().replace(['\r', '\n'], "").trim().to_string()
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn apply_template_code(
@@ -483,6 +502,8 @@ fn apply_template_credentials(
             script.access_token = None;
             script.user_id = None;
             script.coding_plan_provider = None;
+            script.team_organization_id = None;
+            script.team_project_id = None;
         }
         "newapi" => {
             set_trimmed_option(&mut script.base_url, command.base_url.as_deref());
@@ -490,6 +511,26 @@ fn apply_template_credentials(
             set_trimmed_option(&mut script.user_id, command.user_id.as_deref());
             script.api_key = None;
             script.coding_plan_provider = None;
+            script.team_organization_id = None;
+            script.team_project_id = None;
+        }
+        "token_plan" => {
+            set_trimmed_option(&mut script.api_key, command.api_key.as_deref());
+            set_trimmed_option(&mut script.base_url, command.base_url.as_deref());
+            set_trimmed_option(
+                &mut script.coding_plan_provider,
+                command.coding_plan_provider.as_deref(),
+            );
+            set_trimmed_option(
+                &mut script.team_organization_id,
+                command.team_organization_id.as_deref(),
+            );
+            set_trimmed_option(
+                &mut script.team_project_id,
+                command.team_project_id.as_deref(),
+            );
+            script.access_token = None;
+            script.user_id = None;
         }
         "custom" | "balance" => {
             script.api_key = None;
@@ -497,6 +538,8 @@ fn apply_template_credentials(
             script.access_token = None;
             script.user_id = None;
             script.coding_plan_provider = None;
+            script.team_organization_id = None;
+            script.team_project_id = None;
         }
         _ => {}
     }
@@ -607,7 +650,7 @@ fn provider_comment_credentials<'a>(
         AppType::Claude if provider.is_codex_oauth() => {
             (Some(CODEX_OAUTH_BASE_URL.to_string()), None)
         }
-        AppType::Claude => {
+        AppType::Claude | AppType::ClaudeDesktop => {
             let env = settings.get("env");
             (
                 env.and_then(|value| value.get("ANTHROPIC_BASE_URL"))
@@ -732,6 +775,9 @@ mod tests {
             base_url: Some("https://usage.example.com".to_string()),
             access_token: Some("token-demo".to_string()),
             user_id: Some("user-demo".to_string()),
+            coding_plan_provider: None,
+            team_organization_id: None,
+            team_project_id: None,
         }
     }
 

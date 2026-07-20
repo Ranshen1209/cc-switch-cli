@@ -79,6 +79,9 @@ fn usage_query_set_command(
         base_url: None,
         access_token: None,
         user_id: None,
+        coding_plan_provider: None,
+        team_organization_id: None,
+        team_project_id: None,
     }
 }
 
@@ -107,6 +110,8 @@ fn usage_script_fixture() -> UsageScript {
         template_type: Some("general".to_string()),
         auto_query_interval: Some(30),
         coding_plan_provider: None,
+        team_organization_id: None,
+        team_project_id: None,
     }
 }
 
@@ -152,7 +157,7 @@ fn provider_usage_query_set_writes_upstream_defaults_and_preserves_meta() {
     command.auto_query_interval = Some(1441);
 
     provider_command(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
         AppType::Claude,
     );
 
@@ -220,7 +225,7 @@ fn provider_usage_query_set_newapi_clears_general_credentials() {
     command.user_id = Some("user-demo".to_string());
 
     provider_command(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
         AppType::Claude,
     );
 
@@ -330,7 +335,7 @@ fn provider_usage_query_set_defaults_to_balance_template_from_provider_url() {
     command.enabled = true;
 
     provider_command(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
         AppType::Claude,
     );
 
@@ -387,7 +392,7 @@ fn provider_usage_query_set_rejects_enabled_script_without_return() {
     command.code = Some("({ request: { url: 'https://usage.example.com' } })".to_string());
 
     let err = provider_command_result(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
         AppType::Claude,
     )
     .expect_err("enabled script without return should be rejected");

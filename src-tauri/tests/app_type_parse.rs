@@ -5,6 +5,14 @@ use cc_switch_lib::AppType;
 #[test]
 fn parse_known_apps_case_insensitive_and_trim() {
     assert!(matches!(AppType::from_str("claude"), Ok(AppType::Claude)));
+    assert!(matches!(
+        AppType::from_str("claude-desktop"),
+        Ok(AppType::ClaudeDesktop)
+    ));
+    assert!(matches!(
+        AppType::from_str("ClaudeDesktop"),
+        Ok(AppType::ClaudeDesktop)
+    ));
     assert!(matches!(AppType::from_str("codex"), Ok(AppType::Codex)));
     assert!(matches!(AppType::from_str("hermes"), Ok(AppType::Hermes)));
     assert!(matches!(
@@ -24,6 +32,13 @@ fn parse_known_apps_case_insensitive_and_trim() {
         AppType::from_str("\nOpenClaw\t"),
         Ok(AppType::OpenClaw)
     ));
+}
+
+#[test]
+fn claude_desktop_is_listed_without_unsupported_failover_controls() {
+    assert!(AppType::all().any(|app| app == AppType::ClaudeDesktop));
+    assert!(!AppType::ClaudeDesktop.is_additive_mode());
+    assert!(!AppType::ClaudeDesktop.supports_failover());
 }
 
 #[test]

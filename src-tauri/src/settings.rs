@@ -12,6 +12,13 @@ use std::sync::{OnceLock, RwLock};
 pub struct VisibleApps {
     #[serde(default = "default_visible_app_claude")]
     pub claude: bool,
+    #[serde(
+        rename = "claude-desktop",
+        alias = "claudeDesktop",
+        alias = "claude_desktop",
+        default = "default_visible_app_claude_desktop"
+    )]
+    pub claude_desktop: bool,
     #[serde(default = "default_visible_app_codex")]
     pub codex: bool,
     #[serde(default = "default_visible_app_gemini")]
@@ -25,6 +32,10 @@ pub struct VisibleApps {
 }
 
 fn default_visible_app_claude() -> bool {
+    true
+}
+
+fn default_visible_app_claude_desktop() -> bool {
     true
 }
 
@@ -51,6 +62,7 @@ fn default_visible_app_openclaw() -> bool {
 pub fn default_visible_apps() -> VisibleApps {
     VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: false,
         opencode: true,
@@ -117,6 +129,7 @@ impl VisibleApps {
     pub fn is_enabled_for(&self, app_type: &AppType) -> bool {
         match app_type {
             AppType::Claude => self.claude,
+            AppType::ClaudeDesktop => self.claude_desktop,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
@@ -128,6 +141,7 @@ impl VisibleApps {
     pub fn set_enabled_for(&mut self, app_type: &AppType, enabled: bool) {
         match app_type {
             AppType::Claude => self.claude = enabled,
+            AppType::ClaudeDesktop => self.claude_desktop = enabled,
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
@@ -153,9 +167,10 @@ impl VisibleApps {
     }
 }
 
-fn app_order() -> [AppType; 6] {
+fn app_order() -> [AppType; 7] {
     [
         AppType::Claude,
+        AppType::ClaudeDesktop,
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
@@ -425,6 +440,8 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_claude: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_claude_desktop: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_codex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_gemini: Option<String>,
@@ -508,6 +525,7 @@ impl Default for AppSettings {
             hermes_config_dir: None,
             openclaw_config_dir: None,
             current_provider_claude: None,
+            current_provider_claude_desktop: None,
             current_provider_codex: None,
             current_provider_gemini: None,
             current_provider_opencode: None,
@@ -935,6 +953,7 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
     let settings = settings_store().read().ok()?;
     match app_type {
         AppType::Claude => settings.current_provider_claude.clone(),
+        AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
         AppType::Codex => settings.current_provider_codex.clone(),
         AppType::Gemini => settings.current_provider_gemini.clone(),
         AppType::OpenCode => settings.current_provider_opencode.clone(),
@@ -948,6 +967,9 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
 
     match app_type {
         AppType::Claude => settings.current_provider_claude = id.map(|value| value.to_string()),
+        AppType::ClaudeDesktop => {
+            settings.current_provider_claude_desktop = id.map(|value| value.to_string())
+        }
         AppType::Codex => settings.current_provider_codex = id.map(|value| value.to_string()),
         AppType::Gemini => settings.current_provider_gemini = id.map(|value| value.to_string()),
         AppType::OpenCode => settings.current_provider_opencode = id.map(|value| value.to_string()),

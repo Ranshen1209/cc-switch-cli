@@ -1926,6 +1926,7 @@ fn header_only_renders_selected_visible_apps() {
     let _home = SettingsEnvGuard::set_home(temp_home.path());
     crate::settings::set_visible_apps(crate::settings::VisibleApps {
         claude: false,
+        claude_desktop: false,
         codex: true,
         gemini: false,
         opencode: false,
@@ -1955,6 +1956,7 @@ fn header_keeps_all_app_tabs_visible_with_proxy_chip() {
     let _home = SettingsEnvGuard::set_home(temp_home.path());
     crate::settings::set_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: true,
         opencode: true,
@@ -1984,6 +1986,7 @@ fn settings_page_shows_visible_apps_row_value() {
     let _home = SettingsEnvGuard::set_home(temp_home.path());
     crate::settings::set_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: false,
         gemini: true,
         opencode: false,
@@ -2002,7 +2005,10 @@ fn settings_page_shows_visible_apps_row_value() {
         all.contains(texts::tui_settings_visible_apps_label()),
         "{all}"
     );
-    assert!(all.contains("claude, gemini, openclaw"), "{all}");
+    assert!(
+        all.contains("claude, claude-desktop, gemini, openclaw"),
+        "{all}"
+    );
 }
 
 #[test]
@@ -2314,6 +2320,7 @@ fn zero_selection_warning_toast_renders_after_picker_rejection() {
         selected: 0,
         apps: crate::settings::VisibleApps {
             claude: false,
+            claude_desktop: false,
             codex: false,
             gemini: false,
             opencode: false,
@@ -2352,6 +2359,7 @@ fn visible_apps_picker_uses_space_toggle_key() {
         selected: 0,
         apps: crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: false,
@@ -2383,6 +2391,7 @@ fn visible_apps_picker_auto_mode_does_not_append_auto_suffix_to_apps() {
         selected: 2,
         apps: crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -2475,6 +2484,7 @@ fn header_centers_tabs_when_room_allows() {
     let _home = SettingsEnvGuard::set_home(temp_home.path());
     crate::settings::set_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: true,
         opencode: true,
@@ -2520,6 +2530,7 @@ fn header_keeps_title_and_right_badges_visible_without_large_gap_in_chinese() {
     let _home = SettingsEnvGuard::set_home(temp_home.path());
     crate::settings::set_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: true,
         opencode: true,

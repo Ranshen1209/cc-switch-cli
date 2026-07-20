@@ -111,6 +111,7 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
             } => {
                 let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
                     rt.block_on(load_proxy_snapshot_from_state_async(&state, &app_type))
+                        .map(Box::new)
                         .map_err(|e| e.to_string())
                 });
 

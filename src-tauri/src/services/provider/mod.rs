@@ -72,11 +72,18 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 
     let common_config_snippet = state.db.get_config_snippet(AppType::Codex.as_str())?;
     ProviderService::write_live_snapshot(
+        state.db.as_ref(),
         &AppType::Codex,
         provider,
         common_config_snippet.as_deref(),
         true,
     )?;
+    if let Err(err) = crate::services::mcp::McpService::sync_enabled_for_app(state, &AppType::Codex)
+    {
+        log::warn!(
+            "Failed to re-project Codex MCP after unified-session live rewrite; it will self-heal on the next sync: {err}"
+        );
+    }
     Ok(true)
 }
 
@@ -166,6 +173,9 @@ enum PreparedPostCommitEffect {
 #[derive(Clone)]
 enum PreparedLiveWrite {
     Noop,
+    ClaudeDesktop {
+        provider: Box<Provider>,
+    },
     Claude {
         settings: Value,
     },
@@ -468,6 +478,8 @@ impl ProviderService {
             template_type: Some("token_plan".to_string()),
             auto_query_interval: Some(5),
             coding_plan_provider: Some(coding_plan_provider.to_string()),
+            team_organization_id: None,
+            team_project_id: None,
         });
     }
 
@@ -541,7 +553,13 @@ impl ProviderService {
         };
 
         for provider in &providers {
-            Self::write_live_snapshot(&AppType::OpenClaw, provider, snippet.as_deref(), true)?;
+            Self::write_live_snapshot(
+                state.db.as_ref(),
+                &AppType::OpenClaw,
+                provider,
+                snippet.as_deref(),
+                true,
+            )?;
         }
 
         Ok(())
@@ -787,6 +805,7 @@ impl ProviderService {
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
             PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
+                state.db.as_ref(),
                 &action.app_type,
                 &action.provider,
                 action.previous_provider.as_ref(),
@@ -805,7 +824,7 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                Self::apply_prepared_live_snapshot(live)?;
+                Self::apply_prepared_live_snapshot(state.db.as_ref(), live)?;
                 if prepared.action.activate_provider
                     && matches!(prepared.action.app_type, AppType::Hermes)
                 {
@@ -827,7 +846,12 @@ impl ProviderService {
 
         if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
-            McpService::sync_all_enabled(state)?;
+            if let Err(err) = McpService::sync_enabled_for_app(state, &prepared.action.app_type) {
+                log::warn!(
+                    "Failed to re-project {} MCP after provider update; it will self-heal on the next sync: {err}",
+                    prepared.action.app_type.as_str()
+                );
+            }
         }
         if !prepared.action.takeover_active
             && prepared.action.refresh_snapshot
@@ -852,6 +876,7 @@ impl ProviderService {
         provider_id: &str,
     ) -> Result<(), AppError> {
         match app_type {
+            AppType::ClaudeDesktop => {}
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
                 if !settings_path.exists() {
@@ -1209,7 +1234,9 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
+            AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+                Ok(())
+            }
         };
 
         match result {
@@ -1330,7 +1357,9 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+                false
+            }
         }
     }
 
@@ -1460,6 +1489,7 @@ impl ProviderService {
     ) -> Result<String, AppError> {
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(settings_config),
+            AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
@@ -1477,8 +1507,14 @@ impl ProviderService {
             "ANTHROPIC_MODEL",
             "ANTHROPIC_REASONING_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
             "ANTHROPIC_BASE_URL",
         ];
         const TOP_LEVEL_EXCLUDES: &[&str] = &["apiBaseUrl", "primaryModel", "smallFastModel"];
@@ -2103,6 +2139,13 @@ impl ProviderService {
         }
 
         let settings_config = match app_type {
+            AppType::ClaudeDesktop => {
+                return Err(AppError::localized(
+                    "claude_desktop.import_unsupported",
+                    "Claude Desktop 配置由专用 profile 管理，无法导入为默认供应商",
+                    "Claude Desktop configuration is managed by dedicated profiles and cannot be imported as a default provider",
+                ));
+            }
             AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog()?,
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
@@ -2214,6 +2257,11 @@ impl ProviderService {
     /// 读取当前 live 配置
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
         match app_type {
+            AppType::ClaudeDesktop => Err(AppError::localized(
+                "claude_desktop.live.read_unsupported",
+                "Claude Desktop 配置由专用 profile 管理，无法作为普通 live 配置读取",
+                "Claude Desktop configuration is managed by dedicated profiles and cannot be read as regular live settings",
+            )),
             AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog(),
             AppType::Claude => {
                 let path = get_claude_settings_path();
@@ -2606,7 +2654,13 @@ impl ProviderService {
                 continue;
             }
 
-            Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
+            Self::write_live_snapshot(
+                state.db.as_ref(),
+                app_type,
+                provider,
+                snippet.as_deref(),
+                true,
+            )?;
         }
 
         if let Err(e) =
@@ -2615,15 +2669,13 @@ impl ProviderService {
             log::warn!("sync_current_to_live: Prompt 同步失败: {e}");
         }
 
-        if let Err(e) = McpService::sync_all_enabled(state) {
-            log::warn!("sync_current_to_live: MCP 同步失败: {e}");
-        }
+        let mcp_result = McpService::sync_all_enabled(state);
 
         if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
             log::warn!("sync_current_to_live: Skills 同步失败: {e}");
         }
 
-        Ok(())
+        mcp_result
     }
 
     fn prepare_switch_post_commit_action(
@@ -2675,6 +2727,20 @@ impl ProviderService {
                     .cloned()
             });
         let provider = match app_type {
+            AppType::ClaudeDesktop => {
+                let manager = config
+                    .get_manager_mut(app_type)
+                    .ok_or_else(|| Self::app_not_found(app_type))?;
+                let provider = manager.providers.get(provider_id).cloned().ok_or_else(|| {
+                    AppError::localized(
+                        "provider.not_found",
+                        format!("供应商不存在: {provider_id}"),
+                        format!("Provider not found: {provider_id}"),
+                    )
+                })?;
+                manager.current = provider_id.to_string();
+                provider
+            }
             AppType::Codex => {
                 Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
             }
@@ -2694,8 +2760,8 @@ impl ProviderService {
             provider,
             previous_provider,
             backup,
-            sync_mcp: true,
-            refresh_snapshot: true,
+            sync_mcp: !matches!(app_type, AppType::ClaudeDesktop),
+            refresh_snapshot: !matches!(app_type, AppType::ClaudeDesktop),
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             previous_common_config_snippet,
             takeover_active: false,
@@ -2777,12 +2843,14 @@ impl ProviderService {
     }
 
     fn write_live_snapshot(
+        db: &crate::database::Database,
         app_type: &AppType,
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_live_snapshot(
+            db,
             app_type,
             provider,
             None,
@@ -2790,10 +2858,11 @@ impl ProviderService {
             None,
             apply_common_config,
         )?;
-        Self::apply_prepared_live_snapshot(&prepared)
+        Self::apply_prepared_live_snapshot(db, &prepared)
     }
 
     fn prepare_live_snapshot(
+        db: &crate::database::Database,
         app_type: &AppType,
         provider: &Provider,
         previous_provider: Option<&Provider>,
@@ -2809,6 +2878,18 @@ impl ProviderService {
         );
 
         match app_type {
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::validate_provider(provider)?;
+                if matches!(
+                    crate::claude_desktop_config::provider_mode(provider),
+                    crate::provider::ClaudeDesktopMode::Proxy
+                ) {
+                    crate::claude_desktop_config::proxy_gateway_base_url_from_db(db)?;
+                }
+                Ok(PreparedLiveWrite::ClaudeDesktop {
+                    provider: Box::new(provider.clone()),
+                })
+            }
             AppType::Codex => Self::prepare_codex_live_write(
                 provider,
                 common_config_snippet,
@@ -2903,9 +2984,15 @@ impl ProviderService {
         }
     }
 
-    fn apply_prepared_live_snapshot(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+    fn apply_prepared_live_snapshot(
+        db: &crate::database::Database,
+        prepared: &PreparedLiveWrite,
+    ) -> Result<(), AppError> {
         match prepared {
             PreparedLiveWrite::Noop => Ok(()),
+            PreparedLiveWrite::ClaudeDesktop { provider } => {
+                crate::claude_desktop_config::apply_provider(db, provider.as_ref())
+            }
             PreparedLiveWrite::Claude { .. } => Self::apply_claude_live_write(prepared),
             PreparedLiveWrite::Codex { .. } => Self::apply_codex_live_write(prepared),
             PreparedLiveWrite::Gemini { .. } | PreparedLiveWrite::GeminiSecurityFlag { .. } => {
@@ -3027,6 +3114,9 @@ impl ProviderService {
         );
 
         match app_type {
+            AppType::ClaudeDesktop => Err(AppError::Config(
+                "Claude Desktop does not use proxy takeover backups".into(),
+            )),
             AppType::Claude => {
                 let mut effective = common_config::build_effective_settings_with_common_config(
                     app_type,
@@ -3151,6 +3241,9 @@ impl ProviderService {
                         "Claude configuration must be a JSON object",
                     ));
                 }
+            }
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::validate_provider(provider)?;
             }
             AppType::Codex => {
                 let settings = provider.settings_config.as_object().ok_or_else(|| {
@@ -3391,6 +3484,9 @@ impl ProviderService {
         }
 
         match app_type {
+            AppType::ClaudeDesktop => {
+                let _ = provider_snapshot;
+            }
             AppType::Codex => {
                 crate::codex_config::delete_codex_provider_config(
                     provider_id,

@@ -62,6 +62,7 @@ where
 pub(crate) fn app_display_name(app_type: &AppType) -> &'static str {
     match app_type {
         AppType::Claude => "Claude",
+        AppType::ClaudeDesktop => "Claude Desktop",
         AppType::Codex => "Codex",
         AppType::Gemini => "Gemini",
         AppType::OpenCode => "OpenCode",

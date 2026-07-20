@@ -191,6 +191,7 @@ fn header_openclaw_localizes_config_error_in_chinese() {
 fn header_openclaw_sacrifices_tabs_before_losing_the_only_status_badge() {
     let _ctx = TestContext::new().with_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: true,
         opencode: true,
@@ -231,6 +232,7 @@ fn header_openclaw_sacrifices_tabs_before_losing_the_only_status_badge() {
 fn header_openclaw_truncates_long_default_model_without_fake_proxy_gap() {
     let _ctx = TestContext::new().with_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: true,
         opencode: true,

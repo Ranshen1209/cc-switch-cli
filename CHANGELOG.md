@@ -7,6 +7,30 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.10.0] - 2026-07-20
+
+### Added
+
+- **Claude Desktop**: Add Claude Desktop as a first-class CLI application with direct and local-proxy provider modes, dedicated profile snapshot/restore, safe model routing, and `/claude-desktop/v1/models` plus `/claude-desktop/v1/messages` gateway routes.
+- **Codex / Anthropic**: Add native OpenAI Responses-to-Anthropic Messages request, JSON response, and SSE conversion for Codex providers, including Anthropic authentication, Claude Code client impersonation, adaptive thinking, tool-call round trips, model mapping, and configurable output limits.
+- **Usage / Coding Plans**: Add Zhipu team-plan quota support with organization/project credentials and align transient transport failures across coding-plan, subscription, and balance queries.
+
+### Changed
+
+- **Provider / Live Sync**: Align provider persistence and live-config behavior with the desktop backend for Claude, Codex, Gemini, OpenCode, Hermes, and OpenClaw. MCP projection now refreshes the affected application best-effort after provider changes, and OpenClaw startup import refreshes existing live-managed settings while preserving saved metadata.
+- **Sessions / Usage**: Align Codex subagent session identity and replay baselines with the desktop backend so subagents under the same parent remain distinct without double-counting cumulative usage.
+- **Provider Templates**: Remove bundled third-party provider presets from both CLI and TUI. Custom providers and official/OAuth integrations remain available; legacy provider metadata continues to load for backward compatibility.
+
+### Fixed
+
+- **Claude Desktop / Persistence**: Persist Claude Desktop provider buckets through the SQLite snapshot path and migrate older multi-app configuration snapshots that do not yet contain the Desktop manager.
+- **Proxy / Streaming**: Correctly record completion for buffered Anthropic responses returned when an upstream ignores `stream=true`, while preserving Responses SSE framing and error semantics.
+- **TUI / Application Selection**: Keep Claude Desktop in global application visibility/cycling without exposing it as an unsupported MCP or Skills target.
+
+### Quality
+
+- Keep `cargo clippy --all-targets` warning-free and expand coverage for Claude Desktop persistence, Codex-Anthropic conversion, provider synchronization, and multi-app proxy behavior.
+
 ## [5.9.0] - 2026-07-08
 
 ### Added

@@ -200,26 +200,26 @@ impl AppState {
         match crate::services::provider::ProviderService::import_opencode_providers_from_live(self)
         {
             Ok(count) if count > 0 => {
-                log::info!("OK Imported {count} OpenCode provider(s) from live config");
+                log::info!("OK Synced {count} OpenCode provider(s) from live config");
             }
-            Ok(_) => log::debug!("○ No new OpenCode providers to import"),
+            Ok(_) => log::debug!("○ No OpenCode provider changes from live config"),
             Err(error) => log::warn!("FAIL Failed to import OpenCode providers: {error}"),
         }
 
         match crate::services::provider::ProviderService::import_hermes_providers_from_live(self) {
             Ok(count) if count > 0 => {
-                log::info!("OK Imported {count} Hermes provider(s) from live config");
+                log::info!("OK Synced {count} Hermes provider(s) from live config");
             }
-            Ok(_) => log::debug!("○ No new Hermes providers to import"),
+            Ok(_) => log::debug!("○ No Hermes provider changes from live config"),
             Err(error) => log::warn!("FAIL Failed to import Hermes providers: {error}"),
         }
 
         match crate::services::provider::ProviderService::import_openclaw_providers_from_live(self)
         {
             Ok(count) if count > 0 => {
-                log::info!("OK Imported {count} OpenClaw provider(s) from live config");
+                log::info!("OK Synced {count} OpenClaw provider(s) from live config");
             }
-            Ok(_) => log::debug!("○ No new OpenClaw providers to import"),
+            Ok(_) => log::debug!("○ No OpenClaw provider changes from live config"),
             Err(error) => log::warn!("FAIL Failed to import OpenClaw providers: {error}"),
         }
 
@@ -412,6 +412,7 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
 
     for app in [
         AppType::Claude,
+        AppType::ClaudeDesktop,
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
@@ -428,6 +429,9 @@ fn export_db_to_multi_app_config(db: &Database) -> Result<MultiAppConfig, AppErr
         let prompts = db.get_prompts(app_key)?;
         match app {
             AppType::Claude => config.prompts.claude.prompts = prompts.into_iter().collect(),
+            AppType::ClaudeDesktop => {
+                config.prompts.claude_desktop.prompts = prompts.into_iter().collect()
+            }
             AppType::Codex => config.prompts.codex.prompts = prompts.into_iter().collect(),
             AppType::Gemini => config.prompts.gemini.prompts = prompts.into_iter().collect(),
             AppType::OpenCode => config.prompts.opencode.prompts = prompts.into_iter().collect(),
@@ -465,6 +469,7 @@ fn persist_multi_app_config_to_db_preserving_current_providers(
 
     for app in [
         AppType::Claude,
+        AppType::ClaudeDesktop,
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,

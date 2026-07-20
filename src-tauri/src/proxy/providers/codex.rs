@@ -22,7 +22,9 @@ pub struct CodexAdapter;
 pub fn codex_provider_catalog_tool_profile(
     provider: &Provider,
 ) -> crate::codex_config::CodexCatalogToolProfile {
-    if codex_provider_uses_chat_completions(provider) {
+    if codex_provider_uses_anthropic(provider) {
+        crate::codex_config::CodexCatalogToolProfile::Anthropic
+    } else if codex_provider_uses_chat_completions(provider) {
         crate::codex_config::CodexCatalogToolProfile::ProxyChat
     } else {
         crate::codex_config::CodexCatalogToolProfile::NativeResponses
@@ -91,6 +93,48 @@ pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &st
     ) && codex_provider_uses_chat_completions(provider)
 }
 
+/// Whether this Codex provider's upstream speaks native Anthropic Messages.
+/// This requires explicit configuration; gateway URLs are too varied to infer safely.
+pub fn codex_provider_uses_anthropic(provider: &Provider) -> bool {
+    if let Some(api_format) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("api_format")
+                .and_then(|v| v.as_str())
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(|v| v.as_str())
+        })
+    {
+        return is_anthropic_wire_api(api_format);
+    }
+
+    provider
+        .settings_config
+        .get("config")
+        .and_then(|v| v.as_str())
+        .and_then(extract_codex_wire_api_from_toml)
+        .is_some_and(|wire_api| is_anthropic_wire_api(&wire_api))
+}
+
+pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint: &str) -> bool {
+    let path = endpoint
+        .split_once('?')
+        .map_or(endpoint, |(path, _query)| path);
+
+    matches!(
+        path,
+        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
+    ) && codex_provider_uses_anthropic(provider)
+}
+
 /// Extract the real upstream model configured for a Codex provider.
 pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
     provider
@@ -137,6 +181,10 @@ pub fn apply_codex_chat_upstream_model(
         return None;
     }
 
+    apply_codex_upstream_model(provider, body)
+}
+
+pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> Option<String> {
     let catalog_model_ids = codex_provider_catalog_model_ids(provider);
     if let Some(request_model) = body
         .get("model")
@@ -335,6 +383,13 @@ fn is_chat_wire_api(value: &str) -> bool {
     )
 }
 
+fn is_anthropic_wire_api(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "anthropic" | "anthropic_messages" | "anthropic-messages" | "messages"
+    )
+}
+
 fn is_chat_completions_url(value: &str) -> bool {
     value
         .trim_end_matches('/')
@@ -513,8 +568,19 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
+        let strategy = if codex_provider_uses_anthropic(provider)
+            && provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_key_field.as_deref())
+                .is_some_and(|field| field.eq_ignore_ascii_case("ANTHROPIC_API_KEY"))
+        {
+            AuthStrategy::Anthropic
+        } else {
+            AuthStrategy::Bearer
+        };
         self.extract_key(provider)
-            .map(|key| AuthInfo::new(key, AuthStrategy::Bearer))
+            .map(|key| AuthInfo::new(key, strategy))
     }
 
     fn build_url(&self, base_url: &str, endpoint: &str) -> String {
@@ -612,6 +678,37 @@ experimental_bearer_token = "sk-config-key"
             codex_provider_catalog_tool_profile(&chat),
             CodexCatalogToolProfile::ProxyChat
         );
+
+        let anthropic = create_provider(json!({ "api_format": "anthropic" }));
+        assert_eq!(
+            codex_provider_catalog_tool_profile(&anthropic),
+            CodexCatalogToolProfile::Anthropic
+        );
+        assert!(codex_provider_uses_anthropic(&anthropic));
+        assert!(should_convert_codex_responses_to_anthropic(
+            &anthropic,
+            "/v1/responses"
+        ));
+    }
+
+    #[test]
+    fn test_anthropic_auth_uses_selected_header_strategy() {
+        let adapter = CodexAdapter::new();
+        let mut provider = create_provider(json!({
+            "apiFormat": "anthropic",
+            "auth": { "OPENAI_API_KEY": "sk-anthropic" }
+        }));
+
+        let bearer = adapter.extract_auth(&provider).expect("bearer auth");
+        assert_eq!(bearer.strategy, AuthStrategy::Bearer);
+
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+            ..Default::default()
+        });
+        let x_api_key = adapter.extract_auth(&provider).expect("x-api-key auth");
+        assert_eq!(x_api_key.strategy, AuthStrategy::Anthropic);
     }
 
     #[test]

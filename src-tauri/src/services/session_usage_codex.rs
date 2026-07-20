@@ -9,7 +9,7 @@
 //! ```
 //!
 //! ## 解析的事件类型
-//! - `session_meta` → 提取 session_id
+//! - `session_meta` → 提取唯一 thread_id（子代理的 session_id 指向父线程）
 //! - `turn_context` → 提取当前 model
 //! - `event_msg` (type=token_count) → 提取累计 token 用量，计算 delta
 
@@ -29,8 +29,11 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+const CODEX_THREAD_REQUEST_ID_PREFIX: &str = "codex_session:thread-v1";
 
 /// 累计 token 用量（跟踪 total_token_usage 字段）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,10 +63,121 @@ impl DeltaTokens {
 /// 无需从第 1 行重放历史事件来重建 `prev_total`/`event_index`。
 #[derive(Debug, Serialize, Deserialize)]
 struct FileParseState {
-    session_id: Option<String>,
+    thread_id: Option<String>,
     current_model: String,
     prev_total: Option<CumulativeTokens>,
     event_index: u32,
+    history_replay_pending: bool,
+}
+
+/// Codex 子代理日志中的 `id` 是当前线程唯一 ID，`session_id` 指向父线程。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexSessionIdentity {
+    thread_id: String,
+    carries_history_snapshot: bool,
+}
+
+fn parse_codex_session_identity(payload: &serde_json::Value) -> Option<CodexSessionIdentity> {
+    let thread_id = payload
+        .get("id")
+        .or_else(|| payload.get("thread_id"))
+        .or_else(|| payload.get("threadId"))
+        .or_else(|| payload.get("session_id"))
+        .or_else(|| payload.get("sessionId"))
+        .and_then(|value| value.as_str())?
+        .to_string();
+    let session_id = payload
+        .get("session_id")
+        .or_else(|| payload.get("sessionId"))
+        .and_then(|value| value.as_str());
+    let carries_history_snapshot = payload
+        .get("forked_from_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty())
+        || payload
+            .get("source")
+            .and_then(|source| source.get("subagent"))
+            .is_some()
+        || session_id.is_some_and(|session_id| session_id != thread_id);
+
+    Some(CodexSessionIdentity {
+        thread_id,
+        carries_history_snapshot,
+    })
+}
+
+fn read_codex_session_identity(file_path: &Path) -> Option<CodexSessionIdentity> {
+    let file = fs::File::open(file_path).ok()?;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        if !line.contains("\"session_meta\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+            continue;
+        }
+        if let Some(identity) = value.get("payload").and_then(parse_codex_session_identity) {
+            return Some(identity);
+        }
+    }
+    None
+}
+
+fn codex_log_has_history_replay_boundary(file_path: &Path) -> bool {
+    let Ok(file) = fs::File::open(file_path) else {
+        return false;
+    };
+    BufReader::new(file).lines().any(|line| {
+        line.is_ok_and(|line| {
+            line.contains("\"thread_settings_applied\"")
+                || line.contains("\"inter_agent_communication")
+        })
+    })
+}
+
+fn get_codex_sync_state(db: &Database, file_path: &Path) -> Result<(i64, i64), AppError> {
+    let file_path_str = file_path.to_string_lossy().to_string();
+    let state = get_sync_state(db, &file_path_str)?;
+    if state != (0, 0)
+        || file_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            != Some("archived_sessions")
+    {
+        return Ok(state);
+    }
+
+    let Some(file_name) = file_path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(state);
+    };
+    let slash_suffix = format!("/{file_name}");
+    let backslash_suffix = format!("\\{file_name}");
+    let conn = lock_conn!(db.conn);
+    let inherited = conn.query_row(
+        "SELECT last_modified, last_line_offset
+         FROM session_log_sync
+         WHERE file_path <> ?1
+           AND (substr(file_path, -length(?2)) = ?2
+                OR substr(file_path, -length(?3)) = ?3)
+         ORDER BY last_line_offset DESC, last_modified DESC
+         LIMIT 1",
+        rusqlite::params![file_path_str, slash_suffix, backslash_suffix],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    );
+
+    match inherited {
+        Ok(inherited) => Ok(inherited),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(state),
+        Err(error) => Err(AppError::Database(format!(
+            "查询 Codex 归档文件同步状态失败: {error}"
+        ))),
+    }
 }
 
 /// 扫描阶段收集的待写记录：先扫描收集、后批量写库，读文件期间不持有连接锁。
@@ -328,11 +442,17 @@ fn sync_single_codex_file(
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+    let (last_modified, last_offset) = get_codex_sync_state(db, file_path)?;
+    let identity = read_codex_session_identity(file_path);
+    let history_replay_pending = identity
+        .as_ref()
+        .is_some_and(|identity| identity.carries_history_snapshot)
+        && codex_log_has_history_replay_boundary(file_path);
 
     // 扫描阶段：文件驱动归通用驱动，解析归下面的回调；先收集待写记录，
     // 写库阶段再统一批量落库（读文件期间不持有连接锁）。
     let mut pending: Vec<PendingCodexEntry> = Vec::new();
+    let mut replay_skipped_new = 0u32;
 
     // fix 2：续传提示取自预载 map（零 per-file 查询）；sidecar 是否可用另行传入。
     let hint = resume_hints.get(&file_path_str).cloned();
@@ -345,21 +465,24 @@ fn sync_single_codex_file(
         hint,
         resume.is_some(),
         || FileParseState {
-            session_id: None,
+            thread_id: identity.as_ref().map(|identity| identity.thread_id.clone()),
             current_model: "unknown".to_string(),
             prev_total: None,
             event_index: 0,
+            history_replay_pending,
         },
         |state, line, is_new| {
             // 快速过滤：在 JSON 反序列化前跳过无关行
             let is_event_msg = line.contains("\"event_msg\"");
             let is_turn_context = line.contains("\"turn_context\"");
             let is_session_meta = line.contains("\"session_meta\"");
+            let is_replay_boundary = line.contains("\"thread_settings_applied\"")
+                || line.contains("\"inter_agent_communication");
 
-            if !is_event_msg && !is_turn_context && !is_session_meta {
+            if !is_event_msg && !is_turn_context && !is_session_meta && !is_replay_boundary {
                 return;
             }
-            if is_event_msg && !line.contains("\"token_count\"") {
+            if is_event_msg && !line.contains("\"token_count\"") && !is_replay_boundary {
                 return;
             }
 
@@ -374,16 +497,11 @@ fn sync_single_codex_file(
             };
 
             match event_type {
-                "session_meta" if state.session_id.is_none() => {
-                    let payload = value.get("payload");
-                    state.session_id = payload
-                        .and_then(|p| {
-                            p.get("session_id")
-                                .or_else(|| p.get("sessionId"))
-                                .or_else(|| p.get("id"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                "session_meta" if state.thread_id.is_none() => {
+                    state.thread_id = value
+                        .get("payload")
+                        .and_then(parse_codex_session_identity)
+                        .map(|identity| identity.thread_id);
                 }
                 "turn_context" => {
                     if let Some(payload) = value.get("payload") {
@@ -402,6 +520,13 @@ fn sync_single_codex_file(
                         Some(p) => p,
                         None => return,
                     };
+
+                    if payload.get("type").and_then(|value| value.as_str())
+                        == Some("thread_settings_applied")
+                    {
+                        state.history_replay_pending = false;
+                        return;
+                    }
 
                     // 只处理 token_count 类型
                     if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
@@ -464,15 +589,24 @@ fn sync_single_codex_file(
 
                     state.event_index += 1;
 
+                    if state.history_replay_pending {
+                        if is_new {
+                            replay_skipped_new += 1;
+                        }
+                        return;
+                    }
+
                     // 历史行（仅无续传提示的回退路径）只重放重建状态，不产出记录
                     if !is_new {
                         return;
                     }
 
                     // 生成唯一 request_id
-                    let session_id_str = state.session_id.as_deref().unwrap_or("unknown");
-                    let request_id =
-                        format!("codex_session:{}:{}", session_id_str, state.event_index);
+                    let thread_id = state.thread_id.as_deref().unwrap_or("unknown");
+                    let request_id = format!(
+                        "{CODEX_THREAD_REQUEST_ID_PREFIX}:{thread_id}:{}",
+                        state.event_index
+                    );
 
                     // 在入队处（解析附近）就定死 created_at：缺失/非法 timestamp
                     // 回退 now()，避免两阶段写库时才取 now() 造成退化输入时间戳后移。
@@ -483,9 +617,12 @@ fn sync_single_codex_file(
                         request_id,
                         delta,
                         model: state.current_model.clone(),
-                        session_id: state.session_id.clone(),
+                        session_id: state.thread_id.clone(),
                         created_at,
                     });
+                }
+                event_type if event_type.starts_with("inter_agent_communication") => {
+                    state.history_replay_pending = false;
                 }
                 _ => {}
             }
@@ -499,7 +636,7 @@ fn sync_single_codex_file(
 
     // 写库阶段：一个事务批量写入，超大文件每 SESSION_LOG_COMMIT_BATCH 行分段提交
     let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
+    let mut skipped: u32 = replay_skipped_new;
 
     let mut guard = lock_conn!(db.conn);
     let mut tx = guard
@@ -669,6 +806,161 @@ mod tests {
     use super::*;
     use crate::session_manager::scan_cache_store::ScanCacheStore;
 
+    fn write_jsonl(path: &Path, values: &[serde_json::Value]) {
+        let contents = values
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(path, contents).expect("write jsonl");
+    }
+
+    fn session_meta(thread_id: &str, session_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": "2026-07-10T03:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "session_id": session_id,
+                "source": if thread_id == session_id {
+                    serde_json::Value::String("cli".to_string())
+                } else {
+                    serde_json::json!({ "subagent": {} })
+                }
+            }
+        })
+    }
+
+    fn turn_context() -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": "2026-07-10T03:00:01Z",
+            "type": "turn_context",
+            "payload": { "model": "gpt-5.6-sol" }
+        })
+    }
+
+    fn token_count(input: u64, cached: u64, output: u64) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": "2026-07-10T03:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": { "total_token_usage": {
+                    "input_tokens": input,
+                    "cached_input_tokens": cached,
+                    "output_tokens": output
+                }}
+            }
+        })
+    }
+
+    #[test]
+    fn test_subagent_identity_prefers_unique_thread_id() {
+        let identity =
+            parse_codex_session_identity(session_meta("child", "parent").get("payload").unwrap())
+                .unwrap();
+
+        assert_eq!(identity.thread_id, "child");
+        assert!(identity.carries_history_snapshot);
+    }
+
+    #[test]
+    fn test_subagent_replay_only_establishes_token_baseline() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let store = ScanCacheStore::in_memory()?;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let child = temp.path().join("child.jsonl");
+        write_jsonl(
+            &child,
+            &[
+                session_meta("child", "parent"),
+                turn_context(),
+                token_count(1_000, 900, 100),
+                token_count(1_200, 1_000, 120),
+                serde_json::json!({
+                    "timestamp": "2026-07-10T03:00:03Z",
+                    "type": "event_msg",
+                    "payload": { "type": "thread_settings_applied" }
+                }),
+                token_count(1_300, 1_050, 150),
+            ],
+        );
+
+        let mut cache = PricingCache::new();
+        let hints = store.load_all_sync_resume().unwrap_or_default();
+        assert_eq!(
+            sync_single_codex_file(&db, &child, 1, &mut cache, Some(&store), &hints)?,
+            (1, 2)
+        );
+
+        let conn = lock_conn!(db.conn);
+        let usage: (i64, i64, i64) = conn.query_row(
+            "SELECT input_tokens, cache_read_tokens, output_tokens
+             FROM proxy_request_logs
+             WHERE request_id = 'codex_session:thread-v1:child:3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(usage, (100, 50, 30));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_subagents_under_same_parent_use_distinct_request_ids() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let store = ScanCacheStore::in_memory()?;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let child_a = temp.path().join("child-a.jsonl");
+        let child_b = temp.path().join("child-b.jsonl");
+        write_jsonl(
+            &child_a,
+            &[
+                session_meta("child-a", "parent"),
+                turn_context(),
+                token_count(100, 50, 10),
+            ],
+        );
+        write_jsonl(
+            &child_b,
+            &[
+                session_meta("child-b", "parent"),
+                turn_context(),
+                token_count(200, 100, 20),
+            ],
+        );
+
+        let mut cache = PricingCache::new();
+        let hints = store.load_all_sync_resume().unwrap_or_default();
+        assert_eq!(
+            sync_single_codex_file(&db, &child_a, 1, &mut cache, Some(&store), &hints)?,
+            (1, 0)
+        );
+        assert_eq!(
+            sync_single_codex_file(&db, &child_b, 1, &mut cache, Some(&store), &hints)?,
+            (1, 0)
+        );
+
+        let conn = lock_conn!(db.conn);
+        let request_ids = conn
+            .prepare(
+                "SELECT request_id FROM proxy_request_logs
+                 WHERE data_source = 'codex_session' ORDER BY request_id",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            request_ids,
+            vec![
+                "codex_session:thread-v1:child-a:1",
+                "codex_session:thread-v1:child-b:1"
+            ]
+        );
+
+        Ok(())
+    }
+
     /// 状态机持久化判别测试：sync1 后把整个历史部分覆写成等长垃圾（丢失
     /// session_meta / turn_context / e1），再追加 e2。回退路径既无法重建
     /// prev_total 也会因行号变化误跳新行；字节续传路径从 sidecar 恢复完整
@@ -712,7 +1004,7 @@ mod tests {
         let conn = lock_conn!(db.conn);
         let (input, output): (i64, i64) = conn.query_row(
             "SELECT input_tokens, output_tokens FROM proxy_request_logs
-             WHERE request_id = 'codex_session:sess-1:2'",
+             WHERE request_id = 'codex_session:thread-v1:sess-1:2'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -746,7 +1038,7 @@ mod tests {
         let expected = resolve_codex_created_at(Some("2026-01-02T03:04:05Z"));
         let conn = lock_conn!(db.conn);
         let created_at: i64 = conn.query_row(
-            "SELECT created_at FROM proxy_request_logs WHERE request_id = 'codex_session:sess-ts:1'",
+            "SELECT created_at FROM proxy_request_logs WHERE request_id = 'codex_session:thread-v1:sess-ts:1'",
             [],
             |row| row.get(0),
         )?;

@@ -115,9 +115,11 @@ pub(crate) async fn query_quota(target: &QuotaTarget) -> Result<ProviderUsageQuo
                 .await
                 .map(ProviderUsageQuota::Subscription)
         }
-        QuotaTargetKind::CodexOAuth { account_id } => Ok(ProviderUsageQuota::Subscription(
-            crate::services::CodexOAuthService::get_quota(account_id.as_deref()).await,
-        )),
+        QuotaTargetKind::CodexOAuth { account_id } => {
+            crate::services::CodexOAuthService::get_quota(account_id.as_deref())
+                .await
+                .map(ProviderUsageQuota::Subscription)
+        }
         QuotaTargetKind::UsageScript => {
             let state = AppState::try_open_snapshot().map_err(|error| error.to_string())?;
             ProviderService::query_provider_usage(
@@ -310,7 +312,7 @@ fn codex_config_has_base_url(settings_config: &Value) -> bool {
 
 fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String> {
     match app_type {
-        AppType::Claude => settings_config
+        AppType::Claude | AppType::ClaudeDesktop => settings_config
             .get("env")?
             .get("ANTHROPIC_BASE_URL")?
             .as_str()
@@ -388,6 +390,8 @@ mod tests {
                 template_type: Some("general".to_string()),
                 auto_query_interval: Some(5),
                 coding_plan_provider: None,
+                team_organization_id: None,
+                team_project_id: None,
             }),
             ..ProviderMeta::default()
         });

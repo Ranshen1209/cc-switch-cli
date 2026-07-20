@@ -863,6 +863,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -873,6 +874,7 @@ mod tests {
 
         let next_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: false,
@@ -933,6 +935,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         let initial_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -955,6 +958,7 @@ mod tests {
             Action::SetVisibleApps {
                 apps: crate::settings::VisibleApps {
                     claude: true,
+                    claude_desktop: true,
                     codex: false,
                     gemini: false,
                     opencode: false,
@@ -983,6 +987,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -994,6 +999,7 @@ mod tests {
 
         let next_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: true,
@@ -1031,6 +1037,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         let initial_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -1050,6 +1057,7 @@ mod tests {
             Action::SetVisibleApps {
                 apps: crate::settings::VisibleApps {
                     claude: false,
+                    claude_desktop: false,
                     codex: false,
                     gemini: false,
                     opencode: false,
@@ -1079,6 +1087,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -1091,6 +1100,7 @@ mod tests {
 
         let next_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: false,
@@ -1137,6 +1147,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         let initial_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -1163,6 +1174,7 @@ mod tests {
             Action::SwitchVisibleAppsToManual {
                 apps: crate::settings::VisibleApps {
                     claude: true,
+                    claude_desktop: true,
                     codex: false,
                     gemini: false,
                     opencode: false,

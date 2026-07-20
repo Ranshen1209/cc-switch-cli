@@ -236,6 +236,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
         return match app {
             AppType::Codex => LIGHT_GREEN,
             AppType::Claude => LIGHT_CYAN,
+            AppType::ClaudeDesktop => LIGHT_CYAN,
             AppType::Gemini => LIGHT_PINK,
             AppType::OpenCode => LIGHT_ORANGE,
             AppType::Hermes => LIGHT_YELLOW,
@@ -246,6 +247,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
     match app {
         AppType::Codex => DRACULA_GREEN,
         AppType::Claude => DRACULA_CYAN,
+        AppType::ClaudeDesktop => DRACULA_CYAN,
         AppType::Gemini => DRACULA_PINK,
         AppType::OpenCode => DRACULA_ORANGE,
         AppType::Hermes => DRACULA_YELLOW,

@@ -196,7 +196,7 @@ impl RequestForwarder {
             return Err(ForwardFailure::new(None, ProxyError::NoAvailableProvider));
         }
 
-        let claude_error_path = matches!(app_type, AppType::Claude);
+        let claude_error_path = matches!(app_type, AppType::Claude | AppType::ClaudeDesktop);
         let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
@@ -220,8 +220,9 @@ impl RequestForwarder {
 
             attempted_provider = true;
             pending_upstream_response = None;
-            let provider_needs_transform = matches!(app_type, AppType::Claude)
-                && get_adapter(app_type).needs_transform(&provider);
+            let provider_needs_transform =
+                matches!(app_type, AppType::Claude | AppType::ClaudeDesktop)
+                    && get_adapter(app_type).needs_transform(&provider);
 
             match self
                 .send_streaming_request(
@@ -442,7 +443,7 @@ impl RequestForwarder {
             return Err(ForwardFailure::new(None, ProxyError::NoAvailableProvider));
         }
 
-        let claude_error_path = matches!(app_type, AppType::Claude);
+        let claude_error_path = matches!(app_type, AppType::Claude | AppType::ClaudeDesktop);
         let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
@@ -466,8 +467,9 @@ impl RequestForwarder {
 
             attempted_provider = true;
             pending_upstream_response = None;
-            let provider_needs_transform = matches!(app_type, AppType::Claude)
-                && get_adapter(app_type).needs_transform(&provider);
+            let provider_needs_transform =
+                matches!(app_type, AppType::Claude | AppType::ClaudeDesktop)
+                    && get_adapter(app_type).needs_transform(&provider);
 
             match self
                 .send_buffered_request(
@@ -988,7 +990,7 @@ fn maybe_rectify_claude_buffered_request(
     request_body: &Value,
     rectifier_config: &RectifierConfig,
 ) -> Option<Value> {
-    if *app_type != AppType::Claude {
+    if !matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) {
         return None;
     }
 
@@ -1018,7 +1020,7 @@ fn maybe_rectify_claude_buffered_request(
 }
 
 fn should_buffer_streaming_error_response(app_type: &AppType, status: reqwest::StatusCode) -> bool {
-    *app_type == AppType::Claude && !status.is_success()
+    matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) && !status.is_success()
 }
 
 async fn read_streaming_error_response(
@@ -1108,7 +1110,7 @@ fn clone_request(
 }
 
 fn uses_internal_transport_retry(app_type: &AppType) -> bool {
-    !matches!(app_type, AppType::Claude)
+    !matches!(app_type, AppType::Claude | AppType::ClaudeDesktop)
 }
 
 fn is_retryable_transport_error(error: &reqwest::Error) -> bool {

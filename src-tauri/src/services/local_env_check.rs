@@ -65,7 +65,7 @@ impl LocalTool {
 
     pub fn from_app_type(app_type: &AppType) -> Self {
         match app_type {
-            AppType::Claude => LocalTool::Claude,
+            AppType::Claude | AppType::ClaudeDesktop => LocalTool::Claude,
             AppType::Codex => LocalTool::Codex,
             AppType::Gemini => LocalTool::Gemini,
             AppType::OpenCode => LocalTool::OpenCode,

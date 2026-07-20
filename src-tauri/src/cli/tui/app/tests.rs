@@ -1004,6 +1004,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -1014,7 +1015,7 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
-            Action::SetAppType(AppType::Codex)
+            Action::SetAppType(AppType::ClaudeDesktop)
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
@@ -1029,6 +1030,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -1039,7 +1041,7 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('】')), &data()),
-            Action::SetAppType(AppType::Codex)
+            Action::SetAppType(AppType::ClaudeDesktop)
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('【')), &data()),
@@ -1047,7 +1049,7 @@ mod tests {
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('］')), &data()),
-            Action::SetAppType(AppType::Codex)
+            Action::SetAppType(AppType::ClaudeDesktop)
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('［')), &data()),
@@ -1062,6 +1064,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -1103,6 +1106,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: false,
             codex: false,
             gemini: false,
             opencode: true,
@@ -1126,6 +1130,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: false,
+            claude_desktop: false,
             codex: true,
             gemini: false,
             opencode: false,
@@ -1153,6 +1158,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -1176,6 +1182,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -9263,6 +9270,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: false,
             codex: false,
             gemini: false,
             opencode: false,
@@ -9291,9 +9299,11 @@ mod tests {
             &app.overlay,
             Overlay::VisibleAppsPicker { apps, .. }
                 if !apps.claude
+                    && !apps.claude_desktop
                     && !apps.codex
                     && !apps.gemini
                     && !apps.opencode
+                    && !apps.hermes
                     && !apps.openclaw
         ));
         assert!(matches!(
@@ -9313,6 +9323,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: false,
@@ -9350,6 +9361,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: false,
@@ -9388,6 +9400,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -9425,6 +9438,7 @@ mod tests {
         let _env = TestEnvGuard::isolated(temp_home.path());
         let initial = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -13071,8 +13085,8 @@ mod tests {
         assert!(matches!(action, Action::None));
         let text = help_text(&app);
         assert!(text.contains("Help follows the focused item"), "{text}");
-        assert!(text.contains("↑↓ or h/j/k/l  move"), "{text}");
-        assert!(text.contains("?   toggle help"), "{text}");
+        assert!(text.contains("↑↓ or h/j/k/l move"), "{text}");
+        assert!(text.contains("? toggle help"), "{text}");
         assert!(text.contains("Providers: Space switch"), "{text}");
         assert!(!text.contains("Provider Detail:"), "{text}");
         assert!(!text.contains("点在哪"), "{text}");
@@ -13088,7 +13102,7 @@ mod tests {
         let action = app.on_key(key(KeyCode::Char('？')), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::Help(_)));
-        assert!(help_text(&app).contains("?   toggle help"));
+        assert!(help_text(&app).contains("? toggle help"));
 
         // Pressing it again toggles the overlay closed.
         let action = app.on_key(key(KeyCode::Char('？')), &UiData::default());

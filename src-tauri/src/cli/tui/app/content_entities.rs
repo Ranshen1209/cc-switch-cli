@@ -31,17 +31,7 @@ impl App {
     }
 
     fn open_selected_session_detail(&mut self, data: &UiData) -> Action {
-        let visible = visible_sessions_for_state(
-            &self.filter,
-            &self.app_type,
-            self.sessions.show_all_providers,
-            &self.sessions.rows,
-            self.sessions.detail_key.as_deref(),
-            self.sessions.messages_loaded,
-            &self.sessions.messages,
-            self.sessions.deep_search_query.as_deref(),
-            &self.sessions.deep_search_results,
-        );
+        let visible = visible_sessions_for_state(&self.filter, &self.app_type, &self.sessions);
         let Some(session) = visible.get(self.sessions.selected_idx) else {
             return Action::None;
         };
@@ -71,17 +61,7 @@ impl App {
     /// session in the list, without switching to the Detail pane. This allows
     /// users to browse session details with Up/Down keys without pressing Enter.
     fn auto_load_selected_detail(&mut self, _data: &UiData) -> Action {
-        let visible = visible_sessions_for_state(
-            &self.filter,
-            &self.app_type,
-            self.sessions.show_all_providers,
-            &self.sessions.rows,
-            self.sessions.detail_key.as_deref(),
-            self.sessions.messages_loaded,
-            &self.sessions.messages,
-            self.sessions.deep_search_query.as_deref(),
-            &self.sessions.deep_search_results,
-        );
+        let visible = visible_sessions_for_state(&self.filter, &self.app_type, &self.sessions);
         let Some(session) = visible.get(self.sessions.selected_idx) else {
             return Action::None;
         };
@@ -522,17 +502,7 @@ impl App {
     pub(crate) fn on_sessions_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         use crate::cli::tui::keymap::sessions::Intent;
 
-        let visible = visible_sessions_for_state(
-            &self.filter,
-            &self.app_type,
-            self.sessions.show_all_providers,
-            &self.sessions.rows,
-            self.sessions.detail_key.as_deref(),
-            self.sessions.messages_loaded,
-            &self.sessions.messages,
-            self.sessions.deep_search_query.as_deref(),
-            &self.sessions.deep_search_results,
-        );
+        let visible = visible_sessions_for_state(&self.filter, &self.app_type, &self.sessions);
         match key.code {
             KeyCode::Left => self.move_sessions_focus_left(),
             KeyCode::Right => self.move_sessions_focus_right(data),

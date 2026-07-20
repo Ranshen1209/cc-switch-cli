@@ -180,6 +180,9 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
     }
 
     match app_type {
+        AppType::ClaudeDesktop => Err(AppError::InvalidInput(
+            "Claude Desktop does not support common configuration snippets".to_string(),
+        )),
         AppType::Claude
         | AppType::Gemini
         | AppType::OpenCode
@@ -569,7 +572,7 @@ mod tests {
 
         assert_eq!(
             formatted,
-            "{\n \"env\": {\n \"CC_SWITCH_TEST\": \"1\"\n }\n}"
+            "{\n  \"env\": {\n    \"CC_SWITCH_TEST\": \"1\"\n  }\n}"
         );
     }
 

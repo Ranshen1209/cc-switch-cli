@@ -10,6 +10,14 @@ use crate::settings::{get_hermes_override_dir, get_openclaw_override_dir};
 
 /// 返回指定应用所使用的提示词文件路径。
 pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
+    if matches!(app, AppType::ClaudeDesktop) {
+        return Err(AppError::localized(
+            "claude_desktop.prompts_unsupported",
+            "Claude Desktop 暂不支持 Prompts",
+            "Claude Desktop does not support Prompts",
+        ));
+    }
+
     let base_dir: PathBuf = match app {
         AppType::Claude => get_base_dir_with_fallback(get_claude_settings_path(), ".claude")?,
         AppType::Codex => get_base_dir_with_fallback(get_codex_auth_path(), ".codex")?,
@@ -17,6 +25,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::OpenCode => get_opencode_dir(),
         AppType::Hermes => get_hermes_override_dir().unwrap_or_else(default_hermes_dir),
         AppType::OpenClaw => get_openclaw_override_dir().unwrap_or_else(default_openclaw_dir),
+        AppType::ClaudeDesktop => unreachable!("handled above"),
     };
 
     let filename = match app {
@@ -26,6 +35,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::OpenCode => "AGENTS.md",
         AppType::Hermes => "AGENTS.md",
         AppType::OpenClaw => "AGENTS.md",
+        AppType::ClaudeDesktop => unreachable!("handled above"),
     };
 
     Ok(base_dir.join(filename))

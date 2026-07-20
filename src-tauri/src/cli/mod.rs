@@ -956,12 +956,9 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "provider", "add", "--template", "codex-oauth"]);
 
         match cli.command {
-            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
-                template,
-                ..
-            })) => {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add(command))) => {
                 assert_eq!(
-                    template,
+                    command.template,
                     Some(super::commands::provider_input::ProviderAddTemplate::CodexOauth)
                 );
             }

@@ -933,28 +933,19 @@ impl App {
             self.prompt_idx = self.prompt_idx.min(prompt_len - 1);
         }
 
-        let visible_session_rows = visible_sessions_for_state(
-            &self.filter,
-            &self.app_type,
-            self.sessions.show_all_providers,
-            &self.sessions.rows,
-            self.sessions.detail_key.as_deref(),
-            self.sessions.messages_loaded,
-            &self.sessions.messages,
-            self.sessions.deep_search_query.as_deref(),
-            &self.sessions.deep_search_results,
-        );
+        let visible_session_rows =
+            visible_sessions_for_state(&self.filter, &self.app_type, &self.sessions);
         let sessions_len = visible_session_rows.len();
-        if sessions_len == 0 {
-            self.sessions.selected_idx = 0;
-        } else {
-            self.sessions.selected_idx = self.sessions.selected_idx.min(sessions_len - 1);
-        }
         let session_detail_missing = self.sessions.detail_key.as_deref().is_some_and(|key| {
             !visible_session_rows
                 .iter()
                 .any(|session| session_key(session) == key)
         });
+        if sessions_len == 0 {
+            self.sessions.selected_idx = 0;
+        } else {
+            self.sessions.selected_idx = self.sessions.selected_idx.min(sessions_len - 1);
+        }
         if session_detail_missing {
             self.sessions.clear_detail();
         }

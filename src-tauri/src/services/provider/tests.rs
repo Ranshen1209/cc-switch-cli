@@ -1550,6 +1550,8 @@ fn provider_add_keeps_existing_usage_script_for_coding_plan_claude_provider() {
             template_type: Some("custom".to_string()),
             auto_query_interval: Some(0),
             coding_plan_provider: None,
+            team_organization_id: None,
+            team_project_id: None,
         }),
         ..Default::default()
     });
@@ -5152,6 +5154,8 @@ fn resolve_usage_script_credentials_falls_back_to_provider_values() {
         template_type: None,
         auto_query_interval: None,
         coding_plan_provider: None,
+        team_organization_id: None,
+        team_project_id: None,
     };
 
     let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(
@@ -5188,6 +5192,8 @@ fn resolve_usage_script_credentials_does_not_require_provider_api_key_when_scrip
         template_type: None,
         auto_query_interval: None,
         coding_plan_provider: None,
+        team_organization_id: None,
+        team_project_id: None,
     };
 
     let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(
@@ -5981,7 +5987,7 @@ fn import_default_config_preserves_gemini_common_snippet_in_db_snapshot() {
 
 #[test]
 #[serial]
-fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() {
+fn import_openclaw_providers_from_live_updates_existing_and_imports_new() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
 
@@ -6026,7 +6032,7 @@ fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() 
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw providers from live");
 
-    assert_eq!(imported, 1);
+    assert_eq!(imported, 2);
     let existing = state
         .db
         .get_provider_by_id("existing", AppType::OpenClaw.as_str())
@@ -6034,8 +6040,8 @@ fn import_openclaw_providers_from_live_skips_existing_ids_without_overwriting() 
         .expect("existing provider remains");
     assert_eq!(
         existing.settings_config.get("api").and_then(Value::as_str),
-        Some("saved-api"),
-        "existing DB provider must not be overwritten by startup import"
+        Some("live-api"),
+        "existing DB provider should be refreshed from live config"
     );
 
     let imported_provider = state

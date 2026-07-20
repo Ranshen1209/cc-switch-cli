@@ -251,7 +251,7 @@ const KNOWN_TIERS: &[&str] = &[
     "seven_day_sonnet",
 ];
 
-async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
+async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
     let response = match client
@@ -264,41 +264,39 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         .await
     {
         Ok(response) => response,
-        Err(error) => {
-            return SubscriptionQuota::error(
-                "claude",
-                CredentialStatus::Valid,
-                format!("Network error: {error}"),
-            );
-        }
+        Err(error) => return Err(format!("Network error: {error}")),
     };
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             "claude",
             CredentialStatus::Expired,
             format!("Authentication failed (HTTP {status}). Please re-login with Claude CLI."),
-        );
+        ));
     }
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             "claude",
             CredentialStatus::Valid,
             format!("API error (HTTP {status}): {body}"),
-        );
+        ));
     }
 
-    let body: serde_json::Value = match response.json().await {
+    let raw = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read API response: {error}"))?;
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
         Ok(body) => body,
         Err(error) => {
-            return SubscriptionQuota::error(
+            return Ok(SubscriptionQuota::error(
                 "claude",
                 CredentialStatus::Valid,
                 format!("Failed to parse API response: {error}"),
-            );
+            ));
         }
     };
 
@@ -346,7 +344,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
             })
     });
 
-    SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: "claude".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -355,7 +353,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         extra_usage,
         error: None,
         queried_at: Some(now_millis()),
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -557,7 +555,7 @@ pub(crate) async fn query_codex_quota(
     account_id: Option<&str>,
     tool_label: &str,
     expired_message: &str,
-) -> SubscriptionQuota {
+) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
     let mut request = client
@@ -576,41 +574,39 @@ pub(crate) async fn query_codex_quota(
         .await
     {
         Ok(response) => response,
-        Err(error) => {
-            return SubscriptionQuota::error(
-                tool_label,
-                CredentialStatus::Valid,
-                format!("Network error: {error}"),
-            );
-        }
+        Err(error) => return Err(format!("Network error: {error}")),
     };
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             tool_label,
             CredentialStatus::Expired,
             format!("{expired_message} (HTTP {status})"),
-        );
+        ));
     }
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             tool_label,
             CredentialStatus::Valid,
             format!("API error (HTTP {status}): {body}"),
-        );
+        ));
     }
 
-    let body: CodexUsageResponse = match response.json().await {
+    let raw = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read API response: {error}"))?;
+    let body: CodexUsageResponse = match serde_json::from_slice(&raw) {
         Ok(body) => body,
         Err(error) => {
-            return SubscriptionQuota::error(
+            return Ok(SubscriptionQuota::error(
                 tool_label,
                 CredentialStatus::Valid,
                 format!("Failed to parse API response: {error}"),
-            );
+            ));
         }
     };
 
@@ -633,7 +629,7 @@ pub(crate) async fn query_codex_quota(
         }
     }
 
-    SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: tool_label.to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -642,7 +638,7 @@ pub(crate) async fn query_codex_quota(
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -688,10 +684,6 @@ fn gemini_oauth_client_from_options(
     })
 }
 
-#[expect(
-    dead_code,
-    reason = "kept for Gemini OAuth clients loaded from JSON credentials"
-)]
 fn gemini_oauth_client_from_json(value: &serde_json::Value) -> Option<GeminiOAuthClient> {
     let client_id = value
         .get("client_id")
@@ -949,7 +941,7 @@ fn classify_gemini_model(model_id: &str) -> &str {
     }
 }
 
-async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
+async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
     let client = crate::proxy::http_client::get();
 
     let load_response = match client
@@ -967,43 +959,41 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         .await
     {
         Ok(response) => response,
-        Err(error) => {
-            return SubscriptionQuota::error(
-                "gemini",
-                CredentialStatus::Valid,
-                format!("Network error (loadCodeAssist): {error}"),
-            );
-        }
+        Err(error) => return Err(format!("Network error (loadCodeAssist): {error}")),
     };
 
     let load_status = load_response.status();
     if load_status == reqwest::StatusCode::UNAUTHORIZED
         || load_status == reqwest::StatusCode::FORBIDDEN
     {
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Expired,
             format!("Authentication failed (HTTP {load_status}). Please re-login with Gemini CLI."),
-        );
+        ));
     }
 
     if !load_status.is_success() {
         let body = load_response.text().await.unwrap_or_default();
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Valid,
             format!("loadCodeAssist failed (HTTP {load_status}): {body}"),
-        );
+        ));
     }
 
-    let load_body: GeminiLoadCodeAssistResponse = match load_response.json().await {
+    let load_raw = load_response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read loadCodeAssist response: {error}"))?;
+    let load_body: GeminiLoadCodeAssistResponse = match serde_json::from_slice(&load_raw) {
         Ok(body) => body,
         Err(error) => {
-            return SubscriptionQuota::error(
+            return Ok(SubscriptionQuota::error(
                 "gemini",
                 CredentialStatus::Valid,
                 format!("Failed to parse loadCodeAssist response: {error}"),
-            );
+            ));
         }
     };
 
@@ -1027,43 +1017,41 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         .await
     {
         Ok(response) => response,
-        Err(error) => {
-            return SubscriptionQuota::error(
-                "gemini",
-                CredentialStatus::Valid,
-                format!("Network error (retrieveUserQuota): {error}"),
-            );
-        }
+        Err(error) => return Err(format!("Network error (retrieveUserQuota): {error}")),
     };
 
     let quota_status = quota_response.status();
     if quota_status == reqwest::StatusCode::UNAUTHORIZED
         || quota_status == reqwest::StatusCode::FORBIDDEN
     {
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Expired,
             format!("Authentication failed (HTTP {quota_status})."),
-        );
+        ));
     }
 
     if !quota_status.is_success() {
         let body = quota_response.text().await.unwrap_or_default();
-        return SubscriptionQuota::error(
+        return Ok(SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Valid,
             format!("retrieveUserQuota failed (HTTP {quota_status}): {body}"),
-        );
+        ));
     }
 
-    let quota_data: GeminiQuotaResponse = match quota_response.json().await {
+    let quota_raw = quota_response
+        .bytes()
+        .await
+        .map_err(|error| format!("Failed to read quota response: {error}"))?;
+    let quota_data: GeminiQuotaResponse = match serde_json::from_slice(&quota_raw) {
         Ok(body) => body,
         Err(error) => {
-            return SubscriptionQuota::error(
+            return Ok(SubscriptionQuota::error(
                 "gemini",
                 CredentialStatus::Valid,
                 format!("Failed to parse quota response: {error}"),
-            );
+            ));
         }
     };
 
@@ -1106,7 +1094,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         .collect();
     tiers.sort_by_key(|tier| sort_order(&tier.name));
 
-    SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: "gemini".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -1115,7 +1103,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    }
+    })
 }
 
 pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, String> {
@@ -1131,7 +1119,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                 )),
                 CredentialStatus::Expired => {
                     if let Some(token) = token {
-                        let result = query_claude_quota(&token).await;
+                        let result = query_claude_quota(&token).await?;
                         if result.success {
                             return Ok(result);
                         }
@@ -1150,7 +1138,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "accessToken is empty or missing".to_string(),
                         ));
                     };
-                    Ok(query_claude_quota(&token).await)
+                    query_claude_quota(&token).await
                 }
             }
         }
@@ -1171,7 +1159,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "codex",
                             "Authentication failed. Please re-login with Codex CLI.",
                         )
-                        .await;
+                        .await?;
                         if result.success {
                             return Ok(result);
                         }
@@ -1190,13 +1178,13 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "access_token is empty or missing".to_string(),
                         ));
                     };
-                    Ok(query_codex_quota(
+                    query_codex_quota(
                         &token,
                         account_id.as_deref(),
                         "codex",
                         "Authentication failed. Please re-login with Codex CLI.",
                     )
-                    .await)
+                    .await
                 }
             }
         }
@@ -1216,11 +1204,11 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                         if let Some(new_token) =
                             refresh_gemini_token(refresh_token, oauth_client).await
                         {
-                            return Ok(query_gemini_quota(&new_token).await);
+                            return query_gemini_quota(&new_token).await;
                         }
                     }
                     if let Some(ref token) = token {
-                        let result = query_gemini_quota(token).await;
+                        let result = query_gemini_quota(token).await?;
                         if result.success {
                             return Ok(result);
                         }
@@ -1239,7 +1227,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "access_token is empty or missing".to_string(),
                         ));
                     };
-                    Ok(query_gemini_quota(&token).await)
+                    query_gemini_quota(&token).await
                 }
             }
         }

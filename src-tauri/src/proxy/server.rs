@@ -343,6 +343,14 @@ impl ProxyServer {
             .route("/status", get(handlers::get_status))
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
+            .route(
+                "/claude-desktop/v1/models",
+                get(handlers::handle_claude_desktop_models),
+            )
+            .route(
+                "/claude-desktop/v1/messages",
+                post(handlers::handle_claude_desktop_messages),
+            )
             .route("/chat/completions", post(handlers::handle_chat_completions))
             .route(
                 "/v1/chat/completions",

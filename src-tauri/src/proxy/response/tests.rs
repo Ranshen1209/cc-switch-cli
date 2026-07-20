@@ -240,6 +240,33 @@ async fn codex_chat_buffered_success_converts_to_responses_shape() {
 }
 
 #[tokio::test]
+async fn codex_anthropic_buffered_stream_records_completion() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let prepared = build_buffered_codex_anthropic_stream_response_with_context(
+        reqwest::StatusCode::OK,
+        &headers,
+        Bytes::from_static(
+            br#"{"id":"msg_123","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#,
+        ),
+        transform_codex_chat::CodexToolContext::default(),
+    )
+    .expect("convert buffered Anthropic stream response");
+    let completion = prepared
+        .stream_completion
+        .clone()
+        .expect("stream completion should be present");
+
+    let body = buffered_body(prepared.response).await;
+    let body = String::from_utf8(body.to_vec()).expect("Responses SSE should be UTF-8");
+
+    assert!(body.contains("event: response.completed"), "{body}");
+    assert!(body.contains("hello"), "{body}");
+    assert!(matches!(completion.outcome(), Some(Ok(()))));
+}
+
+#[tokio::test]
 async fn codex_chat_buffered_response_restores_tool_context_identity() {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

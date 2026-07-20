@@ -69,6 +69,15 @@ impl ProviderService {
                 })
             }
             Err(err) => {
+                if let AppError::Localized { key, .. } = &err {
+                    if matches!(
+                        *key,
+                        "usage_script.request_failed" | "usage_script.read_response_failed"
+                    ) {
+                        return Err(err);
+                    }
+                }
+
                 let lang = settings::get_settings()
                     .language
                     .unwrap_or_else(|| "zh".to_string());
@@ -184,9 +193,15 @@ impl ProviderService {
                 Self::resolve_usage_script_credentials(provider, &app_type, usage_script)
                     .map_err(|e| e.to_string())?;
 
-            let quota = crate::services::coding_plan::get_coding_plan_quota(&base_url, &api_key)
-                .await
-                .map_err(|e| format!("Failed to query coding plan: {e}"))?;
+            let quota = crate::services::coding_plan::get_coding_plan_quota(
+                &base_url,
+                &api_key,
+                usage_script.coding_plan_provider.as_deref(),
+                usage_script.team_organization_id.as_deref(),
+                usage_script.team_project_id.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("Failed to query coding plan: {e}"))?;
 
             if !quota.success {
                 return Ok(UsageResult {
@@ -329,6 +344,10 @@ impl ProviderService {
 
     fn extract_api_key(provider: &Provider, app_type: &AppType) -> Result<String, AppError> {
         match app_type {
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::direct_gateway_credentials(provider)
+                    .map(|credentials| credentials.api_key)
+            }
             AppType::Claude => {
                 let env = provider
                     .settings_config
@@ -434,6 +453,10 @@ impl ProviderService {
 
     fn extract_base_url(provider: &Provider, app_type: &AppType) -> Result<String, AppError> {
         match app_type {
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::direct_gateway_credentials(provider)
+                    .map(|credentials| credentials.base_url)
+            }
             AppType::Claude => provider
                 .settings_config
                 .get("env")
@@ -607,6 +630,8 @@ mod tests {
                 template_type: None,
                 auto_query_interval: None,
                 coding_plan_provider: None,
+                team_organization_id: None,
+                team_project_id: None,
             }),
             ..Default::default()
         });
@@ -660,6 +685,8 @@ mod tests {
             template_type: Some("general".to_string()),
             auto_query_interval: None,
             coding_plan_provider: None,
+            team_organization_id: None,
+            team_project_id: None,
         };
 
         let (api_key, base_url) =
@@ -693,6 +720,8 @@ mod tests {
             template_type: Some("balance".to_string()),
             auto_query_interval: None,
             coding_plan_provider: None,
+            team_organization_id: None,
+            team_project_id: None,
         };
 
         let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(
@@ -731,6 +760,8 @@ mod tests {
             template_type: Some("general".to_string()),
             auto_query_interval: None,
             coding_plan_provider: None,
+            team_organization_id: None,
+            team_project_id: None,
         };
 
         let (api_key, base_url) =

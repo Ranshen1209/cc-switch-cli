@@ -296,6 +296,7 @@ fn mutate_visible_app(app: AppType, enabled: bool) -> Result<(), AppError> {
 fn set_visible_apps_list(apps: Vec<AppType>) -> Result<(), AppError> {
     let mut visible_apps = crate::settings::VisibleApps {
         claude: false,
+        claude_desktop: false,
         codex: false,
         gemini: false,
         opencode: false,
@@ -612,6 +613,7 @@ mod tests {
 
         save_manual_visible_apps(VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: true,
             opencode: false,
@@ -635,6 +637,7 @@ mod tests {
 
         let err = save_manual_visible_apps(VisibleApps {
             claude: false,
+            claude_desktop: false,
             codex: false,
             gemini: false,
             opencode: false,

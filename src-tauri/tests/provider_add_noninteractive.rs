@@ -6,9 +6,11 @@
 //! path lives in the TUI. These tests drive `ProviderCommand::Add` through the
 //! command dispatcher and assert on the persisted provider.
 
-use cc_switch_lib::cli::commands::provider::{ClaudeApiKeyFieldArg, ProviderCommand};
+use cc_switch_lib::cli::commands::provider::{
+    ClaudeApiKeyFieldArg, ClaudeDesktopModeArg, ProviderAddCommand, ProviderCommand,
+};
 use cc_switch_lib::cli::commands::provider_input::ProviderAddTemplate;
-use cc_switch_lib::{AppType, MultiAppConfig, Provider};
+use cc_switch_lib::{AppType, ClaudeDesktopMode, MultiAppConfig, Provider};
 
 use serial_test::serial;
 
@@ -32,13 +34,17 @@ struct AddOpts {
     sort_index: Option<usize>,
     api_key_field: Option<ClaudeApiKeyFieldArg>,
     api_format: Option<String>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
+    desktop_mode: Option<ClaudeDesktopModeArg>,
+    desktop_routes: Option<String>,
 }
 
 fn add_command(name: Option<&str>, opts: AddOpts) -> ProviderCommand {
-    ProviderCommand::Add {
+    ProviderCommand::Add(Box::new(ProviderAddCommand {
         template: opts.template,
         name: name.map(str::to_string),
         id: opts.id,
@@ -52,10 +58,14 @@ fn add_command(name: Option<&str>, opts: AddOpts) -> ProviderCommand {
         sort_index: opts.sort_index,
         api_key_field: opts.api_key_field,
         api_format: opts.api_format,
+        impersonate_claude_code: opts.impersonate_claude_code,
+        max_output_tokens: opts.max_output_tokens,
         common_config: opts.common_config,
         account_id: opts.account_id,
         fast_mode: opts.fast_mode,
-    }
+        desktop_mode: opts.desktop_mode,
+        desktop_routes: opts.desktop_routes,
+    }))
 }
 
 fn run_add(name: Option<&str>, app: AppType, opts: AddOpts) -> Result<(), cc_switch_lib::AppError> {
@@ -80,6 +90,77 @@ fn saved_provider(app_type: AppType, id: &str) -> Provider {
         .get(id)
         .cloned()
         .expect("saved provider")
+}
+
+#[test]
+#[serial]
+fn add_claude_desktop_direct_provider_persists_mode() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Desktop Direct"),
+        AppType::ClaudeDesktop,
+        AddOpts {
+            base_url: Some("https://desktop.example".to_string()),
+            api_key: Some("desktop-token".to_string()),
+            desktop_mode: Some(ClaudeDesktopModeArg::Direct),
+            ..Default::default()
+        },
+    )
+    .expect("Claude Desktop direct provider should be added");
+
+    let provider = saved_provider(AppType::ClaudeDesktop, "desktop-direct");
+    assert_eq!(
+        env_str(&provider, "ANTHROPIC_BASE_URL"),
+        Some("https://desktop.example")
+    );
+    assert_eq!(
+        env_str(&provider, "ANTHROPIC_AUTH_TOKEN"),
+        Some("desktop-token")
+    );
+    assert_eq!(
+        provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.claude_desktop_mode.clone()),
+        Some(ClaudeDesktopMode::Direct)
+    );
+}
+
+#[test]
+#[serial]
+fn add_claude_desktop_proxy_provider_persists_routes() {
+    let _guard = lock_test_mutex();
+    prepare_empty_state();
+
+    run_add(
+        Some("Desktop Proxy"),
+        AppType::ClaudeDesktop,
+        AddOpts {
+            base_url: Some("https://openai.example/v1".to_string()),
+            api_key: Some("proxy-token".to_string()),
+            api_format: Some("openai_chat".to_string()),
+            desktop_mode: Some(ClaudeDesktopModeArg::Proxy),
+            desktop_routes: Some(
+                r#"{"claude-sonnet-4-6":{"model":"gpt-5.4","labelOverride":"GPT-5.4"}}"#
+                    .to_string(),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("Claude Desktop proxy provider should be added");
+
+    let provider = saved_provider(AppType::ClaudeDesktop, "desktop-proxy");
+    let meta = provider.meta.expect("desktop proxy metadata");
+    assert_eq!(meta.claude_desktop_mode, Some(ClaudeDesktopMode::Proxy));
+    assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+    let route = meta
+        .claude_desktop_model_routes
+        .get("claude-sonnet-4-6")
+        .expect("desktop route");
+    assert_eq!(route.model, "gpt-5.4");
+    assert_eq!(route.label_override.as_deref(), Some("GPT-5.4"));
 }
 
 fn env_str<'a>(provider: &'a Provider, key: &str) -> Option<&'a str> {
@@ -302,31 +383,36 @@ fn add_codex_api_format_override_is_applied() {
 
 #[test]
 #[serial]
-fn add_sponsor_template_inherits_base_url() {
+fn add_codex_anthropic_options_are_persisted() {
     let _guard = lock_test_mutex();
     prepare_empty_state();
 
     run_add(
-        Some("Packy"),
-        AppType::Claude,
+        Some("CodexAnthropic"),
+        AppType::Codex,
         AddOpts {
-            template: Some(ProviderAddTemplate::Packycode),
-            api_key: Some("sk-packy".to_string()),
+            base_url: Some("https://anthropic-gateway.example/v1/messages".to_string()),
+            api_key: Some("sk-ant".to_string()),
+            api_key_field: Some(ClaudeApiKeyFieldArg::ApiKey),
+            api_format: Some("anthropic".to_string()),
+            impersonate_claude_code: true,
+            max_output_tokens: Some(32768),
             ..Default::default()
         },
     )
-    .expect("sponsor template add should succeed");
+    .expect("Codex Anthropic add should succeed");
 
-    let provider = saved_provider(AppType::Claude, "packy");
-    assert_eq!(
-        env_str(&provider, "ANTHROPIC_BASE_URL"),
-        Some("https://www.packyapi.com")
-    );
-    assert_eq!(env_str(&provider, "ANTHROPIC_AUTH_TOKEN"), Some("sk-packy"));
-    assert_eq!(
-        provider.meta.as_ref().and_then(|meta| meta.is_partner),
-        Some(true)
-    );
+    let provider = saved_provider(AppType::Codex, "codexanthropic");
+    let meta = provider.meta.expect("Anthropic metadata");
+    assert_eq!(meta.api_format.as_deref(), Some("anthropic"));
+    assert_eq!(meta.api_key_field.as_deref(), Some("ANTHROPIC_API_KEY"));
+    assert_eq!(meta.impersonate_claude_code, Some(true));
+    assert_eq!(meta.max_output_tokens, Some(32768));
+    assert!(provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .is_some_and(|config| config.contains("wire_api = \"responses\"")));
 }
 
 #[test]
@@ -491,35 +577,6 @@ fn add_codex_oauth_template_requires_account() {
     assert!(
         err.to_string().contains("--account-id"),
         "error should require --account-id: {err}"
-    );
-}
-
-#[test]
-#[serial]
-fn add_deepseek_template_preserves_api_format_without_override() {
-    let _guard = lock_test_mutex();
-    prepare_empty_state();
-
-    run_add(
-        Some("DeepSeek"),
-        AppType::Codex,
-        AddOpts {
-            template: Some(ProviderAddTemplate::Deepseek),
-            api_key: Some("sk-ds".to_string()),
-            ..Default::default()
-        },
-    )
-    .expect("deepseek template add should succeed");
-
-    // The template seeds openai_chat; omitting --api-format must not reset it
-    // to the openai_responses default.
-    let provider = saved_provider(AppType::Codex, "deepseek");
-    assert_eq!(
-        provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.api_format.as_deref()),
-        Some("openai_chat")
     );
 }
 

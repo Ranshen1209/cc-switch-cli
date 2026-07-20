@@ -16,7 +16,7 @@ pub(super) fn populate_form_from_provider(
     provider: &Provider,
 ) {
     match app_type {
-        AppType::Claude => populate_claude_form(form, provider),
+        AppType::Claude | AppType::ClaudeDesktop => populate_claude_form(form, provider),
         AppType::Codex => populate_codex_form(form, provider),
         AppType::Gemini => populate_gemini_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
@@ -463,6 +463,7 @@ fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -
         })
     {
         return match api_format {
+            "anthropic" => ClaudeApiFormat::Anthropic,
             "openai_chat" => ClaudeApiFormat::OpenAiChat,
             _ => ClaudeApiFormat::OpenAiResponses,
         };

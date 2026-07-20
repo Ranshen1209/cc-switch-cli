@@ -317,6 +317,7 @@ impl ProxySnapshot {
     pub fn takeover_enabled_for(&self, app_type: &AppType) -> Option<bool> {
         match app_type {
             AppType::Claude => Some(self.claude_takeover),
+            AppType::ClaudeDesktop => None,
             AppType::Codex => Some(self.codex_takeover),
             AppType::Gemini => Some(self.gemini_takeover),
             AppType::OpenCode => None,
@@ -1260,7 +1261,7 @@ fn sort_providers(providers: &IndexMap<String, Provider>) -> Vec<(String, Provid
 
 fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String> {
     match app_type {
-        AppType::Claude => settings_config
+        AppType::Claude | AppType::ClaudeDesktop => settings_config
             .get("env")?
             .get("ANTHROPIC_BASE_URL")?
             .as_str()

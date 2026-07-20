@@ -167,7 +167,7 @@ impl CodexOAuthService {
         Self::manager().get_status().await
     }
 
-    pub async fn get_quota(account_id: Option<&str>) -> SubscriptionQuota {
+    pub async fn get_quota(account_id: Option<&str>) -> Result<SubscriptionQuota, String> {
         let manager = Self::manager();
         let resolved_account_id = match account_id {
             Some(account_id) => Some(account_id.to_string()),
@@ -175,17 +175,17 @@ impl CodexOAuthService {
         };
 
         let Some(account_id) = resolved_account_id else {
-            return SubscriptionQuota::not_found("codex_oauth");
+            return Ok(SubscriptionQuota::not_found("codex_oauth"));
         };
 
         let token = match manager.get_valid_token_for_account(&account_id).await {
             Ok(token) => token,
             Err(error) => {
-                return SubscriptionQuota::error(
+                return Ok(SubscriptionQuota::error(
                     "codex_oauth",
                     CredentialStatus::Expired,
                     format!("Codex OAuth token unavailable: {error}"),
-                );
+                ));
             }
         };
 

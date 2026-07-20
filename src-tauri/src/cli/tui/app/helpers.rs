@@ -791,36 +791,34 @@ pub(crate) fn visible_sessions<'a>(
 pub(crate) fn visible_sessions_for_state<'a>(
     filter: &FilterState,
     app_type: &AppType,
-    show_all: bool,
-    rows: &'a [crate::session_manager::SessionMeta],
-    detail_key: Option<&str>,
-    messages_loaded: bool,
-    messages: &[crate::session_manager::SessionMessage],
-    deep_search_query: Option<&str>,
-    deep_search_results: &[crate::session_manager::SessionSearchHit],
+    sessions: &'a SessionsState,
 ) -> Vec<&'a crate::session_manager::SessionMeta> {
     let query = filter.query_lower();
     let provider_id = app_type.as_str();
     let message_match_key = query.as_deref().and_then(|_| {
-        loaded_detail_message_match_key(filter, detail_key, messages_loaded, messages)
+        loaded_detail_message_match_key(
+            filter,
+            sessions.detail_key.as_deref(),
+            sessions.messages_loaded,
+            &sessions.messages,
+        )
     });
 
     // If deep search is active, only show sessions that appear in search hits
     // (merged with metadata matches).
     let deep_search_source_paths: Option<std::collections::HashSet<&str>> =
-        if let Some(_q) = deep_search_query {
-            Some(
-                deep_search_results
-                    .iter()
-                    .map(|h| h.source_path.as_str())
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        sessions.deep_search_query.as_deref().map(|_| {
+            sessions
+                .deep_search_results
+                .iter()
+                .map(|hit| hit.source_path.as_str())
+                .collect()
+        });
 
-    rows.iter()
-        .filter(|row| show_all || row.provider_id == provider_id)
+    sessions
+        .rows
+        .iter()
+        .filter(|row| sessions.show_all_providers || row.provider_id == provider_id)
         .filter(|row| {
             // Deep search filtering: if active, show session if it's in search hits
             // OR matches metadata filter
@@ -1281,25 +1279,43 @@ pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> Option<AppType> {
 pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
     match app_type {
         AppType::Claude => 0,
-        AppType::Codex => 1,
-        AppType::Gemini => 2,
-        AppType::OpenCode => 3,
-        AppType::Hermes => 4,
-        AppType::OpenClaw => 5,
+        AppType::ClaudeDesktop => 1,
+        AppType::Codex => 2,
+        AppType::Gemini => 3,
+        AppType::OpenCode => 4,
+        AppType::Hermes => 5,
+        AppType::OpenClaw => 6,
     }
 }
 
 pub(crate) fn four_app_picker_index(app_type: &AppType) -> usize {
-    app_type_picker_index(app_type).min(4)
+    match app_type {
+        AppType::Claude | AppType::ClaudeDesktop => 0,
+        AppType::Codex => 1,
+        AppType::Gemini => 2,
+        AppType::OpenCode => 3,
+        AppType::Hermes | AppType::OpenClaw => 4,
+    }
 }
 
-pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
+pub(crate) fn managed_app_type_for_picker_index(index: usize) -> AppType {
     match index {
         1 => AppType::Codex,
         2 => AppType::Gemini,
         3 => AppType::OpenCode,
         4 => AppType::Hermes,
-        5 => AppType::OpenClaw,
+        _ => AppType::Claude,
+    }
+}
+
+pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
+    match index {
+        1 => AppType::ClaudeDesktop,
+        2 => AppType::Codex,
+        3 => AppType::Gemini,
+        4 => AppType::OpenCode,
+        5 => AppType::Hermes,
+        6 => AppType::OpenClaw,
         _ => AppType::Claude,
     }
 }

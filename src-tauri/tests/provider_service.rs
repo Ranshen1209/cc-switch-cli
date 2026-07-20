@@ -3365,8 +3365,7 @@ fn provider_service_import_openclaw_providers_from_live_imports_valid_live_provi
 }
 
 #[test]
-fn provider_service_import_openclaw_providers_from_live_imports_missing_live_providers_incrementally(
-) {
+fn provider_service_import_openclaw_providers_from_live_updates_existing_and_imports_missing() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3423,8 +3422,8 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
     let providers = openclaw_db_providers(&state);
 
     assert_eq!(
-        imported, 1,
-        "import should skip existing DB rows and only add missing live providers"
+        imported, 2,
+        "import should refresh existing DB rows and add missing live providers"
     );
     assert_eq!(providers.len(), 2);
     assert!(providers.contains_key("openai"));
@@ -3439,9 +3438,9 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
     assert_eq!(
         providers
             .get("openai")
-            .expect("existing provider should be preserved")
+            .expect("existing provider should be refreshed")
             .settings_config["baseUrl"],
-        json!("https://existing.example/v1")
+        json!("https://api.example.com/v1")
     );
     assert_eq!(
         providers
@@ -3513,7 +3512,7 @@ fn provider_service_import_openclaw_providers_from_live_imports_typed_legacy_ali
 }
 
 #[test]
-fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() {
+fn provider_service_import_openclaw_live_skips_blank_ids_and_updates_existing_entries() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3573,8 +3572,8 @@ fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() 
         .expect("import openclaw live config should succeed");
 
     assert_eq!(
-        imported, 1,
-        "import should skip blank ids and existing DB rows, then add newcomers"
+        imported, 2,
+        "import should skip blank ids, refresh existing DB rows, and add newcomers"
     );
 
     let providers = openclaw_db_providers(&state);
@@ -3597,9 +3596,9 @@ fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() 
     assert_eq!(
         providers
             .get("existing")
-            .expect("existing provider should be preserved")
+            .expect("existing provider should be refreshed")
             .settings_config["baseUrl"],
-        json!("https://existing-db.example/v1")
+        json!("https://existing-live.example/v1")
     );
     assert_eq!(
         providers
@@ -3806,7 +3805,7 @@ fn provider_service_import_openclaw_providers_from_live_preserves_saved_name_for
 
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
-    assert_eq!(imported, 0, "import should skip the existing row");
+    assert_eq!(imported, 1, "import should refresh the existing row");
 
     let providers = openclaw_db_providers(&state);
     let openai = providers
@@ -3819,9 +3818,10 @@ fn provider_service_import_openclaw_providers_from_live_preserves_saved_name_for
     );
     assert_eq!(
         openai.settings_config["baseUrl"],
-        json!("https://saved.example/v1"),
-        "existing OpenClaw rows should not be overwritten by live import"
+        json!("https://live.example/v1"),
+        "existing OpenClaw rows should refresh their live settings"
     );
+    assert_eq!(openai.notes.as_deref(), Some("customized row"));
 }
 
 #[test]

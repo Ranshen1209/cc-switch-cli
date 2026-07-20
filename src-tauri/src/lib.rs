@@ -1,5 +1,6 @@
 // Core modules
 mod app_config;
+pub mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
@@ -62,7 +63,9 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
-pub use provider::{Provider, ProviderMeta, UsageScript};
+pub use provider::{
+    ClaudeDesktopMode, ClaudeDesktopModelRoute, Provider, ProviderMeta, UsageScript,
+};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
     AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,

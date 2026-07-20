@@ -448,7 +448,7 @@ fn build_proxy_route_lines(
                 worker.port,
                 worker
                     .pid
-                    .map(|pid| format!("pid={pid}"))
+                    .map(|pid| format!(" pid={pid}"))
                     .unwrap_or_default()
             ),
             None => format!(

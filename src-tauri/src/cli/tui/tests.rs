@@ -2034,7 +2034,7 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
         ProxyMsg::SnapshotRefreshed {
             request_id: 1,
             app_type: AppType::Claude,
-            result: Ok(proxy),
+            result: Ok(Box::new(proxy)),
         },
     )
     .expect("snapshot result should be handled");
@@ -2066,10 +2066,10 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
         ProxyMsg::SnapshotRefreshed {
             request_id: 1,
             app_type: AppType::Claude,
-            result: Ok(data::ProxySnapshot {
+            result: Ok(Box::new(data::ProxySnapshot {
                 running: true,
                 ..data::ProxySnapshot::default()
-            }),
+            })),
         },
     )
     .expect("stale snapshot result should be ignored");
@@ -2084,10 +2084,10 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
         ProxyMsg::SnapshotRefreshed {
             request_id: 2,
             app_type: AppType::Codex,
-            result: Ok(data::ProxySnapshot {
+            result: Ok(Box::new(data::ProxySnapshot {
                 running: true,
                 ..data::ProxySnapshot::default()
-            }),
+            })),
         },
     )
     .expect("wrong-app snapshot result should be ignored");
@@ -2603,6 +2603,7 @@ fn startup_hidden_requested_app_bootstrap_uses_visible_app_normalization_before_
     let _env = EnvGuard::set_home(temp_home.path());
     crate::settings::set_visible_apps(crate::settings::VisibleApps {
         claude: true,
+        claude_desktop: true,
         codex: true,
         gemini: false,
         opencode: true,

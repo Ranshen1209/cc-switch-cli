@@ -1156,6 +1156,7 @@ pub(super) fn render_visible_apps_picker_overlay(
         "Space",
         &[
             crate::app_config::AppType::Claude,
+            crate::app_config::AppType::ClaudeDesktop,
             crate::app_config::AppType::Codex,
             crate::app_config::AppType::Gemini,
             crate::app_config::AppType::OpenCode,

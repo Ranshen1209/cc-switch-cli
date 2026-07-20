@@ -33,7 +33,7 @@ mod tests;
 
 // DAO 类型导出供外部使用
 pub(crate) use dao::model_pricing::ModelPricingUpdate;
-pub(crate) use dao::providers_seed::is_official_seed_id;
+pub(crate) use dao::providers_seed::{is_official_seed_id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
 pub use dao::FailoverQueueItem;
 
 use crate::config::{

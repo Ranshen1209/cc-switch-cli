@@ -9,17 +9,7 @@ pub(super) fn render_sessions(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let visible = app::visible_sessions_for_state(
-        &app.filter,
-        &app.app_type,
-        app.sessions.show_all_providers,
-        &app.sessions.rows,
-        app.sessions.detail_key.as_deref(),
-        app.sessions.messages_loaded,
-        &app.sessions.messages,
-        app.sessions.deep_search_query.as_deref(),
-        &app.sessions.deep_search_results,
-    );
+    let visible = app::visible_sessions_for_state(&app.filter, &app.app_type, &app.sessions);
 
     // Pane/list navigation is handled globally (arrows, h/l, Tab), so it is
     // hinted here as a static prefix; the action chips are generated from the

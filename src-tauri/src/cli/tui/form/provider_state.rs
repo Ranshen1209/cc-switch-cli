@@ -304,7 +304,9 @@ impl ProviderAddFormState {
                 .ok()
                 .and_then(|value| value.as_object().cloned())
                 .is_some_and(|obj| !obj.is_empty()),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+                false
+            }
         }
     }
 
@@ -367,6 +369,12 @@ impl ProviderAddFormState {
         }
 
         match self.app_type {
+            AppType::ClaudeDesktop => {
+                if !self.is_claude_official_provider() {
+                    fields.push(ProviderAddField::ClaudeBaseUrl);
+                    fields.push(ProviderAddField::ClaudeApiKey);
+                }
+            }
             AppType::Claude => {
                 if self.is_claude_codex_oauth_provider() {
                     fields.push(ProviderAddField::CodexOAuthAccount);
@@ -1390,7 +1398,7 @@ impl ProviderAddFormState {
         }
 
         match self.app_type {
-            AppType::Claude => self.claude_base_url.value.clone(),
+            AppType::Claude | AppType::ClaudeDesktop => self.claude_base_url.value.clone(),
             AppType::Codex => self.codex_base_url.value.clone(),
             AppType::Gemini => self.gemini_base_url.value.clone(),
             AppType::Hermes => self.hermes_base_url.value.clone(),
@@ -1407,7 +1415,9 @@ impl ProviderAddFormState {
         }
 
         let (api_key, base_url) = match self.app_type {
-            AppType::Claude => (&self.claude_api_key.value, &self.claude_base_url.value),
+            AppType::Claude | AppType::ClaudeDesktop => {
+                (&self.claude_api_key.value, &self.claude_base_url.value)
+            }
             AppType::Codex => (&self.codex_api_key.value, &self.codex_base_url.value),
             AppType::Gemini => (&self.gemini_api_key.value, &self.gemini_base_url.value),
             AppType::Hermes => (&self.hermes_api_key.value, &self.hermes_base_url.value),
@@ -1519,7 +1529,7 @@ impl ProviderAddFormState {
     }
 
     pub fn is_claude_codex_oauth_provider(&self) -> bool {
-        if !matches!(self.app_type, AppType::Claude) {
+        if !matches!(self.app_type, AppType::Claude | AppType::ClaudeDesktop) {
             return false;
         }
 

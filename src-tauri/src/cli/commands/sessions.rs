@@ -9,7 +9,7 @@ use crate::cli::ui::{create_table, info, success, to_json, warning};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
-use crate::session_manager::{self, SessionMessage, SessionMeta, SessionSearchHit};
+use crate::session_manager::{self, SessionMessage, SessionMeta};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionsCommand {
