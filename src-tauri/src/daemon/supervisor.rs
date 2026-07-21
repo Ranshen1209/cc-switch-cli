@@ -1101,6 +1101,9 @@ impl Supervisor {
 impl Handler for Supervisor {
     async fn handle(&self, request: Request) -> Response {
         match request {
+            Request::ConfigIdentity => Response::ConfigIdentity {
+                database: self.db.runtime_key().to_string(),
+            },
             Request::EnsureWorker {
                 app_type,
                 fallback_provider_id,

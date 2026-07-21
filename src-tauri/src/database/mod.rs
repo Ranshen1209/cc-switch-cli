@@ -648,6 +648,10 @@ impl Database {
         &self.runtime_key
     }
 
+    pub(crate) fn current_runtime_key() -> Result<String, AppError> {
+        Ok(format!("file:{}", database_path()?.display()))
+    }
+
     pub(crate) fn spawn_periodic_usage_maintenance(
         db: Arc<Self>,
         context: &'static str,

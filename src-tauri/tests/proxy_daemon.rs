@@ -256,6 +256,60 @@ fn daemon_starts_and_serves_status_request() {
 
 #[test]
 #[serial]
+fn managed_session_rejects_daemon_from_different_config_directory() {
+    let sandbox = TestSandbox::new();
+    let original_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR")
+        .map(PathBuf::from)
+        .expect("sandbox config directory");
+    let other_config_dir = sandbox._root.path().join("other-cc-switch");
+    std::fs::create_dir_all(&other_config_dir).expect("create second config directory");
+
+    let mut daemon = sandbox.spawn_daemon();
+    assert!(
+        sandbox.wait_for_socket(Duration::from_secs(10)),
+        "daemon socket should come up"
+    );
+
+    // Keep the runtime directory (and therefore daemon socket) shared while
+    // moving only the foreground process to a different CC-Switch database.
+    unsafe {
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", &other_config_dir);
+    }
+    let state = cc_switch_lib::AppState::try_new().expect("create state for second database");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create test runtime");
+    let error = runtime
+        .block_on(
+            state
+                .proxy_service
+                .set_managed_session_for_app("claude", true),
+        )
+        .expect_err("different database daemon must be rejected");
+
+    assert!(error.contains("running daemon uses"), "{error}");
+    assert!(error.contains("cc-switch daemon stop"), "{error}");
+    let proxy_config = runtime
+        .block_on(state.db.get_proxy_config_for_app("claude"))
+        .expect("load second database proxy config");
+    assert!(
+        !proxy_config.enabled,
+        "identity mismatch must be rejected before takeover is enabled"
+    );
+
+    unsafe {
+        std::env::set_var("CC_SWITCH_CONFIG_DIR", original_config_dir);
+    }
+    let _ = send_request(sandbox.socket(), r#"{"kind":"shutdown"}"#);
+    assert!(
+        wait_for_daemon_exit(&mut daemon, Duration::from_secs(5)),
+        "daemon should stop after cleanup"
+    );
+}
+
+#[test]
+#[serial]
 fn ensure_worker_spawns_a_worker_and_drop_takeover_brings_it_down() {
     let sandbox = TestSandbox::new();
     seed_minimal_claude_provider(&sandbox);

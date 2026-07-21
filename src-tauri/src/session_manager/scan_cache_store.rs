@@ -78,22 +78,47 @@ impl ScanCacheStore {
 
     /// 在指定路径打开缓存库（测试与 `open()` 共用）。
     pub fn open_at(path: &Path) -> Result<Self, AppError> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-            }
+        let file_name = path.file_name().ok_or_else(|| {
+            AppError::InvalidInput(format!("会话扫描缓存路径缺少文件名: {}", path.display()))
+        })?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
+        let open_path = parent
+            .canonicalize()
+            .map_err(|e| AppError::io(parent, e))?
+            .join(file_name);
+
+        // Resolve only the parent: SQLite NOFOLLOW rejects macOS aliases such as /tmp, while
+        // leaving the final component unresolved still blocks a symlink at the database path.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&open_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(AppError::io(&open_path, error)),
+        }
+
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
             | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let conn = Connection::open_with_flags(path, flags)
+        let conn = Connection::open_with_flags(&open_path, flags)
             .map_err(|e| AppError::Database(format!("打开会话扫描缓存库失败: {e}")))?;
         // 与主库一致：缓存虽可重建，但含会话元数据与绝对路径，unix 下收紧为 0600
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&open_path, std::fs::Permissions::from_mode(0o600));
         }
         Self::from_connection(conn)
     }
@@ -839,5 +864,19 @@ mod tests {
         let result = ScanCacheStore::open_at(&path)
             .and_then(|store| store.load_for_provider("claude").map(|_| store));
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_at_rejects_database_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.db");
+        let path = dir.path().join("session-scan-cache.db");
+        std::fs::write(&target, []).expect("write target");
+        symlink(&target, &path).expect("create symlink");
+
+        assert!(ScanCacheStore::open_at(&path).is_err());
     }
 }

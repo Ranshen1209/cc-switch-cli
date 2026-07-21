@@ -46,6 +46,28 @@ approval_policy = "never"
 }
 
 #[test]
+fn extract_claude_common_config_strips_fable_model_env_keys() {
+    let settings = json!({
+        "env": {
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-mapped[1M]",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Fable Mapped",
+            "ENABLE_TOOL_SEARCH": "true"
+        },
+        "theme": "dark"
+    });
+
+    let snippet = ProviderService::extract_claude_common_config(&settings)
+        .expect("extract Claude common config");
+    let value: Value = serde_json::from_str(&snippet).expect("parse common config");
+    let env = value.get("env").expect("preserve shared env");
+
+    assert!(env.get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none());
+    assert!(env.get("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME").is_none());
+    assert_eq!(env.get("ENABLE_TOOL_SEARCH"), Some(&json!("true")));
+    assert_eq!(value.get("theme"), Some(&json!("dark")));
+}
+
+#[test]
 fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);

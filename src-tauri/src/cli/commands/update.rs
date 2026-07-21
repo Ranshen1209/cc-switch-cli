@@ -24,6 +24,7 @@ const LATEST_MANIFEST_FILE_NAME: &str = "latest.json";
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RELEASE_ASSET_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
+const HOMEBREW_UPGRADE_COMMAND: &str = "brew upgrade Ranshen1209/cc-switch-cli/cc-switch-cli";
 const UPDATER_PUBLIC_KEY: &str = include_str!("../../../updater/minisign.pub");
 const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -157,9 +158,9 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
     if should_block_homebrew_before_update_check(is_homebrew_managed, explicit_version) {
         println!(
             "{}",
-            warning(
-                "cc-switch was installed via Homebrew. Self-update to a specific version is not supported.\nPlease use: brew upgrade cc-switch",
-            )
+            warning(&format!(
+                "cc-switch was installed via Homebrew. Self-update to a specific version is not supported.\nPlease use: {HOMEBREW_UPGRADE_COMMAND}"
+            ))
         );
         return Ok(());
     }
@@ -191,7 +192,7 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
         println!(
             "{}",
             warning(&format!(
-                "Update {target_tag} is available (current v{current_version}).\nPlease update with: brew upgrade cc-switch"
+                "Update {target_tag} is available (current v{current_version}).\nPlease update with: {HOMEBREW_UPGRADE_COMMAND}"
             ))
         );
         return Ok(());
@@ -299,8 +300,8 @@ fn print_update_check_info(
         println!(
             "{}",
             warning(&format!(
-                "Update {} is available (current v{}).\nPlease update with: brew upgrade cc-switch",
-                update_info.target_tag, update_info.current_version
+                "Update {} is available (current v{}).\nPlease update with: {}",
+                update_info.target_tag, update_info.current_version, HOMEBREW_UPGRADE_COMMAND
             ))
         );
     } else if update_info.is_downgrade {
@@ -1426,10 +1427,9 @@ pub(crate) async fn download_and_apply(
 ) -> Result<(), AppError> {
     // Same brew-prefix guard as the CLI path (see execute_async).
     if is_homebrew_install() {
-        return Err(AppError::Message(
-            "cc-switch was installed via Homebrew. Please upgrade with: brew upgrade cc-switch"
-                .to_string(),
-        ));
+        return Err(AppError::Message(format!(
+            "cc-switch was installed via Homebrew. Please upgrade with: {HOMEBREW_UPGRADE_COMMAND}"
+        )));
     }
 
     let client = create_http_client()?;

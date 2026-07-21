@@ -21,6 +21,10 @@ pub enum ClientError {
     NoDaemon(String),
     Io(std::io::Error),
     Protocol(String),
+    ConfigMismatch {
+        expected: String,
+        actual: Option<String>,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -29,6 +33,16 @@ impl std::fmt::Display for ClientError {
             Self::NoDaemon(msg) => write!(f, "{msg}"),
             Self::Io(e) => write!(f, "{e}"),
             Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
+            Self::ConfigMismatch { expected, actual } => match actual {
+                Some(actual) => write!(
+                    f,
+                    "running daemon uses `{actual}`, but this process uses `{expected}`; run `cc-switch daemon stop`, then retry"
+                ),
+                None => write!(
+                    f,
+                    "running daemon does not support configuration identity checks; run `cc-switch daemon stop`, then retry"
+                ),
+            },
         }
     }
 }
@@ -79,6 +93,61 @@ where
 /// daemon is running (e.g. from inside the worker startup path).
 pub fn connect(socket_path: &Path) -> Result<UnixStream, ClientError> {
     UnixStream::connect(socket_path).map_err(ClientError::Io)
+}
+
+fn validate_config_identity(
+    response: Response,
+    expected_database: &str,
+) -> Result<(), ClientError> {
+    match response {
+        Response::ConfigIdentity { database } if database == expected_database => Ok(()),
+        Response::ConfigIdentity { database } => Err(ClientError::ConfigMismatch {
+            expected: expected_database.to_string(),
+            actual: Some(database),
+        }),
+        Response::Error { .. } => Err(ClientError::ConfigMismatch {
+            expected: expected_database.to_string(),
+            actual: None,
+        }),
+        other => Err(ClientError::Protocol(format!(
+            "configuration identity returned unexpected response: {other:?}"
+        ))),
+    }
+}
+
+fn verify_config_identity(
+    stream: &mut UnixStream,
+    expected_database: &str,
+) -> Result<(), ClientError> {
+    let response = exchange(stream, &Request::ConfigIdentity)?;
+    validate_config_identity(response, expected_database)
+}
+
+/// Connect to an existing daemon only after confirming it owns the same
+/// database as the caller. The returned stream is fresh because the IPC
+/// protocol permits one request per connection.
+pub fn connect_verified(
+    socket_path: &Path,
+    expected_database: &str,
+) -> Result<UnixStream, ClientError> {
+    let mut probe = connect(socket_path)?;
+    verify_config_identity(&mut probe, expected_database)?;
+    connect(socket_path)
+}
+
+/// Connect or start a daemon, then confirm it owns the same database as the
+/// caller before returning a fresh request stream.
+pub fn connect_or_spawn_verified<F>(
+    socket_path: &Path,
+    expected_database: &str,
+    binary_resolver: F,
+) -> Result<UnixStream, ClientError>
+where
+    F: FnOnce() -> Result<PathBuf, ClientError>,
+{
+    let mut probe = connect_or_spawn(socket_path, binary_resolver)?;
+    verify_config_identity(&mut probe, expected_database)?;
+    connect(socket_path)
 }
 
 /// Send one request and read one response on `stream`.
@@ -187,5 +256,55 @@ mod tests {
         assert_eq!(result, stub);
         let _ = Arc::new(()); // unused; silence lint about unused import on some configs
         server.await.expect("server task");
+    }
+
+    #[test]
+    fn config_identity_accepts_matching_database() {
+        validate_config_identity(
+            Response::ConfigIdentity {
+                database: "file:/tmp/current/cc-switch.db".into(),
+            },
+            "file:/tmp/current/cc-switch.db",
+        )
+        .expect("matching database should be accepted");
+    }
+
+    #[test]
+    fn config_identity_rejects_different_database() {
+        let error = validate_config_identity(
+            Response::ConfigIdentity {
+                database: "file:/tmp/old/cc-switch.db".into(),
+            },
+            "file:/tmp/current/cc-switch.db",
+        )
+        .expect_err("different database should be rejected");
+
+        assert!(matches!(
+            error,
+            ClientError::ConfigMismatch {
+                actual: Some(ref actual),
+                ..
+            } if actual == "file:/tmp/old/cc-switch.db"
+        ));
+        assert!(error.to_string().contains("cc-switch daemon stop"));
+    }
+
+    #[test]
+    fn config_identity_rejects_legacy_daemon() {
+        let error = validate_config_identity(
+            Response::Error {
+                message: "invalid request".into(),
+            },
+            "file:/tmp/current/cc-switch.db",
+        )
+        .expect_err("daemon without identity support should be rejected");
+
+        assert!(matches!(
+            error,
+            ClientError::ConfigMismatch { actual: None, .. }
+        ));
+        assert!(error
+            .to_string()
+            .contains("does not support configuration identity checks"));
     }
 }

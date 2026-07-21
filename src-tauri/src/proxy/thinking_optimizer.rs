@@ -134,6 +134,20 @@ mod tests {
     }
 
     #[test]
+    fn fable_uses_adaptive_thinking_and_cannot_be_disabled() {
+        let mut body = json!({
+            "model": "anthropic/claude-fable-5",
+            "thinking": {"type": "disabled"},
+        });
+
+        optimize(&mut body, &enabled_config());
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(adaptive_thinking_is_default("claude-fable-5"));
+        assert!(thinking_cannot_be_disabled("claude-fable-5"));
+    }
+
+    #[test]
     fn legacy_models_enable_thinking_budget() {
         let mut body = json!({
             "model": "anthropic.claude-sonnet-4-5-20250514-v1:0",

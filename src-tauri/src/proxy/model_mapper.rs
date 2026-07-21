@@ -7,6 +7,7 @@ pub struct ModelMapping {
     pub haiku_model: Option<String>,
     pub sonnet_model: Option<String>,
     pub opus_model: Option<String>,
+    pub fable_model: Option<String>,
     pub default_model: Option<String>,
 }
 
@@ -30,6 +31,11 @@ impl ModelMapping {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(String::from),
+            fable_model: env
+                .and_then(|value| value.get("ANTHROPIC_DEFAULT_FABLE_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
             default_model: env
                 .and_then(|value| value.get("ANTHROPIC_MODEL"))
                 .and_then(Value::as_str)
@@ -42,12 +48,22 @@ impl ModelMapping {
         self.haiku_model.is_some()
             || self.sonnet_model.is_some()
             || self.opus_model.is_some()
+            || self.fable_model.is_some()
             || self.default_model.is_some()
     }
 
     pub fn map_model(&self, original_model: &str) -> String {
         let model_lower = original_model.to_lowercase();
 
+        if model_lower.contains("fable") {
+            if let Some(model) = &self.fable_model {
+                return model.clone();
+            }
+            // Providers without a dedicated Fable tier should retain the closest tier mapping.
+            if let Some(model) = &self.opus_model {
+                return model.clone();
+            }
+        }
         if model_lower.contains("haiku") {
             if let Some(model) = &self.haiku_model {
                 return model.clone();
@@ -160,6 +176,42 @@ mod tests {
 
         assert_eq!(result["model"], "sonnet-mapped");
         assert_eq!(mapped, Some("sonnet-mapped".to_string()));
+    }
+
+    #[test]
+    fn fable_uses_dedicated_mapping_when_configured() {
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] = json!("fable-mapped");
+
+        let (result, _, mapped) =
+            apply_model_mapping(json!({"model": "claude-fable-5[1m]"}), &provider);
+
+        assert_eq!(result["model"], "fable-mapped");
+        assert_eq!(mapped, Some("fable-mapped".to_string()));
+    }
+
+    #[test]
+    fn fable_falls_back_to_opus_mapping_when_unset() {
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = json!("opus-mapped");
+
+        let (result, _, mapped) =
+            apply_model_mapping(json!({"model": "claude-fable-5"}), &provider);
+
+        assert_eq!(result["model"], "opus-mapped");
+        assert_eq!(mapped, Some("opus-mapped".to_string()));
+    }
+
+    #[test]
+    fn fable_falls_back_to_default_mapping_without_opus() {
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-mapped");
+
+        let (result, _, mapped) =
+            apply_model_mapping(json!({"model": "claude-fable-5"}), &provider);
+
+        assert_eq!(result["model"], "default-mapped");
+        assert_eq!(mapped, Some("default-mapped".to_string()));
     }
 
     #[test]

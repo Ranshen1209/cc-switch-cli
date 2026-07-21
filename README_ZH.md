@@ -2,8 +2,8 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.10.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.10.2-blue.svg)](https://github.com/Ranshen1209/cc-switch-cli/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/Ranshen1209/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -261,21 +261,23 @@ move cc-switch.exe C:\Windows\System32\
 
 </details>
 
-### 方法 2：使用 Homebrew 安装
+### 方法 2：使用 Homebrew 安装（本仓库 Tap）
 
-如果你在使用 Homebrew，可以直接通过 Homebrew 安装 cc-switch。
+不带来源的 `brew install cc-switch-cli` 会解析到 `homebrew/core` 中的 formula；该 formula 跟踪的是 `SaladDay/cc-switch-cli`，不是本仓库。请显式使用本仓库的 tap：
 
 ```bash
-brew install cc-switch-cli
+brew tap Ranshen1209/cc-switch-cli https://github.com/Ranshen1209/cc-switch-cli
+brew install Ranshen1209/cc-switch-cli/cc-switch-cli
 ```
 
 更新：
 
 ```bash
-brew upgrade cc-switch-cli
+brew update
+brew upgrade Ranshen1209/cc-switch-cli/cc-switch-cli
 ```
 
-请注意，如果你通过 Homebrew 安装了 cc-switch，请避免使用 cc-switch 内置的更新功能，因为这会影响 Homebrew 自身的升级功能。
+通过 Homebrew 安装后，请始终使用同一个 tap 更新，不要使用内置更新功能覆盖 Homebrew 管理的二进制。
 
 ### 方法 3：从源码构建
 
@@ -668,7 +670,7 @@ cc-switch --app codex provider list
 
 <br>
 
-请在我们的 [GitHub Issues](https://github.com/saladday/cc-switch-cli/issues) 页面提交问题，并包含：
+请在我们的 [GitHub Issues](https://github.com/Ranshen1209/cc-switch-cli/issues) 页面提交问题，并包含：
 - 问题或功能请求的详细描述
 - 复现步骤（针对 bug）
 - 你的系统信息（操作系统、版本）
@@ -730,4 +732,5 @@ src-tauri/src/
 ## 许可证
 
 - MIT © 原作者：Jason Young
-- CLI 分支维护者：saladday
+- 上游 CLI 分支维护者：saladday
+- 发行分支维护者：Ranshen1209

@@ -2,8 +2,8 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.10.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.10.2-blue.svg)](https://github.com/Ranshen1209/cc-switch-cli/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/Ranshen1209/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -261,17 +261,23 @@ move cc-switch.exe C:\Windows\System32\
 
 </details>
 
-### Method 2: Install via Homebrew
-If you are using Homebrew on your machine, you can use Homebrew to install cc-switch.
-```
-brew install cc-switch-cli
+### Method 2: Install via Homebrew (Fork Tap)
+
+The unqualified `brew install cc-switch-cli` command resolves to the `homebrew/core` formula, which tracks `SaladDay/cc-switch-cli`, not this repository. Use this repository's explicit tap to install the maintained fork:
+
+```bash
+brew tap Ranshen1209/cc-switch-cli https://github.com/Ranshen1209/cc-switch-cli
+brew install Ranshen1209/cc-switch-cli/cc-switch-cli
 ```
 
 Update:
+
+```bash
+brew update
+brew upgrade Ranshen1209/cc-switch-cli/cc-switch-cli
 ```
-brew upgrade cc-switch-cli
-```
-If you installed cc-switch via Homebrew, please use Homebrew to upgrade cc-switch, instead of the built-in update feature, as this breaks Homebrew formulae’s own upgrade functionality.
+
+Homebrew installations should be upgraded through the same tap instead of the built-in updater.
 
 ### Method 3: Build from Source
 
@@ -665,7 +671,7 @@ cc-switch --app codex provider list
 
 <br>
 
-Please open an issue on our [GitHub Issues](https://github.com/saladday/cc-switch-cli/issues) page with:
+Please open an issue on our [GitHub Issues](https://github.com/Ranshen1209/cc-switch-cli/issues) page with:
 - Detailed description of the problem or feature request
 - Steps to reproduce (for bugs)
 - Your system information (OS, version)
@@ -727,4 +733,5 @@ Contributions welcome! This fork focuses on CLI functionality.
 ## License
 
 - MIT © Original Author: Jason Young
-- CLI Fork Maintainer: saladday
+- Upstream CLI Fork Maintainer: saladday
+- Distribution Fork Maintainer: Ranshen1209

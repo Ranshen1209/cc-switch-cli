@@ -1953,6 +1953,34 @@ fn schema_model_pricing_is_seeded_on_init() {
         claude_count
     );
 
+    let fable_pricing: (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT display_name, input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing WHERE model_id = 'claude-fable-5'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read Claude Fable 5 pricing");
+    assert_eq!(
+        fable_pricing,
+        (
+            "Claude Fable 5".to_string(),
+            "10".to_string(),
+            "50".to_string(),
+            "1.00".to_string(),
+            "12.50".to_string(),
+        )
+    );
+
     // 验证包含 GPT 模型
     let gpt_count: i64 = conn
         .query_row(

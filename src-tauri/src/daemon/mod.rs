@@ -38,7 +38,11 @@ pub fn notify_global_switch(enabled: bool) -> Result<(), String> {
     if !socket.exists() {
         return Ok(());
     }
-    match client::round_trip(&socket, &Request::SetGlobalEnabled { enabled }) {
+    let expected_database = Database::current_runtime_key().map_err(|err| err.to_string())?;
+    let response = client::connect_verified(&socket, &expected_database).and_then(|mut stream| {
+        client::exchange(&mut stream, &Request::SetGlobalEnabled { enabled })
+    });
+    match response {
         Ok(Response::Ok) => Ok(()),
         Ok(Response::Error { message }) => Err(message),
         Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
@@ -91,6 +95,7 @@ pub async fn run(binary_path: PathBuf) -> Result<(), String> {
 
     let db =
         Arc::new(Database::init().map_err(|err| format!("daemon: open database failed: {err}"))?);
+    log::info!("[daemon] database={}", db.runtime_key());
     crate::services::session_usage::spawn_periodic_session_usage_sync(db.clone(), "daemon");
     Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);

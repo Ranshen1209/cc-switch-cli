@@ -6,6 +6,19 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use tokio::net::TcpListener;
 
+#[test]
+fn package_metadata_tracks_distribution_fork() {
+    assert_eq!(REPO_URL, "https://github.com/Ranshen1209/cc-switch-cli");
+}
+
+#[test]
+fn homebrew_upgrade_uses_distribution_tap() {
+    assert_eq!(
+        HOMEBREW_UPGRADE_COMMAND,
+        "brew upgrade Ranshen1209/cc-switch-cli/cc-switch-cli"
+    );
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,

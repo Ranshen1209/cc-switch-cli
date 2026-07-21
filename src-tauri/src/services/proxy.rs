@@ -571,14 +571,16 @@ impl ProxyService {
             use crate::daemon::ipc::client;
             use crate::daemon::ipc::protocol::{Request, Response};
             let socket_path = crate::daemon::paths::socket_path();
+            let expected_database = self.db.runtime_key().to_string();
             let app_type = app_type.to_string();
             let fallback_provider_id = fallback_provider_id.map(str::to_string);
             let response = tokio::task::spawn_blocking(move || {
-                let mut stream = client::connect_or_spawn(&socket_path, || {
-                    let bin = Self::resolve_managed_proxy_executable()
-                        .map_err(client::ClientError::NoDaemon)?;
-                    Ok(bin)
-                })?;
+                let mut stream =
+                    client::connect_or_spawn_verified(&socket_path, &expected_database, || {
+                        let bin = Self::resolve_managed_proxy_executable()
+                            .map_err(client::ClientError::NoDaemon)?;
+                        Ok(bin)
+                    })?;
                 client::exchange(
                     &mut stream,
                     &Request::EnsureWorker {
@@ -630,25 +632,27 @@ impl ProxyService {
                 return self.local_disable_takeover(app_type).await;
             }
             let app_type_owned = app_type.to_string();
+            let expected_database = self.db.runtime_key().to_string();
             let socket_for_task = socket_path.clone();
             let outcome = tokio::task::spawn_blocking(
                 move || -> Result<Option<Response>, client::ClientError> {
-                    let mut stream = match client::connect(&socket_for_task) {
-                        Ok(s) => s,
-                        // ECONNREFUSED / ENOENT here means the socket inode is
-                        // a leftover from a daemon that died ungracefully —
-                        // nobody is listening. Treat as "no daemon" and let
-                        // the caller fall back to local cleanup.
-                        Err(client::ClientError::Io(e))
-                            if matches!(
-                                e.kind(),
-                                ErrorKind::ConnectionRefused | ErrorKind::NotFound
-                            ) =>
-                        {
-                            return Ok(None);
-                        }
-                        Err(e) => return Err(e),
-                    };
+                    let mut stream =
+                        match client::connect_verified(&socket_for_task, &expected_database) {
+                            Ok(s) => s,
+                            // ECONNREFUSED / ENOENT here means the socket inode is
+                            // a leftover from a daemon that died ungracefully —
+                            // nobody is listening. Treat as "no daemon" and let
+                            // the caller fall back to local cleanup.
+                            Err(client::ClientError::Io(e))
+                                if matches!(
+                                    e.kind(),
+                                    ErrorKind::ConnectionRefused | ErrorKind::NotFound
+                                ) =>
+                            {
+                                return Ok(None);
+                            }
+                            Err(e) => return Err(e),
+                        };
                     client::exchange(
                         &mut stream,
                         &Request::DropTakeover {
@@ -692,7 +696,7 @@ impl ProxyService {
         };
 
         if !session.kind.is_managed_external() {
-            if let Some(status) = Self::daemon_status_snapshot().await {
+            if let Some(status) = self.daemon_status_snapshot().await {
                 return Ok(Self::status_has_worker_for_app(&status, app_type));
             }
             return Ok(true);
@@ -1183,9 +1187,9 @@ impl ProxyService {
             }
         }
 
-        if let Some(status) =
-            Self::daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_sessions, app_type)
-                .await
+        if let Some(status) = self
+            .daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_sessions, app_type)
+            .await
         {
             return status;
         }
@@ -1194,19 +1198,22 @@ impl ProxyService {
     }
 
     #[cfg(unix)]
-    async fn daemon_status_snapshot() -> Option<ProxyStatus> {
-        Self::daemon_status_snapshot_with_cleanup(true).await
+    async fn daemon_status_snapshot(&self) -> Option<ProxyStatus> {
+        self.daemon_status_snapshot_with_cleanup(true).await
     }
 
     #[cfg(unix)]
     async fn daemon_status_snapshot_with_cleanup(
+        &self,
         cleanup_stale_socket: bool,
     ) -> Option<ProxyStatus> {
-        Self::daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_socket, None).await
+        self.daemon_status_snapshot_with_cleanup_for_app(cleanup_stale_socket, None)
+            .await
     }
 
     #[cfg(unix)]
     async fn daemon_status_snapshot_with_cleanup_for_app(
+        &self,
         cleanup_stale_socket: bool,
         app_type: Option<&AppType>,
     ) -> Option<ProxyStatus> {
@@ -1220,9 +1227,11 @@ impl ProxyService {
         if !socket_path.exists() {
             return None;
         }
+        let expected_database = self.db.runtime_key().to_string();
         let socket_for_task = socket_path.clone();
         let response = tokio::task::spawn_blocking(move || {
-            client::round_trip(&socket_for_task, &Request::Status)
+            let mut stream = client::connect_verified(&socket_for_task, &expected_database)?;
+            client::exchange(&mut stream, &Request::Status)
         })
         .await
         .ok()?;
@@ -1258,12 +1267,13 @@ impl ProxyService {
     }
 
     #[cfg(not(unix))]
-    async fn daemon_status_snapshot() -> Option<ProxyStatus> {
-        Self::daemon_status_snapshot_with_cleanup(true).await
+    async fn daemon_status_snapshot(&self) -> Option<ProxyStatus> {
+        self.daemon_status_snapshot_with_cleanup(true).await
     }
 
     #[cfg(not(unix))]
     async fn daemon_status_snapshot_with_cleanup(
+        &self,
         _cleanup_stale_socket: bool,
     ) -> Option<ProxyStatus> {
         None
@@ -1271,6 +1281,7 @@ impl ProxyService {
 
     #[cfg(not(unix))]
     async fn daemon_status_snapshot_with_cleanup_for_app(
+        &self,
         _cleanup_stale_socket: bool,
         _app_type: Option<&AppType>,
     ) -> Option<ProxyStatus> {
@@ -1826,7 +1837,7 @@ impl ProxyService {
             }
         }
 
-        Self::daemon_status_snapshot()
+        self.daemon_status_snapshot()
             .await
             .is_some_and(|status| Self::status_has_worker_for_app(&status, app_type))
     }
@@ -2497,7 +2508,7 @@ impl ProxyService {
             {
                 return Ok(());
             }
-            return Err("cannot enable proxy because no active provider is selected".to_string());
+            return Err(Self::no_active_provider_error(app_type));
         }
 
         if self.read_live_config_for_app(app_type).is_ok() {
@@ -2514,7 +2525,7 @@ impl ProxyService {
                 },
             )?
         else {
-            return Err("cannot enable proxy because no active provider is selected".to_string());
+            return Err(Self::no_active_provider_error(app_type));
         };
 
         if self
@@ -2523,10 +2534,17 @@ impl ProxyService {
             .map_err(|error| format!("load provider {provider_id} for {app_key} failed: {error}"))?
             .is_none()
         {
-            return Err("cannot enable proxy because no active provider is selected".to_string());
+            return Err(Self::no_active_provider_error(app_type));
         }
 
         Ok(())
+    }
+
+    fn no_active_provider_error(app_type: &AppType) -> String {
+        let app_key = app_type.as_str();
+        format!(
+            "cannot enable proxy for {app_key} because no active provider is selected; select one with `cc-switch --app {app_key} provider switch <id>`"
+        )
     }
 
     pub async fn save_live_backup_snapshot(
@@ -5139,7 +5157,11 @@ mod tests {
             .expect_err("takeover should require an active provider when failover is disabled");
 
         assert!(
-            error.contains("cannot enable proxy because no active provider is selected"),
+            error.contains("cannot enable proxy for claude because no active provider is selected"),
+            "{error}"
+        );
+        assert!(
+            error.contains("cc-switch --app claude provider switch <id>"),
             "{error}"
         );
         assert!(
