@@ -7,6 +7,14 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.10.1] - 2026-07-21
+
+### Fixed
+
+- **Database / Compatibility**: Support desktop schema v13 databases and migrate CLI schema v11 databases through v12 to v13 on startup, fixing the refusal to open databases created by CC Switch v3.17.0.
+- **Database / Profiles**: Preserve the desktop `profiles` table while creating or migrating the shared database schema.
+- **Usage / Token Accounting**: Store input-token semantics for request logs and daily rollups, normalize OpenAI and Gemini input totals to fresh tokens, and prevent cache-write tokens from being billed twice.
+
 ## [5.10.0] - 2026-07-20
 
 ### Added

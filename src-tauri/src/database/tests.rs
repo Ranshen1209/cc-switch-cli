@@ -205,6 +205,43 @@ fn schema_migration_sets_user_version_when_missing() {
 }
 
 #[test]
+fn schema_migration_v11_to_v13_adds_profiles_and_input_semantics() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    conn.execute("DROP TABLE profiles", [])
+        .expect("remove profiles to emulate v11");
+    conn.execute("DROP TABLE proxy_request_logs", [])
+        .expect("drop current request logs");
+    conn.execute(
+        "CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY)",
+        [],
+    )
+    .expect("create v11 request logs fixture");
+    conn.execute("DROP TABLE usage_daily_rollups", [])
+        .expect("drop current rollups");
+    conn.execute(
+        "CREATE TABLE usage_daily_rollups (date TEXT PRIMARY KEY)",
+        [],
+    )
+    .expect("create v11 rollups fixture");
+    Database::set_user_version(&conn, 11).expect("set v11");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v11 to v13");
+
+    assert_eq!(Database::get_user_version(&conn).expect("read version"), 13);
+    assert!(Database::table_exists(&conn, "profiles").expect("check profiles"));
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "input_token_semantics")
+            .expect("check request log semantics")
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "input_token_semantics")
+            .expect("check rollup semantics")
+    );
+}
+
+#[test]
 fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
