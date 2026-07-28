@@ -3,7 +3,7 @@
     reason = "generated i18n accessors may share text across locales"
 )]
 
-use crate::settings::{get_settings, update_settings};
+use crate::settings::{get_settings, update_settings, AppSettings};
 use std::sync::OnceLock;
 use std::sync::RwLock;
 
@@ -54,7 +54,11 @@ fn language_store() -> &'static RwLock<Language> {
             // Keep unit tests deterministic and avoid reading real user settings.
             Language::English
         } else {
-            let settings = get_settings();
+            // Read the persisted settings directly while initializing the language
+            // store. Localized validation errors can be constructed while the
+            // in-memory settings store is write-locked, so re-entering
+            // `get_settings()` here would deadlock on first use.
+            let settings = AppSettings::load();
             settings
                 .language
                 .as_deref()
