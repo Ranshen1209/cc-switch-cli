@@ -3163,6 +3163,124 @@ fn model_pricing_seeds_gpt_5_6_family_and_aliases() {
 }
 
 #[test]
+fn model_pricing_seeds_synced_upstream_catalog() {
+    let db = Database::memory().expect("create memory db");
+    let conn = db.conn.lock().expect("lock conn");
+
+    let expected = [
+        ("claude-fable-5", "10", "50", "1.00", "12.50"),
+        ("gemini-3.6-flash", "1.50", "7.50", "0.15", "0"),
+        ("step-3.7-flash", "0.19", "1.13", "0.04", "0"),
+        ("doubao-seed-2-1-pro", "0.84", "4.2", "0.17", "0"),
+        ("deepseek-v4-pro", "0.435", "0.87", "0.003625", "0"),
+        ("kimi-k3", "3.00", "15.00", "0.30", "0"),
+        ("minimax-m3", "0.30", "1.20", "0.06", "0"),
+        ("glm-5.2", "1.4", "4.4", "0.26", "0"),
+        ("mimo-v2.5-pro", "0.435", "0.87", "0.0036", "0"),
+        ("qwen3.7-plus", "0.40", "1.60", "0.08", "0"),
+        ("grok-4.5", "2", "6", "0.50", "0"),
+        ("mistral-small-4", "0.10", "0.30", "0.01", "0"),
+    ];
+
+    for (model_id, input, output, cache_read, cache_write) in expected {
+        let pricing: (String, String, String, String) = conn
+            .query_row(
+                "SELECT input_cost_per_million, output_cost_per_million,
+                        cache_read_cost_per_million, cache_creation_cost_per_million
+                 FROM model_pricing WHERE model_id = ?1",
+                [model_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap_or_else(|error| panic!("query {model_id} pricing: {error}"));
+        assert_eq!(
+            pricing,
+            (
+                input.to_string(),
+                output.to_string(),
+                cache_read.to_string(),
+                cache_write.to_string(),
+            ),
+            "unexpected pricing for {model_id}"
+        );
+    }
+}
+
+#[test]
+fn model_pricing_repairs_synced_values_without_overwriting_custom_prices() {
+    let db = Database::memory().expect("create memory db");
+    {
+        let conn = db.conn.lock().expect("lock conn");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '0.60',
+                 output_cost_per_million = '2.40',
+                 cache_read_cost_per_million = '0.12'
+             WHERE model_id = 'minimax-m3'",
+            [],
+        )
+        .expect("restore upstream MiniMax M3 seed");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '2',
+                 output_cost_per_million = '6'
+             WHERE model_id = 'grok-4.20-0309-reasoning'",
+            [],
+        )
+        .expect("restore old Grok pricing");
+        conn.execute(
+            "UPDATE model_pricing
+             SET input_cost_per_million = '9',
+                 cache_read_cost_per_million = '0'
+             WHERE model_id = 'qwen3.6-plus'",
+            [],
+        )
+        .expect("set custom Qwen pricing");
+    }
+
+    db.ensure_model_pricing_seeded()
+        .expect("repair synchronized pricing");
+
+    let conn = db.conn.lock().expect("lock conn");
+    let minimax: (String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'minimax-m3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("query repaired MiniMax pricing");
+    assert_eq!(
+        minimax,
+        ("0.30".to_string(), "1.20".to_string(), "0.06".to_string())
+    );
+
+    let grok: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million
+             FROM model_pricing WHERE model_id = 'grok-4.20-0309-reasoning'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query repaired Grok pricing");
+    assert_eq!(grok, ("1.25".to_string(), "2.50".to_string()));
+
+    let qwen: (String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'qwen3.6-plus'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query custom Qwen pricing");
+    assert_eq!(
+        qwen,
+        ("9".to_string(), "0".to_string()),
+        "custom pricing must not be replaced"
+    );
+}
+
+#[test]
 fn model_pricing_repairs_only_untouched_upstream_gpt_5_6_seeds() {
     let db = Database::memory().expect("create memory db");
     {
