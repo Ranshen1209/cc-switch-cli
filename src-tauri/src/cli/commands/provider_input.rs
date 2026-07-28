@@ -4464,12 +4464,14 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
         }
         AppType::Codex => {
             if !provider.is_codex_official() {
-                let api_format =
-                    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
-                        "openai_chat"
-                    } else {
-                        "openai_responses"
-                    };
+                let api_format = if crate::proxy::providers::codex_provider_uses_anthropic(provider)
+                {
+                    "anthropic"
+                } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+                    "openai_chat"
+                } else {
+                    "openai_responses"
+                };
                 println!(
                     "  {}: {}",
                     texts::tui_label_claude_api_format(),

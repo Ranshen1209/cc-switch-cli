@@ -824,20 +824,33 @@ impl ProviderService {
 
                 let sync_result = if prepared.action.sync_proxy_live {
                     match state.proxy_service.is_running_blocking() {
-                        Ok(true) => futures::executor::block_on(
-                            state
-                                .proxy_service
-                                .sync_claude_live_from_provider_while_proxy_active(
-                                    &prepared.action.provider,
+                        Ok(true) => {
+                            let app_name = prepared.action.app_type.as_str();
+                            let result = match prepared.action.app_type {
+                                AppType::Claude => futures::executor::block_on(
+                                    state
+                                        .proxy_service
+                                        .sync_claude_live_from_provider_while_proxy_active(
+                                            &prepared.action.provider,
+                                        ),
                                 ),
-                        )
-                        .map_err(|error| {
-                            AppError::localized(
-                                "provider.update.proxy_live_sync_failed",
-                                format!("同步 Claude Live 配置失败: {error}"),
-                                format!("Failed to sync Claude live config: {error}"),
-                            )
-                        }),
+                                AppType::Codex => futures::executor::block_on(
+                                    state
+                                        .proxy_service
+                                        .sync_codex_live_from_provider_while_proxy_active(
+                                            &prepared.action.provider,
+                                        ),
+                                ),
+                                _ => Ok(()),
+                            };
+                            result.map_err(|error| {
+                                AppError::localized(
+                                    "provider.update.proxy_live_sync_failed",
+                                    format!("同步 {app_name} Live 配置失败: {error}"),
+                                    format!("Failed to sync {app_name} live config: {error}"),
+                                )
+                            })
+                        }
                         Ok(false) => Ok(()),
                         Err(error) => Err(AppError::Message(error)),
                     }
@@ -2011,8 +2024,8 @@ impl ProviderService {
                 state.db.get_current_provider(app_type.as_str())?,
             )
         };
-        let takeover_active = if app_type.is_additive_mode() {
-            false
+        let (takeover_active, live_taken_over) = if app_type.is_additive_mode() {
+            (false, false)
         } else {
             let has_live_backup =
                 futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
@@ -2022,7 +2035,7 @@ impl ProviderService {
             let live_taken_over = state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&app_type);
-            has_live_backup || live_taken_over
+            (has_live_backup || live_taken_over, live_taken_over)
         };
 
         Self::run_transaction(state, move |config| {
@@ -2141,7 +2154,9 @@ impl ProviderService {
                     common_config_snippet,
                     previous_common_config_snippet: None,
                     takeover_active,
-                    sync_proxy_live: takeover_active && matches!(&app_type_clone, AppType::Claude),
+                    sync_proxy_live: (takeover_active
+                        && matches!(&app_type_clone, AppType::Claude))
+                        || (live_taken_over && matches!(&app_type_clone, AppType::Codex)),
                     activate_provider: false,
                 })
             } else {

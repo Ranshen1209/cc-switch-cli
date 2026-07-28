@@ -39,8 +39,9 @@ fn provider_proxy_badge(app_type: &AppType, row: &ProviderRow) -> Option<Provide
             Some(ProviderProxyBadge::NoProxySupport)
         }
         AppType::Codex => {
-            crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
-                .then_some(ProviderProxyBadge::NeedsProxy)
+            (crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
+                || crate::proxy::providers::codex_provider_uses_anthropic(&row.provider))
+            .then_some(ProviderProxyBadge::NeedsProxy)
         }
         _ => None,
     }
@@ -434,6 +435,23 @@ mod tests {
         data
     }
 
+    fn codex_anthropic_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Codex);
+        data.providers.rows[0].provider = Provider::with_id(
+            "p1".to_string(),
+            "Anthropic Gateway".to_string(),
+            json!({
+                "config": "model_provider = \"custom\"\nmodel = \"claude-sonnet-4-6\"\n\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            None,
+        );
+        data.providers.rows[0].provider.meta = Some(ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
+        data
+    }
+
     #[test]
     fn claude_provider_list_marks_openai_format_as_needing_proxy() {
         let _lock = super::super::tests::lock_env();
@@ -464,6 +482,22 @@ mod tests {
         let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
 
         assert!(all.contains("Chat Wire Provider"), "{all}");
+        assert!(all.contains("[Needs Proxy]"), "{all}");
+    }
+
+    #[test]
+    fn codex_provider_list_marks_anthropic_as_needing_proxy() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = codex_anthropic_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("Anthropic Gateway"), "{all}");
         assert!(all.contains("[Needs Proxy]"), "{all}");
     }
 

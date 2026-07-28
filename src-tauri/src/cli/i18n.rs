@@ -1905,6 +1905,13 @@ pub mod texts {
                     "OpenAI Chat Completions (Local routing)"
                 }
             }
+            "anthropic" => {
+                if is_chinese() {
+                    "Anthropic Messages (需本地路由)"
+                } else {
+                    "Anthropic Messages (Local routing)"
+                }
+            }
             _ => {
                 if is_chinese() {
                     "OpenAI Responses API (原生)"
@@ -1912,6 +1919,46 @@ pub mod texts {
                     "OpenAI Responses API (Native)"
                 }
             }
+        }
+    }
+
+    pub fn tui_label_codex_anthropic_auth_field() -> &'static str {
+        if is_chinese() {
+            "认证字段"
+        } else {
+            "Auth field"
+        }
+    }
+
+    pub fn tui_codex_anthropic_auth_field_value(api_key_field: &str) -> &'static str {
+        if api_key_field == "ANTHROPIC_API_KEY" {
+            "ANTHROPIC_API_KEY (x-api-key)"
+        } else {
+            "ANTHROPIC_AUTH_TOKEN (Authorization)"
+        }
+    }
+
+    pub fn tui_label_codex_impersonate_claude_code() -> &'static str {
+        if is_chinese() {
+            "模拟 Claude Code 客户端"
+        } else {
+            "Emulate Claude Code client"
+        }
+    }
+
+    pub fn tui_label_codex_max_output_tokens() -> &'static str {
+        if is_chinese() {
+            "最大输出 tokens"
+        } else {
+            "Max output tokens"
+        }
+    }
+
+    pub fn tui_codex_max_output_tokens_invalid() -> &'static str {
+        if is_chinese() {
+            "最大输出 tokens 必须留空或填写大于 0 的整数"
+        } else {
+            "Max output tokens must be empty or an integer greater than 0"
         }
     }
 

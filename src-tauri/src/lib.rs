@@ -19,6 +19,7 @@ mod import_export;
 #[allow(dead_code)]
 mod init_status;
 mod mcp;
+mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
 mod prompt;
