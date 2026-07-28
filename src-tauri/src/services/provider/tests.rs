@@ -638,15 +638,22 @@ fn codex_switch_overwrites_existing_auth_json_for_openai_official_provider() {
 
 #[test]
 #[serial]
-fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
+fn codex_switch_preserves_existing_oauth_for_empty_openai_official_provider() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
     std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
         .expect("create ~/.codex (initialized)");
 
     let auth_path = crate::codex_config::get_codex_auth_path();
-    crate::config::write_json_file(&auth_path, &json!({ "OPENAI_API_KEY": "sk-existing" }))
-        .expect("write auth.json");
+    let existing_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "oauth-access-token",
+            "account_id": "account-1"
+        }
+    });
+    crate::config::write_json_file(&auth_path, &existing_auth).expect("write auth.json");
 
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
@@ -692,9 +699,11 @@ fn codex_switch_removes_empty_auth_json_for_openai_official_provider() {
     ProviderService::switch(&state, AppType::Codex, "codex-official")
         .expect("switch to official should succeed without saved auth");
 
-    assert!(
-        !auth_path.exists(),
-        "empty official auth snapshot should remove live auth.json so Codex can prompt login"
+    let auth_after: Value =
+        crate::config::read_json_file(&auth_path).expect("read preserved auth.json");
+    assert_eq!(
+        auth_after, existing_auth,
+        "empty official auth snapshot must preserve the live OAuth login"
     );
 }
 
