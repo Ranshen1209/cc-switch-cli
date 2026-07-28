@@ -34,7 +34,19 @@ pub(super) fn render_usage(
     let keys = crate::cli::tui::keymap::usage::key_bar_items(app, data);
     render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
-    render_summary_bar(frame, chunks[1], theme, usage_summary_line(app, data));
+    let refresh_status = if current_usage_is_loading(app, data) {
+        None
+    } else {
+        usage_refresh_status(app)
+    };
+    render_usage_summary_bar(
+        frame,
+        chunks[1],
+        theme,
+        usage_summary_line(app, data),
+        refresh_status,
+        usage_sync_progress_status(),
+    );
     render_usage_metrics(frame, app, data, chunks[2], theme);
 
     render_usage_trend(frame, app, data, chunks[3], theme);
@@ -82,13 +94,96 @@ pub(super) fn render_usage_logs(
     );
 
     render_usage_detail_tabs(frame, app, chunks[1], theme);
-    render_summary_bar(
+    render_usage_summary_bar(
         frame,
         chunks[2],
         theme,
         usage_detail_summary_line(app, data),
+        usage_refresh_status(app),
+        usage_sync_progress_status(),
     );
     render_usage_detail_table(frame, app, data, chunks[3], theme);
+}
+
+fn render_usage_summary_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    summary: String,
+    refresh_status: Option<String>,
+    sync_status: Option<String>,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(theme.dim));
+    frame.render_widget(block.clone(), area);
+
+    let inner = inset_horizontal(block.inner(area), 2, 2);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let summary_style = Style::default().fg(theme.dim);
+    if refresh_status.is_none() && sync_status.is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::raw(truncate_to_display_width(&summary, inner.width)))
+                .style(summary_style),
+            inner,
+        );
+        return;
+    }
+
+    const REFRESH_GAP: &str = "  ";
+    const STATUS_SEPARATOR: &str = " · ";
+    let refresh_status =
+        refresh_status.map(|status| truncate_to_display_width(&status, inner.width));
+    let sync_status = sync_status.map(|status| truncate_to_display_width(&status, inner.width));
+    let status_width = refresh_status
+        .as_deref()
+        .map_or(0, |status| UnicodeWidthStr::width(status) as u16)
+        .saturating_add(
+            sync_status
+                .as_deref()
+                .map_or(0, |status| UnicodeWidthStr::width(status) as u16),
+        )
+        .saturating_add(
+            refresh_status
+                .as_ref()
+                .map_or(0, |_| UnicodeWidthStr::width(REFRESH_GAP) as u16),
+        )
+        .saturating_add(
+            sync_status
+                .as_ref()
+                .map_or(0, |_| UnicodeWidthStr::width(STATUS_SEPARATOR) as u16),
+        );
+    let summary_width = inner.width.saturating_sub(status_width);
+    let summary = truncate_to_display_width(&summary, summary_width);
+    let refresh_style = if theme.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let mut spans = Vec::with_capacity(5);
+    if !summary.is_empty() {
+        spans.push(Span::styled(summary, summary_style));
+    }
+    if let Some(refresh_status) = refresh_status.filter(|status| !status.is_empty()) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(REFRESH_GAP, summary_style));
+        }
+        spans.push(Span::styled(refresh_status, refresh_style));
+    }
+    if let Some(sync_status) = sync_status.filter(|status| !status.is_empty()) {
+        if !spans.is_empty() {
+            spans.push(Span::styled(STATUS_SEPARATOR, summary_style));
+        }
+        spans.push(Span::styled(sync_status, summary_style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 pub(super) fn render_usage_log_detail(
@@ -1385,36 +1480,34 @@ fn detail_line(
     ])
 }
 
-/// 后台会话日志导入进行时的进度后缀（如 " · 正在导入本地用量 1234/18704"）。
-/// 空闲时返回空串。数据来自 sync_progress 全局原子量——CLI 构建没有逐行
+/// 后台会话日志导入进行时的进度状态（如 "正在导入本地用量 1234/18704"）。
+/// 空闲时返回 None。数据来自 sync_progress 全局原子量——CLI 构建没有逐行
 /// 通知通道，渲染时直接读取即可。
-fn usage_sync_progress_suffix() -> String {
+fn usage_sync_progress_status() -> Option<String> {
     match crate::services::session_usage::sync_progress::snapshot() {
         Some((done, total)) if total > 0 => {
             if i18n::is_chinese() {
-                format!(" · 正在导入本地用量 {done}/{total}")
+                Some(format!("正在导入本地用量 {done}/{total}"))
             } else {
-                format!(" · importing local usage {done}/{total}")
+                Some(format!("importing local usage {done}/{total}"))
             }
         }
-        _ => String::new(),
+        _ => None,
     }
 }
 
 fn usage_summary_line(app: &App, data: &UiData) -> String {
-    let sync_suffix = usage_sync_progress_suffix();
     if current_usage_is_loading(app, data) {
         if i18n::is_chinese() {
-            return format!("{} · 正在加载中...{sync_suffix}", app.usage.range.label());
+            return format!("{} · 正在加载中...", app.usage.range.label());
         }
-        return format!("{} · Loading...{sync_suffix}", app.usage.range.label());
+        return format!("{} · Loading...", app.usage.range.label());
     }
 
     let summary = data.usage.summary_for(app.usage.range);
-    let refresh_prefix = usage_refresh_prefix(app);
     if i18n::is_chinese() {
         format!(
-            "{refresh_prefix}{} · {} 请求 · {} tokens · {} · 平均延迟 {}{sync_suffix}",
+            "{} · {} 请求 · {} tokens · {} · 平均延迟 {}",
             app.usage.range.label(),
             summary.total_requests,
             format_token_compact(summary.total_tokens()),
@@ -1423,7 +1516,7 @@ fn usage_summary_line(app: &App, data: &UiData) -> String {
         )
     } else {
         format!(
-            "{refresh_prefix}{} · {} requests · {} tokens · {} · {} avg latency{sync_suffix}",
+            "{} · {} requests · {} tokens · {} · {} avg latency",
             app.usage.range.label(),
             summary.total_requests,
             format_token_compact(summary.total_tokens()),
@@ -1439,7 +1532,7 @@ fn current_usage_is_loading(app: &App, data: &UiData) -> bool {
 }
 
 fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
-    let mut line = match app.usage.pane {
+    match app.usage.pane {
         UsagePane::Models => {
             let count = data.usage.top_models_for(app.usage.range).len();
             if i18n::is_chinese() {
@@ -1482,13 +1575,10 @@ fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
                 )
             }
         }
-    };
-    line.insert_str(0, &usage_refresh_prefix(app));
-    line.push_str(&usage_sync_progress_suffix());
-    line
+    }
 }
 
-fn usage_refresh_prefix(app: &App) -> String {
+fn usage_refresh_status(app: &App) -> Option<String> {
     if app.usage.manual_session_refreshing()
         || app.usage.is_loading_for(&app.app_type, app.usage.range)
         || app.usage.log_page_refresh_after_aggregate_requested()
@@ -1500,9 +1590,12 @@ fn usage_refresh_prefix(app: &App) -> String {
             2 => "⠹",
             _ => "⠸",
         };
-        format!("{spinner} {} · ", usage_text("Refreshing", "正在刷新"))
+        Some(format!(
+            "{spinner} {}",
+            usage_text("Refreshing", "正在刷新")
+        ))
     } else {
-        String::new()
+        None
     }
 }
 

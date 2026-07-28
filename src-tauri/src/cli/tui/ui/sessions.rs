@@ -227,7 +227,7 @@ fn render_session_list(
 
     let header = Row::new(vec![
         Cell::from(texts::tui_sessions_header_title()),
-        Cell::from(texts::tui_sessions_header_time()),
+        Cell::from(Text::from(texts::tui_sessions_header_time()).alignment(Alignment::Right)),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -272,10 +272,13 @@ fn render_session_list(
                 ]),
                 None => Line::raw(title),
             };
-            Row::new(vec![Cell::from(title_line), Cell::from(time)])
+            Row::new(vec![
+                Cell::from(title_line),
+                Cell::from(Text::from(time).alignment(Alignment::Right)),
+            ])
         });
 
-    let table = Table::new(rows, [Constraint::Percentage(72), Constraint::Length(12)])
+    let table = Table::new(rows, [Constraint::Min(0), Constraint::Length(12)])
         .header(header)
         .block(Block::default().borders(Borders::NONE))
         .row_highlight_style(selection_style(theme))
@@ -287,7 +290,11 @@ fn render_session_list(
     if app.sessions.pagination.is_row_focused() {
         state.select(Some(selected - start));
     }
-    frame.render_stateful_widget(table, inset_left(inner, CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(
+        table,
+        inset_horizontal(inner, CONTENT_INSET_LEFT),
+        &mut state,
+    );
 }
 
 fn render_session_detail(

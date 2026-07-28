@@ -1409,6 +1409,8 @@ fn tui_usage_narrow_width_renders_without_losing_primary_sections() {
 
 #[test]
 fn tui_manual_usage_refresh_status_stays_visible_at_eighty_columns() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
     let _lang = use_test_language(Language::English);
     let mut app = App::new(Some(AppType::Claude));
     app.focus = Focus::Content;
@@ -1424,16 +1426,38 @@ fn tui_manual_usage_refresh_status_stays_visible_at_eighty_columns() {
     });
 
     app.route = Route::Usage;
-    let usage = all_text(&render_with_size(&app, &data, 80, 28));
-    assert!(usage.contains("Refreshing"), "{usage}");
+    let usage = render_with_size(&app, &data, 80, 28);
+    assert_refresh_status_is_visible_and_accented(&app, &usage);
+
+    let wide_usage = render_with_size(&app, &data, 160, 28);
+    let wide_text = all_text(&wide_usage);
+    let summary_row = line_at(&wide_usage, line_index(&wide_text, "Refreshing") as u16);
+    assert!(
+        summary_row.contains("avg latency  ⠋ Refreshing"),
+        "refresh status should immediately follow average latency: {summary_row}"
+    );
 
     app.route = Route::UsageLogs;
-    let logs = all_text(&render_with_size(&app, &data, 80, 28));
-    assert!(logs.contains("Refreshing"), "{logs}");
+    let logs = render_with_size(&app, &data, 80, 28);
+    assert_refresh_status_is_visible_and_accented(&app, &logs);
 
     app.route = Route::Pricing;
     let pricing = all_text(&render_with_size(&app, &data, 80, 28));
     assert!(pricing.contains("Refreshing"), "{pricing}");
+}
+
+fn assert_refresh_status_is_visible_and_accented(app: &App, buf: &Buffer) {
+    let all = all_text(buf);
+    let row = line_index(&all, "Refreshing") as u16;
+    let refresh_x = cell_column_of(buf, row, "Refreshing")
+        .unwrap_or_else(|| panic!("missing Refreshing in:\n{all}"));
+
+    let theme = theme_for(&app.app_type);
+    assert_eq!(
+        buf[(refresh_x, row)].fg,
+        theme.accent,
+        "refresh status should use the theme accent"
+    );
 }
 
 #[test]
@@ -1849,8 +1873,17 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
         &app,
         &render_with_size(&app, &minimal_data(&app.app_type), 160, 40),
     );
+    let header_row = line_with(&content, "Title");
+    assert!(
+        header_row.contains("│ Title") && header_row.contains("Time │"),
+        "session columns should have matching left and right padding: {header_row}"
+    );
     let recent_row = line_with(&content, "Recent session");
     assert!(recent_row.contains("5 min ago"), "{recent_row}");
+    assert!(
+        recent_row.contains("5 min ago │"),
+        "relative time should keep the same right padding as the left side: {recent_row}"
+    );
 
     let old_row = line_with(&content, "Old session");
     let expected = chrono::DateTime::from_timestamp_millis(1_735_084_800_000)
@@ -5318,6 +5351,11 @@ fn home_restores_main_logo_and_home_labels() {
     assert!(all.contains("___  ___"));
     assert!(all.contains("\\___|\\___|"));
     assert!(all.contains("Connection Details"));
+    assert_eq!(
+        line_index(&all, "Connection Details"),
+        line_index(&all, "CC-Switch") + 1,
+        "connection details should start directly below the home title"
+    );
 }
 
 #[test]
@@ -5403,7 +5441,8 @@ fn home_does_not_repeat_welcome_title_in_body() {
     let buf = render(&app, &data);
     let all = all_text(&buf);
 
-    let needle = "CC-Switch Interactive Mode";
+    assert!(!all.contains("Interactive Mode"), "{all}");
+    let needle = "CC-Switch";
     let count = all.matches(needle).count();
     assert_eq!(count, 1, "expected welcome title once, got {count}");
 }

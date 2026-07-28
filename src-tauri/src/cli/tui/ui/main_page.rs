@@ -269,7 +269,6 @@ pub(super) fn render_main(
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Length(connection_card_height),
             Constraint::Length(4),
             Constraint::Length(8),
@@ -278,9 +277,9 @@ pub(super) fn render_main(
         .split(chunks[0]);
 
     let card_border = Style::default().fg(theme.dim);
-    render_connection_card(frame, top_chunks[1], theme, &connection_lines, card_border);
-    render_webdav_card(frame, top_chunks[2], theme, &webdav_lines, card_border);
-    render_local_env_check_card(frame, app, top_chunks[3], theme, card_border);
+    render_connection_card(frame, top_chunks[0], theme, &connection_lines, card_border);
+    render_webdav_card(frame, top_chunks[1], theme, &webdav_lines, card_border);
+    render_local_env_check_card(frame, app, top_chunks[2], theme, card_border);
 
     if current_app_routed {
         render_proxy_activity_dashboard(
