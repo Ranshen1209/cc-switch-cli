@@ -53,6 +53,7 @@ enum HelpTarget {
     FailoverQueue,
     PreferredEditor,
     CodexOfficialAuthPreservation,
+    CodexUnifiedSessionHistory,
     ProviderTemplate,
     ProviderField {
         app_type: AppType,
@@ -137,6 +138,9 @@ fn current_help_target(app: &App) -> HelpTarget {
             Some(SettingsItem::PreferredEditor) => return HelpTarget::PreferredEditor,
             Some(SettingsItem::PreserveCodexOfficialAuth) => {
                 return HelpTarget::CodexOfficialAuthPreservation;
+            }
+            Some(SettingsItem::CodexUnifiedSessionHistory) => {
+                return HelpTarget::CodexUnifiedSessionHistory;
             }
             _ => {}
         }
@@ -295,6 +299,10 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
                 "开启后，切换到第三方 Codex 供应商或由本地代理接管时不会覆盖现有的官方 ChatGPT 登录；第三方密钥会写入 config.toml。此开关不会替你登录，也不会恢复此前被覆盖的凭据。\nCodex Desktop 的 SSH 项目读取远端用户的 CODEX_HOME、凭据和代理。请在远端 cc-switch-cli 开启本项；切换供应商后重新连接远程项目，使远端 app-server 重新加载配置和模型目录。",
                 "When enabled, switching to a third-party Codex provider or enabling local proxy takeover does not overwrite the existing ChatGPT login; the third-party key is written to config.toml. This setting does not sign you in or recover credentials that were already overwritten.\nCodex Desktop SSH projects use the remote user's CODEX_HOME, credentials, and proxy. Enable this setting in the remote cc-switch-cli, then reconnect the remote project after switching providers so its app-server reloads the config and model catalog.",
             ),
+        ),
+        HelpTarget::CodexUnifiedSessionHistory => HelpContent::new(
+            texts::codex_unified_session_history_label(),
+            vec![texts::codex_unified_session_history_description().to_string()],
         ),
         HelpTarget::ProviderTemplate => HelpContent::new(
             tr("供应商模板", "Provider templates"),

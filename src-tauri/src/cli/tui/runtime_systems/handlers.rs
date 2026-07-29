@@ -14,10 +14,69 @@ use super::super::data::{load_state, UiData};
 use super::super::runtime_actions::app_display_name;
 use super::super::CacheInvalidation;
 use super::types::{
-    build_stream_check_result_lines, LocalEnvMsg, ManagedAuthMsg, ModelFetchMsg, ProxyMsg,
-    QuotaMsg, RequestTracker, SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg,
-    WebDavDone, WebDavErr, WebDavMsg, WebDavReqKind,
+    build_stream_check_result_lines, CodexHistoryMsg, LocalEnvMsg, ManagedAuthMsg, ModelFetchMsg,
+    ProxyMsg, QuotaMsg, RequestTracker, SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg,
+    UpdateMsg, WebDavDone, WebDavErr, WebDavMsg, WebDavReqKind,
 };
+
+pub(crate) fn handle_codex_history_msg(
+    app: &mut App,
+    tracker: &mut RequestTracker,
+    msg: CodexHistoryMsg,
+) {
+    match msg {
+        CodexHistoryMsg::Saved {
+            request_id,
+            enabled,
+            result,
+        } => {
+            if !tracker.finish_if_active(request_id) {
+                return;
+            }
+            match result {
+                Ok(outcome) => app.push_toast(
+                    if outcome.changed {
+                        texts::tui_toast_codex_unified_session_history_toggled(enabled)
+                    } else {
+                        texts::tui_toast_codex_unified_session_history_already(enabled)
+                    },
+                    if outcome.changed {
+                        ToastKind::Success
+                    } else {
+                        ToastKind::Info
+                    },
+                ),
+                Err(err) => app.push_toast(err, ToastKind::Error),
+            }
+        }
+        CodexHistoryMsg::RestoreFinished(result) => match result {
+            Ok(outcome) => match outcome.skipped_reason.as_deref() {
+                None => app.push_toast(
+                    texts::tui_toast_codex_history_restore_completed(
+                        outcome.restored_jsonl_files,
+                        outcome.restored_state_rows,
+                    ),
+                    ToastKind::Success,
+                ),
+                Some("unify_toggle_on") => app.push_toast(
+                    texts::tui_toast_codex_history_restore_skipped_toggle_on(),
+                    ToastKind::Info,
+                ),
+                Some(_) => app.push_toast(
+                    texts::tui_toast_codex_history_restore_nothing(),
+                    ToastKind::Info,
+                ),
+            },
+            Err(err) => {
+                log::warn!("Failed to restore Codex official history: {err}");
+                app.push_toast(
+                    texts::tui_toast_codex_history_restore_failed(),
+                    ToastKind::Error,
+                );
+            }
+        },
+    }
+}
 
 pub(crate) fn handle_stream_check_msg(app: &mut App, msg: StreamCheckMsg) {
     match msg {
@@ -1730,6 +1789,59 @@ mod tests {
     use crate::services::local_env_check::{LocalTool, ToolCheckResult, ToolCheckStatus};
     use crate::services::{CredentialStatus, SubscriptionQuota};
     use crate::session_manager::SessionMeta;
+
+    #[test]
+    fn codex_history_save_result_finishes_only_the_matching_request() {
+        let mut app = App::new(Some(AppType::Codex));
+        let mut tracker = RequestTracker::default();
+        let request_id = tracker.start();
+
+        handle_codex_history_msg(
+            &mut app,
+            &mut tracker,
+            CodexHistoryMsg::Saved {
+                request_id,
+                enabled: true,
+                result: Ok(crate::services::codex_history::CodexHistoryToggleOutcome {
+                    changed: true,
+                }),
+            },
+        );
+
+        assert!(tracker.active.is_none());
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Success
+                    && toast.message
+                        == texts::tui_toast_codex_unified_session_history_toggled(true)
+        ));
+    }
+
+    #[test]
+    fn codex_history_restore_reports_reenable_race_without_claiming_success() {
+        let mut app = App::new(Some(AppType::Codex));
+        let mut tracker = RequestTracker::default();
+
+        handle_codex_history_msg(
+            &mut app,
+            &mut tracker,
+            CodexHistoryMsg::RestoreFinished(Ok(
+                crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome {
+                    skipped_reason: Some("unify_toggle_on".to_string()),
+                    ..Default::default()
+                },
+            )),
+        );
+
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Info
+                    && toast.message
+                        == texts::tui_toast_codex_history_restore_skipped_toggle_on()
+        ));
+    }
 
     fn local_env_result(tool: LocalTool, version: &str) -> ToolCheckResult {
         ToolCheckResult {

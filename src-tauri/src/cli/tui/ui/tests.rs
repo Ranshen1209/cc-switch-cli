@@ -19,8 +19,9 @@ use crate::{
     cli::tui::{
         app,
         app::{
-            Action, App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit,
-            Focus, Overlay, SettingsItem, TextInputState, TextSubmit, UsagePane,
+            Action, App, CodexHistoryConfirmMode, CodexHistoryConfirmState, ConfigItem,
+            ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus, Overlay, SettingsItem,
+            TextInputState, TextSubmit, UsagePane,
         },
         data::{
             ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
@@ -7195,6 +7196,71 @@ fn prompts_page_uses_space_toggle_and_add_key() {
     assert!(!all.contains("c=create"));
     assert!(!all.contains("x=deactivate"));
     assert!(all.contains(&texts::tui_prompts_summary(1, "Work Prompt")));
+}
+
+#[test]
+fn codex_history_enable_confirm_renders_warning_and_inline_action_list() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+    app.overlay = Overlay::CodexHistoryConfirm(CodexHistoryConfirmState {
+        mode: CodexHistoryConfirmMode::Enable,
+        show_restore_checkbox: false,
+        restore_checked: false,
+    });
+
+    let rendered = render_with_size(&app, &minimal_data(&app.app_type), 120, 32);
+    let all = all_text(&rendered);
+    let flattened = all.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(all.contains("Unified Codex session history"), "{all}");
+    assert!(flattened.contains("encrypted_content reasoning"), "{all}");
+    assert!(flattened.contains("Enter enable"), "{all}");
+    assert!(flattened.contains("Y migrate and enable"), "{all}");
+    assert!(flattened.contains("Esc cancel"), "{all}");
+    assert!(
+        !all.contains("Space=toggle") && !all.contains("Space toggle"),
+        "{all}"
+    );
+
+    let theme = theme_for(&app.app_type);
+    let button_widths = [
+        ("Enter", "enable"),
+        ("Y", "migrate and enable"),
+        ("Esc", "cancel"),
+    ]
+    .map(|(key, label)| {
+        let y = (0..rendered.area.height)
+            .find(|&y| {
+                let row = line_at(&rendered, y);
+                row.contains(key) && row.contains(label)
+            })
+            .unwrap_or_else(|| panic!("missing {key} action row in:\n{all}"));
+        let row = line_at(&rendered, y);
+        let byte = row
+            .find(key)
+            .unwrap_or_else(|| panic!("missing {key} in row: {row}"));
+        let x = UnicodeWidthStr::width(&row[..byte]) as u16;
+        assert_eq!(rendered[(x, y)].bg, theme.surface, "{row}");
+
+        let mut left = x;
+        while left > 0 && rendered[(left - 1, y)].bg == theme.surface {
+            left -= 1;
+        }
+        let mut right = x;
+        while right < rendered.area.width && rendered[(right, y)].bg == theme.surface {
+            right += 1;
+        }
+        right - left
+    });
+    assert_eq!(button_widths, [button_widths[0]; 3], "{all}");
+    assert!(
+        button_widths[0] <= 30,
+        "action button backgrounds should stay compact: {all}"
+    );
 }
 
 #[test]

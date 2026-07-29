@@ -46,16 +46,18 @@ use runtime_systems::{
 };
 pub(crate) use runtime_systems::{fetch_provider_models_for_tui, ModelFetchStrategy};
 use runtime_systems::{
-    handle_local_env_msg, handle_managed_auth_msg, handle_model_fetch_msg, handle_proxy_msg,
-    handle_quota_msg, handle_session_msg, handle_skills_msg, handle_speedtest_msg,
-    handle_stream_check_msg, handle_update_msg, handle_webdav_msg, start_app_data_system,
-    start_local_env_system, start_managed_auth_system, start_model_fetch_system,
-    start_proxy_system, start_quota_system, start_session_system, start_session_usage_sync_system,
-    start_skills_system, start_speedtest_system, start_stream_check_system, start_update_system,
+    handle_codex_history_msg, handle_local_env_msg, handle_managed_auth_msg,
+    handle_model_fetch_msg, handle_proxy_msg, handle_quota_msg, handle_session_msg,
+    handle_skills_msg, handle_speedtest_msg, handle_stream_check_msg, handle_update_msg,
+    handle_webdav_msg, start_app_data_system, start_codex_history_system, start_local_env_system,
+    start_managed_auth_system, start_model_fetch_system, start_proxy_system, start_quota_system,
+    start_session_system, start_session_usage_sync_system, start_skills_system,
+    start_speedtest_system, start_stream_check_system, start_update_system,
     start_usage_pricing_system, start_webdav_system, AppDataLoadKind, AppDataMsg, AppDataReq,
-    LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq, RequestTracker, SessionReq,
-    SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq, StreamCheckReq, UpdateReq,
-    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, WebDavReq,
+    CodexHistoryReq, LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq,
+    RequestTracker, SessionReq, SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq,
+    StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
+    UsagePricingReq, WebDavReq,
 };
 use terminal::{PanicRestoreHookGuard, TuiTerminal};
 
@@ -2392,6 +2394,9 @@ fn handle_tui_action(
             queue_usage_log_detail_refresh(app, data_cache, usage_pricing_req_tx, rowid);
             Ok(())
         }
+        Action::SetCodexUnifiedSessionHistory { .. } => Err(AppError::Message(
+            "Codex history settings must be dispatched through the background worker".to_string(),
+        )),
         other => {
             let candidate = cache_invalidation_for_action(&other);
             if matches!(candidate, CacheInvalidation::AppStateRecreated) {
@@ -2435,6 +2440,54 @@ fn handle_tui_action(
     }
 
     result
+}
+
+fn queue_codex_history_action(
+    app: &mut App,
+    req_tx: Option<&mpsc::Sender<CodexHistoryReq>>,
+    tracker: &mut RequestTracker,
+    action: Action,
+) -> Action {
+    let Action::SetCodexUnifiedSessionHistory {
+        enabled,
+        migrate_existing,
+        restore_after_disable,
+    } = action
+    else {
+        return action;
+    };
+
+    if tracker.active.is_some() {
+        app.push_toast(
+            texts::tui_toast_codex_history_change_in_progress(),
+            ToastKind::Info,
+        );
+        return Action::None;
+    }
+
+    let Some(tx) = req_tx else {
+        app.push_toast(
+            texts::tui_toast_codex_history_worker_unavailable("worker is not running"),
+            ToastKind::Warning,
+        );
+        return Action::None;
+    };
+
+    let request_id = tracker.start();
+    if let Err(err) = tx.send(CodexHistoryReq {
+        request_id,
+        enabled,
+        migrate_existing,
+        restore_after_disable,
+    }) {
+        tracker.cancel();
+        app.push_toast(
+            texts::tui_toast_codex_history_request_failed(&err.to_string()),
+            ToastKind::Error,
+        );
+    }
+
+    Action::None
 }
 
 fn queue_sessions_refresh_if_needed(
@@ -2703,6 +2756,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
     let mut session_usage_sync = RequestTracker::default();
+    let mut codex_history_save = RequestTracker::default();
     // Session usage sync scans every session log file, which is expensive with a
     // large history. It only feeds the Usage view, so defer it until the user
     // first opens a Usage route instead of paying it on every startup.
@@ -2769,6 +2823,17 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         Err(err) => {
             app.push_toast(
                 texts::tui_toast_proxy_worker_unavailable(&err.to_string()),
+                ToastKind::Warning,
+            );
+            None
+        }
+    };
+
+    let codex_history = match start_codex_history_system() {
+        Ok(system) => Some(system),
+        Err(err) => {
+            app.push_toast(
+                texts::tui_toast_codex_history_worker_unavailable(&err.to_string()),
                 ToastKind::Warning,
             );
             None
@@ -3093,6 +3158,13 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             }
         }
 
+        if let Some(codex_history) = codex_history.as_ref() {
+            while let Ok(msg) = codex_history.result_rx.try_recv() {
+                frame_scheduler.mark_dirty();
+                handle_codex_history_msg(&mut app, &mut codex_history_save, msg);
+            }
+        }
+
         if let Some(local_env) = local_env.as_ref() {
             while let Ok(msg) = local_env.result_rx.try_recv() {
                 frame_scheduler.mark_dirty();
@@ -3289,6 +3361,12 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     let key = normalize_key_event(key);
                     let before_app_type = app.app_type.clone();
                     let action = app.on_key(key, &data);
+                    let action = queue_codex_history_action(
+                        &mut app,
+                        codex_history.as_ref().map(|system| &system.req_tx),
+                        &mut codex_history_save,
+                        action,
+                    );
                     let action_result = handle_tui_action(
                         &mut terminal,
                         &mut app,
@@ -3340,6 +3418,12 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 } => {
                     let before_app_type = app.app_type.clone();
                     let action = app.on_wheel(direction, steps, gesture, &data);
+                    let action = queue_codex_history_action(
+                        &mut app,
+                        codex_history.as_ref().map(|system| &system.req_tx),
+                        &mut codex_history_save,
+                        action,
+                    );
                     let action_result = handle_tui_action(
                         &mut terminal,
                         &mut app,

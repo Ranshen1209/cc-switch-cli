@@ -50,10 +50,11 @@ pub(crate) use types::{
     SessionPageToken, SessionRowIdentity, MODEL_FETCH_QUERY_MAX_BYTES, MODEL_FETCH_QUERY_MAX_CHARS,
 };
 pub use types::{
-    CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
-    LoadingKind, ManagedAuthLoginState, Overlay, PricingState, SessionProjectPickerState,
-    SessionsPane, SessionsState, SkillsDiscoverSource, TextInputState, TextSubmit, TextViewAction,
-    TextViewState, Toast, ToastKind, UsageMetric, UsagePane, UsageState,
+    CodexHistoryConfirmMode, CodexHistoryConfirmState, CommonSnippetViewSource, ConfirmAction,
+    ConfirmOverlay, FilterScope, FilterState, Focus, LoadingKind, ManagedAuthLoginState, Overlay,
+    PricingState, SessionProjectPickerState, SessionsPane, SessionsState, SkillsDiscoverSource,
+    TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastKind, UsageMetric,
+    UsagePane, UsageState,
 };
 #[cfg(test)]
 pub(crate) use types::{McpEnvEditorField, McpEnvEntryEditorState};

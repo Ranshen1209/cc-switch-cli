@@ -449,10 +449,11 @@ fn set_codex_history_enabled(
     migrate_existing: bool,
     restore: bool,
 ) -> Result<(), AppError> {
+    let state = crate::store::AppState::try_new()?;
     let outcome = crate::services::codex_history::set_unified_session_history_enabled(
+        &state,
         enabled,
         migrate_existing,
-        restore,
     )?;
     if !outcome.changed {
         println!(
@@ -466,12 +467,17 @@ fn set_codex_history_enabled(
     }
 
     if enabled {
-        if let Some(migration) = outcome.migration {
+        if migrate_existing {
+            let migration =
+                crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
+                )?;
             print_codex_history_migration_outcome(&migration);
         }
         println!("{}", success("Unified Codex session history enabled"));
     } else {
-        if let Some(restore) = outcome.restore {
+        if restore {
+            let restore =
+                crate::codex_history_migration::restore_codex_official_history_from_backups()?;
             print_codex_history_restore_outcome(&restore);
         }
         println!("{}", success("Unified Codex session history disabled"));

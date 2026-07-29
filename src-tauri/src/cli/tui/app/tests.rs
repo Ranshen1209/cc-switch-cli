@@ -10198,7 +10198,7 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn settings_codex_unified_session_history_item_opens_confirm_overlay() {
+    fn settings_codex_unified_session_history_enable_defaults_to_no_migration() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestEnvGuard::isolated(temp_home.path());
 
@@ -10214,10 +10214,144 @@ mod tests {
         assert!(matches!(action, Action::None));
         assert!(matches!(
             &app.overlay,
-            Overlay::Confirm(ConfirmOverlay {
-                action: ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled: true },
+            Overlay::CodexHistoryConfirm(CodexHistoryConfirmState {
+                mode: CodexHistoryConfirmMode::Enable,
+                show_restore_checkbox: false,
+                restore_checked: false,
+            })
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetCodexUnifiedSessionHistory {
+                enabled: true,
+                migrate_existing: false,
+                restore_after_disable: false,
+            }
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_codex_unified_session_history_enable_y_requests_migration() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory))
+            .expect("CodexUnifiedSessionHistory missing from SettingsItem::ALL");
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('y')), &UiData::default()),
+            Action::SetCodexUnifiedSessionHistory {
+                enabled: true,
+                migrate_existing: true,
+                restore_after_disable: false,
+            }
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_codex_unified_session_history_cancel_does_not_change_settings() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory))
+            .expect("CodexUnifiedSessionHistory missing from SettingsItem::ALL");
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            app.on_key(key(KeyCode::Esc), &UiData::default()),
+            Action::None
+        ));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(!crate::settings::unify_codex_session_history());
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_codex_unified_session_history_disable_offers_pending_restore() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = true;
+        settings.unify_codex_migrate_existing = Some(true);
+        crate::settings::update_settings(settings).expect("seed unified history intent");
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory))
+            .expect("CodexUnifiedSessionHistory missing from SettingsItem::ALL");
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            &app.overlay,
+            Overlay::CodexHistoryConfirm(CodexHistoryConfirmState {
+                mode: CodexHistoryConfirmMode::Disable,
+                show_restore_checkbox: true,
+                restore_checked: true,
+            })
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetCodexUnifiedSessionHistory {
+                enabled: false,
+                migrate_existing: false,
+                restore_after_disable: true,
+            }
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_codex_unified_session_history_disable_hides_restore_without_ledger_or_intent() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestEnvGuard::isolated(temp_home.path());
+        let mut settings = crate::settings::get_settings();
+        settings.unify_codex_session_history = true;
+        settings.unify_codex_migrate_existing = None;
+        crate::settings::update_settings(settings).expect("seed unified history");
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::CodexUnifiedSessionHistory))
+            .expect("CodexUnifiedSessionHistory missing from SettingsItem::ALL");
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            &app.overlay,
+            Overlay::CodexHistoryConfirm(CodexHistoryConfirmState {
+                mode: CodexHistoryConfirmMode::Disable,
+                show_restore_checkbox: false,
                 ..
             })
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter), &UiData::default()),
+            Action::SetCodexUnifiedSessionHistory {
+                enabled: false,
+                migrate_existing: false,
+                restore_after_disable: false,
+            }
         ));
     }
 

@@ -1,5 +1,6 @@
 use super::super::theme;
 use super::super::*;
+use super::action_dialog::{render_action_dialog, ActionDialogSpec};
 use super::frame::{overlay_frame, overlay_frame_at, OverlaySize};
 
 pub(super) fn render_help_overlay(
@@ -89,6 +90,78 @@ pub(super) fn render_confirm_overlay(
     frame.render_widget(
         Paragraph::new(centered_message_lines(
             &confirm.message,
+            body_area.width,
+            body_area.height,
+        ))
+        .alignment(alignment),
+        body_area,
+    );
+}
+
+pub(super) fn render_codex_history_confirm_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    confirm: &crate::cli::tui::app::CodexHistoryConfirmState,
+) {
+    if let Some(actions) = confirm.enable_action_rows() {
+        render_action_dialog(
+            frame,
+            content_area,
+            theme,
+            ActionDialogSpec {
+                title: confirm.title(),
+                message: confirm.message(),
+                actions: &actions,
+                min_size: (OVERLAY_FIXED_LG.0, OVERLAY_FIXED_MD.1),
+                border: overlay_border_style(theme, true),
+            },
+        );
+        return;
+    }
+
+    let checkbox = confirm.restore_checkbox_label().map(|label| {
+        format!(
+            "[{}] {label}",
+            if confirm.restore_checked { "x" } else { " " }
+        )
+    });
+    let display = if let Some(checkbox) = checkbox.as_ref() {
+        format!("{}\n\n{checkbox}", confirm.message())
+    } else {
+        confirm.message().to_string()
+    };
+    let keys: &[(&str, &str)] = if checkbox.is_some() {
+        &[
+            ("Space", texts::tui_key_toggle()),
+            (
+                "Enter",
+                texts::codex_unified_history_disable_confirm_label(),
+            ),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    } else {
+        &[
+            (
+                "Enter",
+                texts::codex_unified_history_disable_confirm_label(),
+            ),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    };
+
+    let body_area = overlay_frame_at(
+        frame,
+        confirm_overlay_rect(content_area, &display),
+        theme,
+        confirm.title(),
+        keys,
+        overlay_border_style(theme, true),
+    );
+    let alignment = message_block_alignment(&display, body_area.width);
+    frame.render_widget(
+        Paragraph::new(centered_message_lines(
+            &display,
             body_area.width,
             body_area.height,
         ))

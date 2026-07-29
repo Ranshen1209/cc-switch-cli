@@ -20,6 +20,31 @@ use crate::test_support::{
 use crate::{AppError, AppType};
 use runtime_systems::ProxyMsg;
 
+#[test]
+fn codex_history_action_is_forwarded_to_the_dedicated_worker() {
+    let mut app = App::new(Some(AppType::Codex));
+    let (tx, rx) = mpsc::channel();
+    let mut tracker = RequestTracker::default();
+
+    let action = queue_codex_history_action(
+        &mut app,
+        Some(&tx),
+        &mut tracker,
+        Action::SetCodexUnifiedSessionHistory {
+            enabled: false,
+            migrate_existing: false,
+            restore_after_disable: true,
+        },
+    );
+
+    assert!(matches!(action, Action::None));
+    let req = rx.recv().expect("worker request");
+    assert_eq!(tracker.active, Some(req.request_id));
+    assert!(!req.enabled);
+    assert!(!req.migrate_existing);
+    assert!(req.restore_after_disable);
+}
+
 fn pending_snapshot_app_data(request_id: u64) -> PendingAppDataLoad {
     PendingAppDataLoad {
         kind: AppDataLoadKind::Snapshot,

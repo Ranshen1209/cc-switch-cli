@@ -15,6 +15,9 @@ pub(crate) fn render_overlay(
         Overlay::Confirm(confirm) => {
             super::basic::render_confirm_overlay(frame, content_area, theme, confirm)
         }
+        Overlay::CodexHistoryConfirm(confirm) => {
+            super::basic::render_codex_history_confirm_overlay(frame, content_area, theme, confirm)
+        }
         Overlay::TextInput(input) => {
             super::basic::render_text_input_overlay(frame, content_area, theme, input)
         }

@@ -3257,9 +3257,6 @@ pub enum ConfirmAction {
     SettingsSetClaudePluginIntegration {
         enabled: bool,
     },
-    SettingsSetCodexUnifiedSessionHistory {
-        enabled: bool,
-    },
     VisibleAppsAutoDetection,
     VisibleAppsSwitchToManual {
         apps: crate::settings::VisibleApps,
@@ -3302,6 +3299,48 @@ pub struct ConfirmOverlay {
     pub title: String,
     pub message: String,
     pub action: ConfirmAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexHistoryConfirmMode {
+    Enable,
+    Disable,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexHistoryConfirmState {
+    pub mode: CodexHistoryConfirmMode,
+    pub show_restore_checkbox: bool,
+    pub restore_checked: bool,
+}
+
+impl CodexHistoryConfirmState {
+    pub fn title(&self) -> &'static str {
+        match self.mode {
+            CodexHistoryConfirmMode::Enable => texts::codex_unified_history_enable_title(),
+            CodexHistoryConfirmMode::Disable => texts::codex_unified_history_disable_title(),
+        }
+    }
+
+    pub fn message(&self) -> &'static str {
+        match self.mode {
+            CodexHistoryConfirmMode::Enable => texts::codex_unified_history_enable_message(),
+            CodexHistoryConfirmMode::Disable => texts::codex_unified_history_disable_message(),
+        }
+    }
+
+    pub fn enable_action_rows(&self) -> Option<[(&'static str, &'static str); 3]> {
+        matches!(self.mode, CodexHistoryConfirmMode::Enable).then_some([
+            ("Enter", texts::tui_key_enable()),
+            ("Y", texts::codex_unified_history_migrate_and_enable_label()),
+            ("Esc", texts::tui_key_cancel()),
+        ])
+    }
+
+    pub fn restore_checkbox_label(&self) -> Option<&'static str> {
+        (matches!(self.mode, CodexHistoryConfirmMode::Disable) && self.show_restore_checkbox)
+            .then(texts::codex_unified_history_restore_backup_label)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3437,6 +3476,7 @@ pub enum Overlay {
     None,
     Help(crate::cli::tui::help::HelpState),
     Confirm(ConfirmOverlay),
+    CodexHistoryConfirm(CodexHistoryConfirmState),
     TextInput(TextInputState),
     BackupPicker {
         selected: usize,
@@ -3734,6 +3774,7 @@ impl Overlay {
             Overlay::None
             | Overlay::Help(_)
             | Overlay::Confirm(_)
+            | Overlay::CodexHistoryConfirm(_)
             | Overlay::BackupPicker { .. }
             | Overlay::TextView(_)
             | Overlay::CommonSnippetPicker { .. }

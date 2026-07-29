@@ -8464,6 +8464,64 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_codex_history_restore_completed(files: usize, rows: usize) -> String {
+        if is_chinese() {
+            format!("已按备份还原官方会话历史（{files} 个会话文件、{rows} 条索引记录）")
+        } else {
+            format!(
+                "Official session history restored from backup ({files} session files, {rows} index rows)"
+            )
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_failed() -> &'static str {
+        if is_chinese() {
+            "还原官方会话历史失败，请重试"
+        } else {
+            "Failed to restore official session history, please try again"
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_nothing() -> &'static str {
+        if is_chinese() {
+            "当前 Codex 目录没有可恢复的迁移备份"
+        } else {
+            "No restorable migration backup for the current Codex directory"
+        }
+    }
+
+    pub fn tui_toast_codex_history_restore_skipped_toggle_on() -> &'static str {
+        if is_chinese() {
+            "统一会话历史开关已重新开启，已跳过还原"
+        } else {
+            "Unified session history was re-enabled; restore skipped"
+        }
+    }
+
+    pub fn tui_toast_codex_history_worker_unavailable(err: &str) -> String {
+        if is_chinese() {
+            format!("Codex 会话历史后台服务不可用: {err}")
+        } else {
+            format!("Codex session history worker unavailable: {err}")
+        }
+    }
+
+    pub fn tui_toast_codex_history_request_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("提交 Codex 会话历史设置失败: {err}")
+        } else {
+            format!("Failed to submit Codex session history setting: {err}")
+        }
+    }
+
+    pub fn tui_toast_codex_history_change_in_progress() -> &'static str {
+        if is_chinese() {
+            "Codex 会话历史设置正在保存，请稍候。"
+        } else {
+            "Codex session history setting is being saved; please wait."
+        }
+    }
+
     pub fn tui_toast_unmanaged_scanned(count: usize) -> String {
         if is_chinese() {
             format!("扫描完成：发现 {count} 个可导入技能。")
@@ -11982,17 +12040,63 @@ pub mod texts {
         }
     }
 
-    pub fn codex_unified_session_history_confirm(enable: bool) -> String {
+    pub fn codex_unified_session_history_description() -> &'static str {
         if is_chinese() {
-            if enable {
-                "确认开启统一 Codex 会话历史？\n官方订阅将使用共享 custom 供应商标识运行；已有官方会话不会自动迁移，可用 CLI 命令 settings codex-history migrate-existing 单独迁移。".to_string()
-            } else {
-                "确认关闭统一 Codex 会话历史？\n不会自动恢复已迁移的会话；如需恢复，请使用 CLI 命令 settings codex-history restore。".to_string()
-            }
-        } else if enable {
-            "Enable unified Codex session history?\nOfficial subscriptions will use the shared custom provider id. Existing official sessions are not migrated automatically; use settings codex-history migrate-existing from the CLI if needed.".to_string()
+            "开启后，官方订阅将以共享的 custom 供应商标识运行，官方与第三方会话出现在同一历史列表中，并可选择把现有官方会话一并迁入（迁移前自动备份）。关闭开关时可按备份恢复迁入的会话。注意：跨供应商继续旧会话时，对方后端可能无法解密会话中的 encrypted_content 推理内容，导致继续失败"
         } else {
-            "Disable unified Codex session history?\nMigrated sessions are not restored automatically; use settings codex-history restore from the CLI if needed.".to_string()
+            "When enabled, the official subscription runs under the shared \"custom\" provider id so official and third-party sessions appear in one history list, optionally migrating existing official sessions in (backed up first). When turning it off, the migrated sessions can be restored from backup. Note: resuming an old session across providers may fail because its encrypted_content reasoning can only be decrypted by the backend that created it."
+        }
+    }
+
+    pub fn codex_unified_history_enable_title() -> &'static str {
+        codex_unified_session_history_label()
+    }
+
+    pub fn codex_unified_history_enable_message() -> &'static str {
+        if is_chinese() {
+            "开启后，官方订阅与第三方将共用同一个会话历史列表。注意：跨供应商继续旧会话时，可能因对方后端无法解密 encrypted_content 推理内容而失败。\n\n可选择同时把现有官方会话历史迁入共享列表（迁移前自动备份到 ~/.cc-switch/backups，关闭开关时可选择恢复）。"
+        } else {
+            "When enabled, the official subscription and third-party providers share one session history list. Note: resuming an old session across providers may fail because its encrypted_content reasoning cannot be decrypted by another backend.\n\nYou can also migrate your existing official session history into the shared list (originals are backed up to ~/.cc-switch/backups first and can be restored when you turn this off)."
+        }
+    }
+
+    pub fn codex_unified_history_migrate_and_enable_label() -> &'static str {
+        if is_chinese() {
+            "迁入并启用"
+        } else {
+            "migrate and enable"
+        }
+    }
+
+    pub fn codex_unified_history_disable_title() -> &'static str {
+        if is_chinese() {
+            "关闭统一会话历史"
+        } else {
+            "Turn off unified session history"
+        }
+    }
+
+    pub fn codex_unified_history_disable_message() -> &'static str {
+        if is_chinese() {
+            "关闭后，官方订阅与第三方将恢复各自独立的会话历史列表。开启期间产生的会话因无法区分来源，将留在第三方历史中，官方订阅将看不到它们。"
+        } else {
+            "After turning this off, the official subscription and third-party providers return to separate history lists. Sessions created while it was on cannot be attributed to a provider, so they stay in the third-party history and the official subscription will not see them."
+        }
+    }
+
+    pub fn codex_unified_history_restore_backup_label() -> &'static str {
+        if is_chinese() {
+            "把开启时迁入的官方会话还原回官方历史（按备份精确还原）"
+        } else {
+            "Restore the official sessions migrated at enable time back to the official history (exact restore from backup)"
+        }
+    }
+
+    pub fn codex_unified_history_disable_confirm_label() -> &'static str {
+        if is_chinese() {
+            "关闭"
+        } else {
+            "Turn off"
         }
     }
 

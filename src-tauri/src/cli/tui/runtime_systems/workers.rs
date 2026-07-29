@@ -18,14 +18,14 @@ use super::super::data::{
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
-    AppDataReq, AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg,
-    ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg,
-    ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem,
-    SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq,
-    SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem,
-    UpdateMsg, UpdateReq, UpdateSystem, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
-    UsagePricingReq, UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg, WebDavReq,
-    WebDavReqKind, WebDavSystem,
+    AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem, LocalEnvMsg,
+    LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg,
+    ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq,
+    QuotaSystem, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -49,6 +49,128 @@ pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
         result_rx,
         _handle: handle,
     })
+}
+
+enum CodexHistoryOperation {
+    MigrateExisting,
+    Restore,
+}
+
+pub(crate) fn start_codex_history_system() -> Result<CodexHistorySystem, AppError> {
+    let (result_tx, result_rx) = mpsc::channel::<CodexHistoryMsg>();
+    let (req_tx, req_rx) = mpsc::channel::<CodexHistoryReq>();
+    let (operation_tx, operation_rx) = mpsc::channel::<CodexHistoryOperation>();
+
+    let operation_result_tx = result_tx.clone();
+    let operation_handle = std::thread::Builder::new()
+        .name("cc-switch-codex-history-operations".to_string())
+        .spawn(move || codex_history_operation_loop(operation_rx, operation_result_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn Codex history operation worker".to_string(),
+            source: e,
+        })?;
+
+    let save_handle = std::thread::Builder::new()
+        .name("cc-switch-codex-history-settings".to_string())
+        .spawn(move || codex_history_save_loop(req_rx, result_tx, operation_tx))
+        .map_err(|e| AppError::IoContext {
+            context: "failed to spawn Codex history settings worker".to_string(),
+            source: e,
+        })?;
+
+    Ok(CodexHistorySystem {
+        req_tx,
+        result_rx,
+        _handles: vec![save_handle, operation_handle],
+    })
+}
+
+fn codex_history_save_loop(
+    rx: mpsc::Receiver<CodexHistoryReq>,
+    tx: mpsc::Sender<CodexHistoryMsg>,
+    operation_tx: mpsc::Sender<CodexHistoryOperation>,
+) {
+    while let Ok(req) = rx.recv() {
+        let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
+            crate::services::codex_history::set_unified_session_history_enabled(
+                &state,
+                req.enabled,
+                req.migrate_existing,
+            )
+            .map_err(|e| e.to_string())
+        });
+
+        let changed = result.as_ref().is_ok_and(|outcome| outcome.changed);
+        if changed && req.enabled {
+            queue_codex_history_operation(
+                &operation_tx,
+                &tx,
+                CodexHistoryOperation::MigrateExisting,
+            );
+        }
+
+        let _ = tx.send(CodexHistoryMsg::Saved {
+            request_id: req.request_id,
+            enabled: req.enabled,
+            result,
+        });
+
+        if changed && !req.enabled && req.restore_after_disable {
+            queue_codex_history_operation(&operation_tx, &tx, CodexHistoryOperation::Restore);
+        }
+    }
+}
+
+fn queue_codex_history_operation(
+    operation_tx: &mpsc::Sender<CodexHistoryOperation>,
+    result_tx: &mpsc::Sender<CodexHistoryMsg>,
+    operation: CodexHistoryOperation,
+) {
+    let is_restore = matches!(operation, CodexHistoryOperation::Restore);
+    if let Err(err) = operation_tx.send(operation) {
+        if is_restore {
+            let _ = result_tx.send(CodexHistoryMsg::RestoreFinished(Err(err.to_string())));
+        } else {
+            log::warn!("Failed to queue unified Codex history migration: {err}");
+        }
+    }
+}
+
+fn codex_history_operation_loop(
+    rx: mpsc::Receiver<CodexHistoryOperation>,
+    tx: mpsc::Sender<CodexHistoryMsg>,
+) {
+    while let Ok(operation) = rx.recv() {
+        match operation {
+            CodexHistoryOperation::MigrateExisting => {
+                match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket(
+                ) {
+                    Ok(outcome) => {
+                        if let Some(reason) = outcome.skipped_reason {
+                            log::debug!(
+                                "Codex official history unify migration skipped: {reason}"
+                            );
+                        } else {
+                            log::info!(
+                                "Codex official history unify migration completed: jsonl_files={}, state_rows={}",
+                                outcome.migrated_jsonl_files,
+                                outcome.migrated_state_rows
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Codex official history unify migration failed: {err}");
+                    }
+                }
+            }
+            CodexHistoryOperation::Restore => {
+                let result =
+                    crate::codex_history_migration::restore_codex_official_history_from_backups()
+                        .map_err(|e| e.to_string());
+                let _ = tx.send(CodexHistoryMsg::RestoreFinished(result));
+            }
+        }
+    }
 }
 
 fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
@@ -3549,6 +3671,77 @@ fn skills_worker_loop(rx: mpsc::Receiver<SkillsReq>, tx: mpsc::Sender<SkillsMsg>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn codex_history_worker_saves_disable_before_reporting_restore() {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let system = start_codex_history_system().expect("start Codex history worker");
+
+        system
+            .req_tx
+            .send(CodexHistoryReq {
+                request_id: 1,
+                enabled: true,
+                migrate_existing: false,
+                restore_after_disable: false,
+            })
+            .expect("queue enable");
+        assert!(matches!(
+            system
+                .result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("enable result"),
+            CodexHistoryMsg::Saved {
+                request_id: 1,
+                enabled: true,
+                result: Ok(crate::services::codex_history::CodexHistoryToggleOutcome {
+                    changed: true,
+                }),
+            }
+        ));
+        assert_eq!(
+            crate::settings::get_settings().unify_codex_migrate_existing,
+            Some(false)
+        );
+
+        system
+            .req_tx
+            .send(CodexHistoryReq {
+                request_id: 2,
+                enabled: false,
+                migrate_existing: false,
+                restore_after_disable: true,
+            })
+            .expect("queue disable");
+        assert!(matches!(
+            system
+                .result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("disable result"),
+            CodexHistoryMsg::Saved {
+                request_id: 2,
+                enabled: false,
+                result: Ok(crate::services::codex_history::CodexHistoryToggleOutcome {
+                    changed: true,
+                }),
+            }
+        ));
+        assert!(matches!(
+            system
+                .result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("restore result"),
+            CodexHistoryMsg::RestoreFinished(Ok(
+                crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome {
+                    skipped_reason: Some(reason),
+                    ..
+                }
+            )) if reason == "no_backup_ledger"
+        ));
+    }
 
     struct LocalEnvTaskDropSignal(mpsc::Sender<()>);
 

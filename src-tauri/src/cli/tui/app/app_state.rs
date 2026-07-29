@@ -290,6 +290,8 @@ pub enum Action {
     },
     SetCodexUnifiedSessionHistory {
         enabled: bool,
+        migrate_existing: bool,
+        restore_after_disable: bool,
     },
     #[allow(dead_code)]
     SetProxyEnabled {

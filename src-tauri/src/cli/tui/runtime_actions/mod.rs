@@ -936,9 +936,9 @@ pub(crate) fn handle_action(
         Action::SetPreserveCodexOfficialAuth { enabled } => {
             settings::set_preserve_codex_official_auth(&mut ctx, enabled)
         }
-        Action::SetCodexUnifiedSessionHistory { enabled } => {
-            settings::set_codex_unified_session_history(&mut ctx, enabled)
-        }
+        Action::SetCodexUnifiedSessionHistory { .. } => Err(AppError::Message(
+            "Codex history settings bypassed the background worker".to_string(),
+        )),
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)

@@ -653,6 +653,31 @@ pub(crate) struct ProxySystem {
     pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CodexHistoryReq {
+    pub(crate) request_id: u64,
+    pub(crate) enabled: bool,
+    pub(crate) migrate_existing: bool,
+    pub(crate) restore_after_disable: bool,
+}
+
+pub(crate) enum CodexHistoryMsg {
+    Saved {
+        request_id: u64,
+        enabled: bool,
+        result: Result<crate::services::codex_history::CodexHistoryToggleOutcome, String>,
+    },
+    RestoreFinished(
+        Result<crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome, String>,
+    ),
+}
+
+pub(crate) struct CodexHistorySystem {
+    pub(crate) req_tx: mpsc::Sender<CodexHistoryReq>,
+    pub(crate) result_rx: mpsc::Receiver<CodexHistoryMsg>,
+    pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
+}
+
 pub(crate) struct SkillsSystem {
     pub(crate) req_tx: mpsc::Sender<SkillsReq>,
     pub(crate) result_rx: mpsc::Receiver<SkillsMsg>,
