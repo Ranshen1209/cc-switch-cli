@@ -267,6 +267,13 @@ fn queue_quota_refresh(
     }
 }
 
+/// Liveness of the background session-usage import, sampled once per tick.
+/// The progress numbers themselves stay a render-time read; only the round's
+/// start tick has to be remembered, and only the loop sees every tick.
+fn session_usage_sync_is_active() -> bool {
+    crate::services::session_usage::sync_progress::snapshot().is_some()
+}
+
 fn queue_current_quota_refresh_if_due(
     app: &mut App,
     data: &mut data::UiData,
@@ -563,6 +570,26 @@ impl UiDataByAppCache {
     /// stale-while-revalidate refresh completes.
     fn invalidate_usage_pricing_cache_after_external_usage_sync(&mut self) {
         self.usage_pricing_by_key.clear();
+        // Every aggregate that was already running crossed the import's commit
+        // boundary, including requests for apps that are not currently
+        // visible. Keep their tokens valid, but require one fresh successor so
+        // a late result cannot repopulate the cache with a pre-sync snapshot.
+        self.usage_pricing_dirty_by_key
+            .extend(self.pending_usage_pricing_by_key.keys().cloned());
+    }
+
+    /// Invalidate one app after the proxy persisted new usage. As with an
+    /// external import, in-flight requests finish normally and earn exactly
+    /// one follow-up instead of being cancelled.
+    fn invalidate_usage_pricing_cache_for_app(&mut self, app_type: &AppType) {
+        self.usage_pricing_by_key
+            .retain(|(cached_app_type, _), _| cached_app_type != app_type);
+        self.usage_pricing_dirty_by_key.extend(
+            self.pending_usage_pricing_by_key
+                .keys()
+                .filter(|(pending_app_type, _)| pending_app_type == app_type)
+                .cloned(),
+        );
     }
 
     fn remove_app_snapshot(&mut self, app_type: &AppType) {
@@ -911,12 +938,14 @@ impl UiDataByAppCache {
             {
                 self.usage_pricing_phase_by_key.remove(&key);
             }
+            log::debug!("home-usage: usage aggregate request failed to queue: {err}");
             app.push_toast(
                 format!("Usage/pricing refresh request failed: {err}"),
                 ToastKind::Warning,
             );
             false
         } else {
+            log::debug!("home-usage: usage aggregate queued app={app_type:?} range={range:?}");
             app.usage.start_loading(app_type.clone(), range);
             true
         }
@@ -1317,26 +1346,101 @@ fn queue_codex_usage_rebuild(
     true
 }
 
-/// Lazily kick off the session-usage sync the first time a Usage route is shown
-/// this run. The sync scans the whole session-log history (expensive on large
-/// histories) and only feeds the Usage view, so it is deferred off startup.
+/// Ticks the home page waits before kicking the first session-usage scan
+/// (~2s at [`TUI_TICK_RATE`]), so the first frames render undisturbed.
+const USAGE_SESSION_SYNC_HOME_DELAY_TICKS: u64 = 10;
+/// Cadence of the background session-usage refresh (60s at [`TUI_TICK_RATE`]).
+const USAGE_AUTO_SYNC_INTERVAL_TICKS: u64 = 60 * 1000 / 200;
+/// Proxy traffic already writes usage rows to SQLite; only the aggregate view
+/// needs refreshing. Keep that query independent from the much heavier local
+/// session scan and throttle it to once every ten seconds.
+const USAGE_PROXY_REFRESH_INTERVAL_TICKS: u64 = 10 * 1000 / 200;
+
+/// Lazily kick off the session-usage sync the first time a Usage route — or,
+/// after a short delay, the home page — is shown this run. The sync scans the
+/// whole session-log history (expensive on large histories), so it is deferred
+/// off startup.
 fn maybe_queue_usage_session_sync(
     app: &App,
     sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
     sync_tracker: &mut RequestTracker,
     started: &mut bool,
+    auto_sync_enabled: bool,
 ) {
-    if *started {
+    if *started || !auto_sync_enabled {
         return;
     }
-    if !matches!(
+    let on_usage_route = matches!(
         app.route,
         route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
-    ) {
+    );
+    // The home chart wants the same data, but never at the cost of the first
+    // paint: wait a couple of seconds before scanning.
+    let on_home_route =
+        matches!(app.route, route::Route::Main) && app.tick >= USAGE_SESSION_SYNC_HOME_DELAY_TICKS;
+    if !on_usage_route && !on_home_route {
         return;
     }
     *started = true;
+    log::debug!(
+        "home-usage: initial session sync queued (route={:?}, tick={})",
+        app.route,
+        app.tick
+    );
     let _ = queue_background_session_usage_sync(sync_req_tx, sync_tracker);
+}
+
+/// Re-import local session logs every [`USAGE_AUTO_SYNC_INTERVAL_TICKS`] so the
+/// home chart keeps up with activity outside the proxy. Opt-out through the
+/// `usageAutoSync` setting; skipped while a scan is already running.
+fn queue_usage_session_sync_if_due(
+    app: &mut App,
+    sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
+    sync_tracker: &mut RequestTracker,
+) {
+    if !crate::settings::usage_auto_sync_enabled() {
+        return;
+    }
+    // Seeding on the first check measures the interval from TUI start instead
+    // of firing a scan on the very first tick.
+    let last_tick = *app.usage_last_auto_sync_tick.get_or_insert(app.tick);
+    if app.tick.saturating_sub(last_tick) < USAGE_AUTO_SYNC_INTERVAL_TICKS {
+        return;
+    }
+    app.usage_last_auto_sync_tick = Some(app.tick);
+
+    if sync_tracker.active.is_some() {
+        log::debug!("home-usage: periodic session sync skipped, a scan is already running");
+        return;
+    }
+    log::debug!(
+        "home-usage: periodic session sync queued at tick {}",
+        app.tick
+    );
+    queue_background_session_usage_sync(sync_req_tx, sync_tracker);
+}
+
+/// Refresh the current app's fixed usage projection after proxy activity
+/// without tying it to `usageAutoSync`, which controls local session-log I/O.
+fn queue_usage_proxy_refresh_if_due(
+    app: &mut App,
+    data_cache: &mut UiDataByAppCache,
+    usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
+) {
+    if !matches!(app.route, route::Route::Main) {
+        return;
+    }
+    let Some(tx) = usage_pricing_req_tx else {
+        return;
+    };
+    if !app.take_proxy_usage_refresh_due(USAGE_PROXY_REFRESH_INTERVAL_TICKS) {
+        return;
+    }
+
+    let app_type = app.app_type.clone();
+    data_cache.invalidate_usage_pricing_cache_for_app(&app_type);
+    data_cache.mark_usage_pricing_dirty(&app_type, data::UsageRangePreset::ThirtyDays);
+    data_cache.flush_dirty_usage_pricing(app, Some(tx));
 }
 
 /// Lazily load the active app's usage/pricing when a Usage or Pricing view is
@@ -1352,16 +1456,20 @@ fn maybe_queue_usage_pricing_on_view(
         route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
     );
     let is_pricing = matches!(app.route, route::Route::Pricing);
-    if !is_usage && !is_pricing {
+    // The home chart reads the 30-day per-model buckets from the same fixed
+    // snapshot, so Main shares the Usage page's cache entry.
+    let is_home = matches!(app.route, route::Route::Main);
+    if !is_usage && !is_pricing && !is_home {
         return;
     }
     let app_type = app.app_type.clone();
     // The Pricing view needs the pricing snapshot, which only fixed ranges
     // produce (a custom range yields `pricing: None`); force a fixed range there.
-    let range = if is_pricing && matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
-        data::UsageRangePreset::SevenDays
-    } else {
-        app.usage.range
+    // The home chart needs the fixed 30-day buckets for the same reason.
+    let range = match app.usage.range {
+        data::UsageRangePreset::Custom(_) if is_home => data::UsageRangePreset::ThirtyDays,
+        data::UsageRangePreset::Custom(_) if is_pricing => data::UsageRangePreset::SevenDays,
+        range => range,
     };
     data_cache.ensure_usage_pricing_loaded(app, usage_pricing_req_tx, &app_type, range);
 }
@@ -1634,6 +1742,12 @@ fn handle_session_usage_sync_msg(
     // while the user is sitting on the Usage view.
     let active_range = app.usage.range;
     data_cache.mark_usage_pricing_dirty(&current_app_type, active_range);
+    // The home chart reads the fixed 30-day aggregate even when the Usage page
+    // is parked on a custom range, whose key would otherwise be the only one
+    // marked dirty here.
+    if matches!(app.route, route::Route::Main) {
+        data_cache.mark_usage_pricing_dirty(&current_app_type, data::UsageRangePreset::ThirtyDays);
+    }
     let aggregate_queued = data_cache.flush_dirty_usage_pricing(app, usage_pricing_req_tx);
     let aggregate_will_complete =
         aggregate_queued || !data_cache.pending_usage_pricing_by_key.is_empty();
@@ -2926,6 +3040,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
             if last_tick.elapsed() >= tick_rate {
                 app.on_tick();
+                app.note_session_sync_round(session_usage_sync_is_active());
                 last_tick = Instant::now();
                 frame_scheduler.mark_dirty();
             }
@@ -3283,6 +3398,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             session_usage.as_ref().map(|s| &s.req_tx),
             &mut session_usage_sync,
             &mut session_usage_sync_started,
+            crate::settings::usage_auto_sync_enabled(),
         );
         // Lazily aggregate usage/pricing (deferred off the startup full-load)
         // once the user is actually on a Usage route.
@@ -3305,6 +3421,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         if last_tick.elapsed() >= tick_rate {
             app.on_tick();
+            app.note_session_sync_round(session_usage_sync_is_active());
             if app.should_poll_proxy_activity() {
                 queue_proxy_snapshot_refresh(
                     &mut proxy_snapshot_refresh,
@@ -3316,6 +3433,16 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                 &mut app,
                 &mut data,
                 quota.as_ref().map(|s| &s.req_tx),
+            );
+            queue_usage_session_sync_if_due(
+                &mut app,
+                session_usage.as_ref().map(|s| &s.req_tx),
+                &mut session_usage_sync,
+            );
+            queue_usage_proxy_refresh_if_due(
+                &mut app,
+                &mut data_cache,
+                usage_pricing.as_ref().map(|s| &s.req_tx),
             );
             last_tick = Instant::now();
             frame_scheduler.mark_dirty();

@@ -34,18 +34,11 @@ pub(super) fn render_usage(
     let keys = crate::cli::tui::keymap::usage::key_bar_items(app, data);
     render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
-    let refresh_status = if current_usage_is_loading(app, data) {
-        None
-    } else {
-        usage_refresh_status(app)
-    };
-    render_usage_summary_bar(
+    render_summary_bar_spans(
         frame,
         chunks[1],
         theme,
-        usage_summary_line(app, data),
-        refresh_status,
-        usage_sync_progress_status(),
+        usage_summary_spans(app, data, theme, chunks[1].width.saturating_sub(4)),
     );
     render_usage_metrics(frame, app, data, chunks[2], theme);
 
@@ -94,96 +87,13 @@ pub(super) fn render_usage_logs(
     );
 
     render_usage_detail_tabs(frame, app, chunks[1], theme);
-    render_usage_summary_bar(
+    render_summary_bar_spans(
         frame,
         chunks[2],
         theme,
-        usage_detail_summary_line(app, data),
-        usage_refresh_status(app),
-        usage_sync_progress_status(),
+        usage_detail_summary_spans(app, data, theme, chunks[2].width.saturating_sub(4)),
     );
     render_usage_detail_table(frame, app, data, chunks[3], theme);
-}
-
-fn render_usage_summary_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    theme: &super::theme::Theme,
-    summary: String,
-    refresh_status: Option<String>,
-    sync_status: Option<String>,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(theme.dim));
-    frame.render_widget(block.clone(), area);
-
-    let inner = inset_horizontal(block.inner(area), 2, 2);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let summary_style = Style::default().fg(theme.dim);
-    if refresh_status.is_none() && sync_status.is_none() {
-        frame.render_widget(
-            Paragraph::new(Line::raw(truncate_to_display_width(&summary, inner.width)))
-                .style(summary_style),
-            inner,
-        );
-        return;
-    }
-
-    const REFRESH_GAP: &str = "  ";
-    const STATUS_SEPARATOR: &str = " · ";
-    let refresh_status =
-        refresh_status.map(|status| truncate_to_display_width(&status, inner.width));
-    let sync_status = sync_status.map(|status| truncate_to_display_width(&status, inner.width));
-    let status_width = refresh_status
-        .as_deref()
-        .map_or(0, |status| UnicodeWidthStr::width(status) as u16)
-        .saturating_add(
-            sync_status
-                .as_deref()
-                .map_or(0, |status| UnicodeWidthStr::width(status) as u16),
-        )
-        .saturating_add(
-            refresh_status
-                .as_ref()
-                .map_or(0, |_| UnicodeWidthStr::width(REFRESH_GAP) as u16),
-        )
-        .saturating_add(
-            sync_status
-                .as_ref()
-                .map_or(0, |_| UnicodeWidthStr::width(STATUS_SEPARATOR) as u16),
-        );
-    let summary_width = inner.width.saturating_sub(status_width);
-    let summary = truncate_to_display_width(&summary, summary_width);
-    let refresh_style = if theme.no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    };
-
-    let mut spans = Vec::with_capacity(5);
-    if !summary.is_empty() {
-        spans.push(Span::styled(summary, summary_style));
-    }
-    if let Some(refresh_status) = refresh_status.filter(|status| !status.is_empty()) {
-        if !spans.is_empty() {
-            spans.push(Span::styled(REFRESH_GAP, summary_style));
-        }
-        spans.push(Span::styled(refresh_status, refresh_style));
-    }
-    if let Some(sync_status) = sync_status.filter(|status| !status.is_empty()) {
-        if !spans.is_empty() {
-            spans.push(Span::styled(STATUS_SEPARATOR, summary_style));
-        }
-        spans.push(Span::styled(sync_status, summary_style));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 pub(super) fn render_usage_log_detail(
@@ -1480,20 +1390,22 @@ fn detail_line(
     ])
 }
 
-/// 后台会话日志导入进行时的进度状态（如 "正在导入本地用量 1234/18704"）。
-/// 空闲时返回 None。数据来自 sync_progress 全局原子量——CLI 构建没有逐行
-/// 通知通道，渲染时直接读取即可。
-fn usage_sync_progress_status() -> Option<String> {
-    match crate::services::session_usage::sync_progress::snapshot() {
-        Some((done, total)) if total > 0 => {
-            if i18n::is_chinese() {
-                Some(format!("正在导入本地用量 {done}/{total}"))
-            } else {
-                Some(format!("importing local usage {done}/{total}"))
-            }
-        }
-        _ => None,
-    }
+/// The summary bar ends with one refresh indicator, shared by the page's own
+/// refresh and the background import — see [`usage_refresh_active`].
+fn usage_summary_spans(
+    app: &App,
+    data: &UiData,
+    theme: &super::theme::Theme,
+    available_width: u16,
+) -> Vec<Span<'static>> {
+    summary_with_refresh_indicator(
+        usage_summary_line(app, data),
+        usage_refresh_active(app),
+        app.tick,
+        theme,
+        sync_escalation(app),
+        available_width,
+    )
 }
 
 fn usage_summary_line(app: &App, data: &UiData) -> String {
@@ -1578,25 +1490,33 @@ fn usage_detail_summary_line(app: &App, data: &UiData) -> String {
     }
 }
 
-fn usage_refresh_status(app: &App) -> Option<String> {
-    if app.usage.manual_session_refreshing()
+fn usage_detail_summary_spans(
+    app: &App,
+    data: &UiData,
+    theme: &super::theme::Theme,
+    available_width: u16,
+) -> Vec<Span<'static>> {
+    summary_with_refresh_indicator(
+        usage_detail_summary_line(app, data),
+        usage_refresh_active(app),
+        app.tick,
+        theme,
+        sync_escalation(app),
+        available_width,
+    )
+}
+
+/// The page's own refresh and the background session import are two pipelines
+/// that can be live at the same time, and they used to claim two slots on the
+/// same line. They share one indicator now: it shows while *either* is
+/// running, keeps the generic label, and takes the escalation percentage from
+/// whichever import round earned one.
+fn usage_refresh_active(app: &App) -> bool {
+    let page_refreshing = app.usage.manual_session_refreshing()
         || app.usage.is_loading_for(&app.app_type, app.usage.range)
         || app.usage.log_page_refresh_after_aggregate_requested()
-        || app.usage.log_pager.has_refresh_pending()
-    {
-        let spinner = match app.tick % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        };
-        Some(format!(
-            "{spinner} {}",
-            usage_text("Refreshing", "正在刷新")
-        ))
-    } else {
-        None
-    }
+        || app.usage.log_pager.has_refresh_pending();
+    page_refreshing || session_usage_sync_active()
 }
 
 fn usage_text(en: &'static str, zh: &'static str) -> &'static str {
@@ -1677,7 +1597,7 @@ fn usage_sparkline(values: &[f64]) -> String {
         .join("")
 }
 
-fn format_money(value: f64) -> String {
+pub(super) fn format_money(value: f64) -> String {
     if value >= 100.0 {
         format!("${value:.0}")
     } else if value >= 10.0 {
@@ -1695,7 +1615,7 @@ fn format_money_per_request(total_cost: f64, total_requests: u64) -> String {
     }
 }
 
-fn format_token_compact(total: u64) -> String {
+pub(super) fn format_token_compact(total: u64) -> String {
     if total < 1_000 {
         return total.to_string();
     }

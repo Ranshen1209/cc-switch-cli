@@ -1280,6 +1280,10 @@ mod tests {
         assert_eq!(app.proxy_output_activity_samples, vec![0]);
         assert_eq!(app.proxy_activity_last_input_tokens, Some(3));
         assert_eq!(app.proxy_activity_last_output_tokens, Some(8));
+        assert!(
+            app.usage_proxy_activity_dirty,
+            "a counter rollback conservatively refreshes persisted proxy usage"
+        );
     }
 
     #[test]

@@ -35,35 +35,19 @@ pub(super) fn render_sessions(
         ("←→", texts::tui_key_pane()),
     ];
     keys.extend(crate::cli::tui::keymap::sessions::key_bar_items(app, data));
+    // One shared, labelled indicator for the whole line. The scan reports
+    // liveness only — no file counts — so no number escalates.
+    let scanning = app.sessions.loading || app.sessions.deep_search_active.is_some();
     let status = if app.sessions.loading && !app.sessions.loaded_once {
         texts::tui_sessions_loading_summary().to_string()
     } else if app.sessions.deep_search_active.is_some() {
-        // Show spinner animation while deep search is running
-        let spinner = match app.tick % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        };
         match app.sessions.deep_search_query.as_deref() {
-            Some(query) => format!("{spinner} {}", texts::tui_sessions_searching(query)),
-            None => format!("{spinner} {}", texts::tui_sessions_project_filtering()),
+            Some(query) => texts::tui_sessions_searching(query),
+            None => texts::tui_sessions_project_filtering().to_string(),
         }
-    } else if app.sessions.loading {
-        // Stale-while-revalidate: a cached snapshot is on screen (loaded_once) and
-        // interactive, but the background revalidating scan is still running. Keep
-        // the count visible and prefix a spinner so the header reads as refreshing.
-        let spinner = match app.tick % 4 {
-            0 => "⠋",
-            1 => "⠙",
-            2 => "⠹",
-            _ => "⠸",
-        };
-        format!(
-            "{spinner} {}",
-            texts::tui_sessions_summary(app.sessions.logical_total_rows(), visible.len())
-        )
     } else {
+        // Stale-while-revalidate keeps the count on screen while the background
+        // rescan runs; the trailing spinner is what says "still working".
         texts::tui_sessions_summary(app.sessions.logical_total_rows(), visible.len())
     };
     let provider = crate::cli::tui::runtime_actions::app_display_name(&app.app_type);
@@ -78,7 +62,13 @@ pub(super) fn render_sessions(
             display_path, ..
         } => display_path.as_str(),
     };
-    let summary_width = area.width.saturating_sub(8).max(1);
+    let summary_bar_width = area.width.saturating_sub(8).max(1);
+    let indicator_width = if scanning {
+        inline_refresh_indicator_width(app.tick, theme, None)
+    } else {
+        0
+    };
+    let summary_width = summary_bar_width.saturating_sub(indicator_width).max(1);
     let fixed = texts::tui_sessions_scope_summary(provider, "", &status);
     let project_width = summary_width
         .saturating_sub(UnicodeWidthStr::width(fixed.as_str()) as u16)
@@ -89,14 +79,16 @@ pub(super) fn render_sessions(
         &texts::tui_sessions_scope_summary(provider, &project, &status),
         summary_width,
     );
-    let frame_body = render_page_frame(
+    let summary_spans =
+        summary_with_refresh_indicator(summary, scanning, app.tick, theme, None, summary_bar_width);
+    let frame_body = render_page_frame_spans(
         frame,
         area,
         theme,
         app,
         texts::tui_sessions_title(),
         &keys,
-        Some(summary),
+        Some(summary_spans),
     );
 
     let body = Layout::default()
