@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::app_config::AppType;
+
 pub const CLAUDE_AUTH_TOKEN_ENV_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
 pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
 
@@ -169,6 +171,59 @@ impl Provider {
             .as_ref()
             .map(|meta| meta.codex_fast_mode_enabled())
             .unwrap_or(false)
+    }
+
+    /// Return the official subscription tool when this provider matches the
+    /// desktop application's Claude/Codex/Gemini OAuth-provider rules.
+    pub(crate) fn official_subscription_tool(&self, app_type: &AppType) -> Option<&'static str> {
+        let tool = match app_type {
+            AppType::Claude => "claude",
+            AppType::Codex => "codex",
+            AppType::Gemini => "gemini",
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => return None,
+        };
+
+        if self.category.as_deref() == Some("official") {
+            return Some(tool);
+        }
+
+        let is_official = match app_type {
+            AppType::Claude => self
+                .settings_config
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty()),
+            AppType::Codex => {
+                let api_key_missing = self
+                    .settings_config
+                    .pointer("/auth/OPENAI_API_KEY")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty());
+                let bearer_token_missing = self
+                    .settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
+                    .is_none_or(|value| value.trim().is_empty());
+                api_key_missing && bearer_token_missing
+            }
+            AppType::Gemini => {
+                let api_key_missing = self
+                    .settings_config
+                    .pointer("/env/GEMINI_API_KEY")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty());
+                let base_url_missing = self
+                    .settings_config
+                    .pointer("/env/GOOGLE_GEMINI_BASE_URL")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty());
+                api_key_missing && base_url_missing
+            }
+            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        };
+
+        is_official.then_some(tool)
     }
 }
 
@@ -1030,6 +1085,85 @@ mod issue_71_tests {
         assert_eq!(
             meta.get("githubAccountId").and_then(|value| value.as_str()),
             Some("gh-123")
+        );
+    }
+
+    #[test]
+    fn official_subscription_tool_matches_desktop_provider_rules() {
+        let claude_oauth =
+            Provider::with_id("claude".into(), "Claude".into(), json!({"env": {}}), None);
+        assert_eq!(
+            claude_oauth.official_subscription_tool(&AppType::Claude),
+            Some("claude")
+        );
+
+        let claude_custom = Provider::with_id(
+            "claude-custom".into(),
+            "Claude Custom".into(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+            None,
+        );
+        assert_eq!(
+            claude_custom.official_subscription_tool(&AppType::Claude),
+            None
+        );
+
+        let codex_oauth = Provider::with_id(
+            "codex".into(),
+            "Codex".into(),
+            json!({
+                "auth": {},
+                "config": "base_url = \"https://api.example.com/v1\""
+            }),
+            None,
+        );
+        assert_eq!(
+            codex_oauth.official_subscription_tool(&AppType::Codex),
+            Some("codex")
+        );
+
+        let codex_api_key = Provider::with_id(
+            "codex-key".into(),
+            "Codex Key".into(),
+            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
+            None,
+        );
+        assert_eq!(
+            codex_api_key.official_subscription_tool(&AppType::Codex),
+            None
+        );
+
+        let codex_bearer = Provider::with_id(
+            "codex-bearer".into(),
+            "Codex Bearer".into(),
+            json!({"config": "experimental_bearer_token = \"sk-custom\""}),
+            None,
+        );
+        assert_eq!(
+            codex_bearer.official_subscription_tool(&AppType::Codex),
+            None
+        );
+
+        let gemini_oauth =
+            Provider::with_id("gemini".into(), "Gemini".into(), json!({"env": {}}), None);
+        assert_eq!(
+            gemini_oauth.official_subscription_tool(&AppType::Gemini),
+            Some("gemini")
+        );
+
+        let gemini_custom = Provider::with_id(
+            "gemini-custom".into(),
+            "Gemini Custom".into(),
+            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
+            None,
+        );
+        assert_eq!(
+            gemini_custom.official_subscription_tool(&AppType::Gemini),
+            None
+        );
+        assert_eq!(
+            gemini_oauth.official_subscription_tool(&AppType::OpenCode),
+            None
         );
     }
 }

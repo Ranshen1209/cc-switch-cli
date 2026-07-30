@@ -66,7 +66,7 @@ pub(super) const TUI_TICK_RATE: Duration = Duration::from_millis(200);
 /// Maximum steady-state redraw rate. Input can still be reduced more often,
 /// but terminal writes are coalesced to one frame per interval.
 pub(super) const TUI_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
-const QUOTA_REFRESH_INTERVAL_TICKS: u64 = 5 * 60 * 1000 / 200;
+const TUI_TICKS_PER_MINUTE: u64 = 60 * 1000 / 200;
 
 /// Returns how long a dirty frame must wait before it may be drawn.
 ///
@@ -293,9 +293,14 @@ fn queue_current_quota_refresh_if_due(
     let target_key = target.cache_key();
     let target_changed = app.quota_auto_target_key.as_deref() != Some(target_key.as_str());
     let target_missing_state = data.quota.state_for(&target.provider_id).is_none();
-    let due = app
-        .quota_last_auto_tick
-        .is_none_or(|last_tick| app.tick.saturating_sub(last_tick) >= QUOTA_REFRESH_INTERVAL_TICKS);
+    let refresh_interval_ticks = target
+        .auto_query_interval_minutes
+        .checked_mul(TUI_TICKS_PER_MINUTE)
+        .filter(|ticks| *ticks > 0);
+    let due = refresh_interval_ticks.is_some_and(|ticks| {
+        app.quota_last_auto_tick
+            .is_none_or(|last_tick| app.tick.saturating_sub(last_tick) >= ticks)
+    });
 
     if target_changed || target_missing_state || due {
         app.quota_auto_target_key = Some(target_key);

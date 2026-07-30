@@ -86,6 +86,7 @@ impl App {
             let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                 return Action::None;
             };
+            provider.refresh_usage_query_provider_kind();
             provider.field_errors.clear();
             provider.usage_query_field_errors.clear();
             if let Some(message) = provider.usage_query_script_validation_error() {
@@ -1783,6 +1784,7 @@ impl App {
             );
         }
         if changed && usage_query_provider_credential_field(selected) {
+            provider.refresh_usage_query_provider_kind();
             provider.refresh_usage_query_custom_variable_comment();
         }
         // The fallback model lives outside the model-mapping sub-page, so editing it

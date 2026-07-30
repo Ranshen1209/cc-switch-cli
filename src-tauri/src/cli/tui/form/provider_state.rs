@@ -222,6 +222,7 @@ impl ProviderAddFormState {
             openclaw_user_agent: false,
             openclaw_models: Vec::new(),
             usage_query_enabled: false,
+            usage_query_official_subscription: false,
             usage_query_template: UsageQueryTemplate::General,
             usage_query_api_key: TextInput::new(""),
             usage_query_base_url: TextInput::new(""),
@@ -554,6 +555,9 @@ impl ProviderAddFormState {
                     UsageQueryField::AutoInterval,
                 ]);
             }
+            UsageQueryTemplate::OfficialSubscription => {
+                fields.extend([UsageQueryField::Timeout, UsageQueryField::AutoInterval]);
+            }
         }
 
         fields
@@ -573,6 +577,7 @@ impl ProviderAddFormState {
                 UsageQueryTemplate::GitHubCopilot
                     | UsageQueryTemplate::TokenPlan
                     | UsageQueryTemplate::Balance
+                    | UsageQueryTemplate::OfficialSubscription
             )
         {
             return None;
@@ -1122,6 +1127,7 @@ impl ProviderAddFormState {
     }
 
     pub fn open_usage_query_page(&mut self) {
+        self.refresh_usage_query_provider_kind();
         self.refresh_default_usage_query_template();
         self.page = ProviderFormPage::UsageQuery;
         self.focus = FormFocus::Fields;
@@ -1364,11 +1370,29 @@ impl ProviderAddFormState {
     }
 
     pub fn refresh_default_usage_query_template(&mut self) {
+        if self.usage_query_official_subscription {
+            if self.usage_query_template != UsageQueryTemplate::OfficialSubscription {
+                self.set_usage_query_template(UsageQueryTemplate::OfficialSubscription);
+            }
+            return;
+        }
+
         if self.usage_query_touched || self.has_usage_script_meta() {
             return;
         }
 
-        let template = match self
+        let template = self.default_non_official_usage_query_template();
+
+        self.set_usage_query_template(template);
+        if let Some(provider) =
+            detect_coding_plan_provider_for_usage_query(&self.current_provider_base_url())
+        {
+            self.usage_query_coding_plan_provider.set(provider);
+        }
+    }
+
+    fn default_non_official_usage_query_template(&self) -> UsageQueryTemplate {
+        match self
             .extra
             .get("meta")
             .and_then(|meta| meta.get("providerType"))
@@ -1379,13 +1403,6 @@ impl ProviderAddFormState {
                 UsageQueryTemplate::Balance
             }
             _ => UsageQueryTemplate::General,
-        };
-
-        self.set_usage_query_template(template);
-        if let Some(provider) =
-            detect_coding_plan_provider_for_usage_query(&self.current_provider_base_url())
-        {
-            self.usage_query_coding_plan_provider.set(provider);
         }
     }
 
@@ -1587,6 +1604,10 @@ impl ProviderAddFormState {
     }
 
     pub fn available_usage_query_templates(&self) -> Vec<UsageQueryTemplate> {
+        if self.usage_query_official_subscription {
+            return vec![UsageQueryTemplate::OfficialSubscription];
+        }
+
         vec![
             UsageQueryTemplate::Custom,
             UsageQueryTemplate::General,
@@ -1616,6 +1637,13 @@ impl ProviderAddFormState {
                 self.usage_query_api_key.set("");
             }
             UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::Balance => {
+                self.usage_query_code.clear();
+                self.usage_query_api_key.set("");
+                self.usage_query_base_url.set("");
+                self.usage_query_access_token.set("");
+                self.usage_query_user_id.set("");
+            }
+            UsageQueryTemplate::OfficialSubscription => {
                 self.usage_query_code.clear();
                 self.usage_query_api_key.set("");
                 self.usage_query_base_url.set("");
@@ -1698,7 +1726,11 @@ impl ProviderAddFormState {
     }
 
     pub fn usage_query_template_value(&self) -> &'static str {
-        self.usage_query_template.as_str()
+        if self.usage_query_template == UsageQueryTemplate::OfficialSubscription {
+            self.usage_query_template.label()
+        } else {
+            self.usage_query_template.as_str()
+        }
     }
 
     pub fn usage_query_template_label(&self) -> &'static str {
@@ -1709,8 +1741,53 @@ impl ProviderAddFormState {
         self.usage_query_enabled
             && !matches!(
                 self.usage_query_template,
-                UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::TokenPlan
+                UsageQueryTemplate::GitHubCopilot
+                    | UsageQueryTemplate::TokenPlan
+                    | UsageQueryTemplate::OfficialSubscription
             )
+    }
+
+    pub fn refresh_usage_query_provider_kind(&mut self) {
+        let was_official = self.usage_query_official_subscription;
+        let is_official = serde_json::from_value::<Provider>(self.to_provider_json_value())
+            .ok()
+            .and_then(|provider| provider.official_subscription_tool(&self.app_type))
+            .is_some();
+        self.usage_query_official_subscription = is_official;
+
+        if was_official == is_official && !self.usage_query_touched {
+            return;
+        }
+
+        let next_template = if is_official {
+            Some(UsageQueryTemplate::OfficialSubscription)
+        } else if self.usage_query_template == UsageQueryTemplate::OfficialSubscription {
+            Some(self.default_non_official_usage_query_template())
+        } else {
+            None
+        };
+        let entering_official = !was_official && is_official;
+        let should_persist = self.usage_query_touched || self.has_usage_script_meta();
+        let template_changed = if let Some(template) =
+            next_template.filter(|template| *template != self.usage_query_template)
+        {
+            self.set_usage_query_template(template);
+            true
+        } else {
+            false
+        };
+        if entering_official {
+            // Matching the desktop modal, crossing into the native OAuth
+            // template is a fresh opt-in rather than inheriting an enabled
+            // custom query.
+            self.usage_query_enabled = false;
+            self.usage_query_timeout.set("10");
+            self.usage_query_auto_interval.set("5");
+            self.usage_query_coding_plan_provider.set("");
+        }
+        if should_persist && (template_changed || entering_official) {
+            self.touch_usage_query();
+        }
     }
 
     fn usage_query_custom_preset_with_variables(&self) -> String {
@@ -2495,17 +2572,6 @@ pub(crate) fn detect_balance_provider_for_usage_query(base_url: &str) -> bool {
 }
 
 impl UsageQueryTemplate {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Custom => "custom",
-            Self::General => "general",
-            Self::NewApi => "newapi",
-            Self::GitHubCopilot => "github_copilot",
-            Self::TokenPlan => "token_plan",
-            Self::Balance => "balance",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Custom => {
@@ -2532,18 +2598,13 @@ impl UsageQueryTemplate {
                     "Official"
                 }
             }
-        }
-    }
-
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "custom" => Some(Self::Custom),
-            "general" => Some(Self::General),
-            "newapi" => Some(Self::NewApi),
-            "github_copilot" => Some(Self::GitHubCopilot),
-            "token_plan" => Some(Self::TokenPlan),
-            "balance" => Some(Self::Balance),
-            _ => None,
+            Self::OfficialSubscription => {
+                if crate::cli::i18n::is_chinese() {
+                    "官方订阅"
+                } else {
+                    "Official Subscription"
+                }
+            }
         }
     }
 }

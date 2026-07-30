@@ -5688,6 +5688,7 @@ fn provider_add_form_usage_query_defaults_match_upstream() {
 #[test]
 fn provider_add_form_usage_query_balance_default_uses_app_specific_base_url() {
     let mut codex = ProviderAddFormState::new(AppType::Codex);
+    codex.codex_api_key.set("sk-test");
     codex.codex_base_url.set("https://openrouter.ai/api/v1");
     codex.open_usage_query_page();
     assert_eq!(codex.usage_query_template, UsageQueryTemplate::Balance);
@@ -5759,6 +5760,163 @@ fn provider_add_form_usage_query_template_fields_match_upstream_visibility() {
     assert!(!form
         .available_usage_query_templates()
         .contains(&UsageQueryTemplate::TokenPlan));
+}
+
+#[test]
+fn provider_add_form_official_usage_query_exposes_only_subscription_template() {
+    for (app_type, settings_config) in [
+        (AppType::Claude, json!({"env": {}})),
+        (AppType::Codex, json!({"auth": {}})),
+        (AppType::Gemini, json!({"env": {}})),
+    ] {
+        let mut provider =
+            Provider::with_id("official".into(), "Official".into(), settings_config, None);
+        provider.category = Some("official".to_string());
+
+        let mut form = ProviderAddFormState::from_provider(app_type, &provider);
+        form.open_usage_query_page();
+
+        assert_eq!(
+            form.available_usage_query_templates(),
+            vec![UsageQueryTemplate::OfficialSubscription]
+        );
+        assert_eq!(
+            form.usage_query_template,
+            UsageQueryTemplate::OfficialSubscription
+        );
+        assert_eq!(form.usage_query_fields(), vec![UsageQueryField::Enabled]);
+
+        form.toggle_usage_query_enabled();
+        assert_eq!(
+            form.usage_query_fields(),
+            vec![
+                UsageQueryField::Enabled,
+                UsageQueryField::Template,
+                UsageQueryField::Timeout,
+                UsageQueryField::AutoInterval,
+            ]
+        );
+        assert!(!form.usage_query_extractor_available());
+
+        let saved = form.to_provider_json_value();
+        let script = &saved["meta"]["usage_script"];
+        assert_eq!(script["enabled"], true);
+        assert_eq!(script["templateType"], "official_subscription");
+        assert_eq!(script["code"], "");
+        assert!(script.get("apiKey").is_none());
+        assert!(script.get("baseUrl").is_none());
+    }
+}
+
+#[test]
+fn provider_edit_form_preserves_official_subscription_when_usage_query_is_untouched() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "official",
+        "name": "Claude Official",
+        "category": "official",
+        "settingsConfig": {"env": {}},
+        "meta": {
+            "usage_script": {
+                "enabled": true,
+                "language": "javascript",
+                "code": "",
+                "timeout": 10,
+                "templateType": "official_subscription",
+                "autoQueryInterval": 5
+            }
+        }
+    }))
+    .expect("provider json");
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    form.notes.set("unrelated edit");
+    let saved = form.to_provider_json_value();
+
+    assert_eq!(
+        saved["meta"]["usage_script"]["templateType"],
+        "official_subscription"
+    );
+    assert_eq!(saved["meta"]["usage_script"]["enabled"], true);
+}
+
+#[test]
+fn provider_form_reconciles_usage_template_when_provider_kind_changes() {
+    let mut form = ProviderAddFormState::new(AppType::Claude);
+    form.open_usage_query_page();
+    form.toggle_usage_query_enabled();
+    assert!(form.usage_query_official_subscription);
+    assert_eq!(
+        form.usage_query_template,
+        UsageQueryTemplate::OfficialSubscription
+    );
+
+    form.close_usage_query_page();
+    form.claude_base_url.set("https://relay.example.test");
+    form.refresh_usage_query_provider_kind();
+    assert!(!form.usage_query_official_subscription);
+    assert_eq!(form.usage_query_template, UsageQueryTemplate::General);
+    assert!(form.usage_query_code.contains("{{baseUrl}}/user/balance"));
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["usage_script"]["templateType"],
+        "general"
+    );
+
+    form.claude_base_url.set("");
+    form.refresh_usage_query_provider_kind();
+    assert!(form.usage_query_official_subscription);
+    assert_eq!(
+        form.usage_query_template,
+        UsageQueryTemplate::OfficialSubscription
+    );
+    assert!(!form.usage_query_enabled);
+    assert_eq!(form.usage_query_timeout.value, "10");
+    assert_eq!(form.usage_query_auto_interval.value, "5");
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["usage_script"]["templateType"],
+        "official_subscription"
+    );
+    assert_eq!(
+        form.to_provider_json_value()["meta"]["usage_script"]["enabled"],
+        false
+    );
+
+    let stale_custom: Provider = serde_json::from_value(json!({
+        "id": "stale-custom",
+        "name": "Stale Custom",
+        "settingsConfig": {
+            "env": {"ANTHROPIC_BASE_URL": "https://relay.example.test"}
+        },
+        "meta": {
+            "usage_script": {
+                "enabled": true,
+                "language": "javascript",
+                "code": "",
+                "timeout": 30,
+                "templateType": "official_subscription",
+                "autoQueryInterval": 60
+            }
+        }
+    }))
+    .expect("stale custom provider");
+    let mut stale_form = ProviderAddFormState::from_provider(AppType::Claude, &stale_custom);
+    assert!(!stale_form.usage_query_official_subscription);
+    assert!(stale_form.usage_query_enabled);
+    assert_eq!(
+        stale_form.usage_query_template,
+        UsageQueryTemplate::OfficialSubscription
+    );
+
+    stale_form.claude_base_url.set("");
+    stale_form.refresh_usage_query_provider_kind();
+
+    assert!(stale_form.usage_query_official_subscription);
+    assert!(!stale_form.usage_query_enabled);
+    assert_eq!(stale_form.usage_query_timeout.value, "10");
+    assert_eq!(stale_form.usage_query_auto_interval.value, "5");
+    assert_eq!(
+        stale_form.to_provider_json_value()["meta"]["usage_script"]["enabled"],
+        false
+    );
 }
 
 #[test]

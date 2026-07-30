@@ -1185,6 +1185,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_usage_query_official_subscription_template() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "usage-query",
+            "set",
+            "official",
+            "--enabled",
+            "--template",
+            "official-subscription",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::UsageQuery(
+                super::commands::provider_usage_query::ProviderUsageQueryCommand::Set(command),
+            ))) => {
+                assert_eq!(
+                    command.template,
+                    Some(
+                        super::commands::provider_usage_query::UsageQueryTemplate::OfficialSubscription
+                    )
+                );
+            }
+            _ => panic!("expected official subscription usage-query command"),
+        }
+    }
+
+    #[test]
     fn parses_provider_usage_query_clear_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "provider", "usage-query", "clear", "demo"]);
 

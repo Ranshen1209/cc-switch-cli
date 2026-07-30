@@ -403,6 +403,11 @@ mod tests {
         }
     }
 
+    fn mark_claude_usage_query_provider_non_official(form: &mut ProviderAddFormState) {
+        assert_eq!(form.app_type, AppType::Claude);
+        form.claude_base_url.set("https://relay.example.test");
+    }
+
     fn help_text(app: &App) -> String {
         let Overlay::Help(help) = &app.overlay else {
             panic!("expected Help overlay, got {:?}", app.overlay);
@@ -2765,6 +2770,22 @@ mod tests {
             None,
         );
         provider.category = Some("official".to_string());
+        provider.meta = Some(crate::provider::ProviderMeta {
+            usage_script: Some(crate::provider::UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..Default::default()
+        });
         data.providers.rows.push(super::super::data::ProviderRow {
             id: "official".to_string(),
             provider,
@@ -15428,6 +15449,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
         }
@@ -15456,6 +15478,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.set_usage_query_template(UsageQueryTemplate::Custom);
@@ -15495,6 +15518,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::Content;
@@ -15529,6 +15553,7 @@ mod tests {
             AppType::Claude,
         )));
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
         }
@@ -15557,6 +15582,7 @@ mod tests {
     fn usage_query_template_picker_space_is_noop() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = ProviderAddFormState::new(AppType::Claude);
+        mark_claude_usage_query_provider_non_official(&mut form);
         form.open_usage_query_page();
         form.toggle_usage_query_enabled();
         app.form = Some(FormState::ProviderAdd(form));
@@ -15574,6 +15600,7 @@ mod tests {
     fn usage_query_template_picker_enter_applies_selection() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = ProviderAddFormState::new(AppType::Claude);
+        mark_claude_usage_query_provider_non_official(&mut form);
         form.open_usage_query_page();
         form.toggle_usage_query_enabled();
         app.form = Some(FormState::ProviderAdd(form));
@@ -15937,6 +15964,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
         } else {
@@ -16013,6 +16041,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::JsonPreview;
@@ -16041,6 +16070,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::Content;
@@ -16075,6 +16105,7 @@ mod tests {
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
             form.name.set("Provider One");
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
         } else {
             panic!("expected ProviderAdd form");
@@ -16202,6 +16233,7 @@ mod tests {
         let Some(FormState::ProviderAdd(form)) = app.form.as_mut() else {
             panic!("expected ProviderAdd form");
         };
+        mark_claude_usage_query_provider_non_official(form);
         form.open_usage_query_page();
 
         select_usage_query_field(&mut app, UsageQueryField::Enabled);
@@ -16234,6 +16266,7 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &data);
 
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            mark_claude_usage_query_provider_non_official(form);
             form.open_usage_query_page();
             form.toggle_usage_query_enabled();
             form.focus = FormFocus::JsonPreview;

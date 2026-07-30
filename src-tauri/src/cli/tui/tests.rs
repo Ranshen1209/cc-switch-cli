@@ -3839,6 +3839,22 @@ fn official_claude_providers() -> data::ProvidersSnapshot {
         None,
     );
     provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        usage_script: Some(crate::provider::UsageScript {
+            enabled: true,
+            language: "javascript".to_string(),
+            code: String::new(),
+            timeout: Some(10),
+            api_key: None,
+            base_url: None,
+            access_token: None,
+            user_id: None,
+            template_type: Some("official_subscription".to_string()),
+            auto_query_interval: Some(5),
+            coding_plan_provider: None,
+        }),
+        ..Default::default()
+    });
     data::ProvidersSnapshot {
         current_id: "official".to_string(),
         rows: vec![data::ProviderRow {
@@ -4304,6 +4320,48 @@ fn managed_proxy_result_invalidates_quota_generation_and_refreshes_same_provider
         .expect("fresh quota request remains active");
     assert!(state.loading);
     assert!(state.quota.is_none());
+}
+
+#[test]
+fn quota_auto_refresh_respects_usage_query_interval_and_zero_disables_repoll() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData {
+        providers: official_claude_providers(),
+        ..UiData::default()
+    };
+    let script = data.providers.rows[0]
+        .provider
+        .meta
+        .as_mut()
+        .and_then(|meta| meta.usage_script.as_mut())
+        .expect("official usage script");
+    script.auto_query_interval = Some(2);
+    let (quota_tx, quota_rx) = mpsc::channel();
+
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    quota_rx.recv().expect("initial quota refresh");
+
+    app.tick = 2 * TUI_TICKS_PER_MINUTE - 1;
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    assert!(quota_rx.try_recv().is_err());
+
+    app.tick = 2 * TUI_TICKS_PER_MINUTE;
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    quota_rx.recv().expect("provider interval quota refresh");
+
+    data.providers.rows[0]
+        .provider
+        .meta
+        .as_mut()
+        .and_then(|meta| meta.usage_script.as_mut())
+        .expect("official usage script")
+        .auto_query_interval = Some(0);
+    app.tick = 100 * TUI_TICKS_PER_MINUTE;
+    queue_current_quota_refresh_if_due(&mut app, &mut data, Some(&quota_tx));
+    assert!(
+        quota_rx.try_recv().is_err(),
+        "zero interval must disable periodic quota refresh"
+    );
 }
 
 #[test]

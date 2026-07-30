@@ -2175,6 +2175,7 @@ mod tests {
             kind: QuotaTargetKind::SubscriptionTool {
                 tool: "claude".to_string(),
             },
+            auto_query_interval_minutes: 5,
         }
     }
 

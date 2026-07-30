@@ -51,6 +51,7 @@ pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE}
 pub(crate) use crate::openclaw_config::{
     OPENCLAW_API_PROTOCOLS, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
+pub(crate) use crate::usage_script::UsageQueryTemplate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiAuthType {
@@ -339,16 +340,6 @@ pub enum HermesModelField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsageQueryTemplate {
-    Custom,
-    General,
-    NewApi,
-    GitHubCopilot,
-    TokenPlan,
-    Balance,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageQueryField {
     Enabled,
     Template,
@@ -589,6 +580,7 @@ pub struct ProviderAddFormState {
     pub openclaw_user_agent: bool,
     pub openclaw_models: Vec<Value>,
     pub usage_query_enabled: bool,
+    pub usage_query_official_subscription: bool,
     pub usage_query_template: UsageQueryTemplate,
     pub usage_query_api_key: TextInput,
     pub usage_query_base_url: TextInput,

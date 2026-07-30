@@ -947,13 +947,20 @@ fn usage_query_field_help(template: UsageQueryTemplate, field: UsageQueryField) 
                 "When enabled, cc-switch queries provider balance or quota using the selected template. When disabled, no automatic query runs.",
             ),
         ),
-        UsageQueryField::Template => HelpContent::new(
-            texts::tui_usage_query_template(),
-            help_lines(
-                "TUI 只提供自定义、通用、NewAPI、余额四种模板。\n计费计划模板不在 TUI 中显示；模板会决定哪些字段可见，以及提取器代码是否可编辑。",
-                "The TUI exposes only custom, general, newapi, and balance.\nToken Plan is not shown in the TUI. The template controls visible fields and whether extractor code can be edited.",
-            ),
-        ),
+        UsageQueryField::Template => {
+            let body = if matches!(template, UsageQueryTemplate::OfficialSubscription) {
+                help_lines(
+                    "官方 Claude、Codex 和 Gemini 供应商只提供官方订阅模板。该模板读取本机 CLI 的 OAuth 凭据，不需要脚本或额外凭据。",
+                    "Official Claude, Codex, and Gemini providers expose only the official subscription template. It uses local CLI OAuth credentials and needs no script or extra credentials.",
+                )
+            } else {
+                help_lines(
+                    "TUI 只提供自定义、通用、NewAPI、余额四种模板。\n计费计划模板不在 TUI 中显示；模板会决定哪些字段可见，以及提取器代码是否可编辑。",
+                    "The TUI exposes only custom, general, newapi, and balance.\nToken Plan is not shown in the TUI. The template controls visible fields and whether extractor code can be edited.",
+                )
+            };
+            HelpContent::new(texts::tui_usage_query_template(), body)
+        }
         UsageQueryField::ApiKey => HelpContent::new(
             texts::tui_usage_query_credentials_config(),
             help_lines(
@@ -1021,7 +1028,9 @@ fn usage_query_extractor_help(template: UsageQueryTemplate) -> HelpContent {
             "余额模板使用内置查询逻辑。通常不需要脚本字段；如果显示提取器预览，只用于说明当前模板行为。",
             "The balance template uses built-in query logic. It usually does not need script fields; any extractor preview only explains template behavior.",
         ),
-        UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::TokenPlan => {
+        UsageQueryTemplate::GitHubCopilot
+        | UsageQueryTemplate::TokenPlan
+        | UsageQueryTemplate::OfficialSubscription => {
             vec![tr("此处无提示", "No help here").to_string()]
         }
     };

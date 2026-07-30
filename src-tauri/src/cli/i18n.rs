@@ -3324,6 +3324,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_usage_query_official_subscription_hint() -> &'static str {
+        if is_chinese() {
+            "读取本机 CLI 的 OAuth 凭据，并调用官方接口查询订阅额度。默认关闭，只有启用后才会请求。"
+        } else {
+            "Reads the local CLI OAuth credentials and calls the official API to query subscription quota. Disabled by default and only requests after you enable it."
+        }
+    }
+
     pub fn tui_usage_query_script_empty() -> &'static str {
         if is_chinese() {
             "脚本配置不能为空"

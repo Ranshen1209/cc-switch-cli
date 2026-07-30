@@ -1655,6 +1655,9 @@ fn render_usage_query_info_panel(
             texts::tui_usage_query_copilot_auto_auth()
         }
         super::form::UsageQueryTemplate::TokenPlan => texts::tui_usage_query_token_plan_hint(),
+        super::form::UsageQueryTemplate::OfficialSubscription => {
+            texts::tui_usage_query_official_subscription_hint()
+        }
         super::form::UsageQueryTemplate::Custom
         | super::form::UsageQueryTemplate::General
         | super::form::UsageQueryTemplate::NewApi

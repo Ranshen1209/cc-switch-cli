@@ -609,6 +609,7 @@ impl ProviderAddFormState {
             && !is_codex_oauth
             && !should_write_local_proxy_settings
             && !self.has_usage_script_meta()
+            && !self.usage_query_touched
             && !should_write_full_url
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
@@ -826,12 +827,17 @@ impl ProviderAddFormState {
     }
 
     fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {
-        if !self.has_usage_script_meta() && !self.usage_query_enabled && !self.usage_query_touched {
-            meta_obj.remove("usage_script");
+        // Provider edits outside the Usage Query page must not normalize or
+        // rewrite a shared desktop configuration.
+        if !self.usage_query_touched {
             return;
         }
 
-        let mut script = serde_json::Map::new();
+        let mut script = meta_obj
+            .get("usage_script")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         script.insert("enabled".to_string(), json!(self.usage_query_enabled));
         script.insert("language".to_string(), json!("javascript"));
         script.insert("code".to_string(), json!(self.usage_query_code.as_str()));
@@ -854,6 +860,8 @@ impl ProviderAddFormState {
             UsageQueryTemplate::General => {
                 set_or_remove_trimmed(&mut script, "apiKey", &self.usage_query_api_key.value);
                 set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
+                script.remove("accessToken");
+                script.remove("userId");
             }
             UsageQueryTemplate::NewApi => {
                 set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
@@ -863,17 +871,30 @@ impl ProviderAddFormState {
                     &self.usage_query_access_token.value,
                 );
                 set_or_remove_trimmed(&mut script, "userId", &self.usage_query_user_id.value);
+                script.remove("apiKey");
             }
             UsageQueryTemplate::TokenPlan => {
+                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
+                    script.remove(key);
+                }
                 set_or_remove_trimmed(
                     &mut script,
                     "codingPlanProvider",
                     &self.usage_query_coding_plan_provider.value,
                 );
             }
+            UsageQueryTemplate::OfficialSubscription => {
+                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
+                    script.remove(key);
+                }
+            }
             UsageQueryTemplate::Custom
             | UsageQueryTemplate::GitHubCopilot
-            | UsageQueryTemplate::Balance => {}
+            | UsageQueryTemplate::Balance => {
+                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
+                    script.remove(key);
+                }
+            }
         }
 
         meta_obj.insert("usage_script".to_string(), Value::Object(script));

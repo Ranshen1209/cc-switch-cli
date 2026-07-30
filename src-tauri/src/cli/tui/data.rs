@@ -3658,7 +3658,7 @@ fn load_skills_snapshot_from_state(state: &AppState) -> Result<SkillsSnapshot, A
 mod tests {
     use super::*;
     use crate::prompt::Prompt;
-    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
+    use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta, UsageScript};
     use serde_json::json;
     use serial_test::serial;
     use std::path::Path;
@@ -5637,112 +5637,41 @@ mod tests {
     }
 
     #[test]
-    fn quota_target_detects_official_claude_by_explicit_category() {
+    fn quota_target_requires_official_subscription_opt_in() {
         let mut official = test_provider_row("official", "Claude Official", json!({"env": {}}));
         official.provider.category = Some("official".to_string());
-        let stripped_custom = test_provider_row("stripped-custom", "Custom", json!({"env": {}}));
-        let custom = test_provider_row(
-            "custom",
-            "Claude Custom",
-            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
-        );
 
+        assert!(quota_target_for_provider(&AppType::Claude, &official).is_none());
+
+        official.provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: false,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..ProviderMeta::default()
+        });
+        assert!(quota_target_for_provider(&AppType::Claude, &official).is_none());
+
+        official
+            .provider
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.usage_script.as_mut())
+            .expect("usage script")
+            .enabled = true;
         assert!(matches!(
             quota_target_for_provider(&AppType::Claude, &official).map(|target| target.kind),
             Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "claude"
         ));
-        assert!(quota_target_for_provider(&AppType::Claude, &stripped_custom).is_none());
-        assert!(quota_target_for_provider(&AppType::Claude, &custom).is_none());
-    }
-
-    #[test]
-    fn quota_target_detects_codex_official_and_skips_api_key_providers() {
-        let missing_key = test_provider_row("official", "OpenAI Official", json!({"auth": {}}));
-        let no_key_custom_base_url = test_provider_row(
-            "base-url",
-            "OpenAI Official",
-            json!({
-                "auth": {},
-                "config": r#"base_url = "https://api.example.com/v1""#
-            }),
-        );
-        let mut metadata_official = test_provider_row(
-            "metadata",
-            "Codex Official",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-        metadata_official.provider.meta = Some(ProviderMeta {
-            codex_official: Some(true),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider_row(
-            "api-key",
-            "Custom OpenAI",
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-        );
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, &missing_key).map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Codex, &metadata_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "codex"
-        ));
-        assert!(quota_target_for_provider(&AppType::Codex, &no_key_custom_base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Codex, &api_key).is_none());
-    }
-
-    #[test]
-    fn quota_target_detects_gemini_official_and_skips_api_key_providers() {
-        let mut explicit_official =
-            test_provider_row("google-official", "Google Official", json!({"env": {}}));
-        explicit_official.provider.category = Some("official".to_string());
-
-        let google_oauth = test_provider_row(
-            "google-oauth",
-            "Google OAuth",
-            json!({"env": {}, "config": {}}),
-        );
-        let mut partner_official = test_provider_row(
-            "partner",
-            "Gemini",
-            json!({"env": {"GEMINI_API_KEY": "sk"}}),
-        );
-        partner_official.provider.meta = Some(ProviderMeta {
-            partner_promotion_key: Some("google-official".to_string()),
-            ..ProviderMeta::default()
-        });
-        let api_key = test_provider_row(
-            "api-key",
-            "Google OAuth",
-            json!({"env": {"GEMINI_API_KEY": "sk-custom"}}),
-        );
-        let base_url = test_provider_row(
-            "base-url",
-            "Google OAuth",
-            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
-        );
-        let stripped_custom = test_provider_row("custom", "Custom Gemini", json!({"env": {}}));
-
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &explicit_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &google_oauth).map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(matches!(
-            quota_target_for_provider(&AppType::Gemini, &partner_official)
-                .map(|target| target.kind),
-            Some(QuotaTargetKind::SubscriptionTool { tool }) if tool == "gemini"
-        ));
-        assert!(quota_target_for_provider(&AppType::Gemini, &api_key).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, &base_url).is_none());
-        assert!(quota_target_for_provider(&AppType::Gemini, &stripped_custom).is_none());
     }
 
     #[test]

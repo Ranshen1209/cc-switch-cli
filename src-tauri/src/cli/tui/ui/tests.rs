@@ -3256,6 +3256,7 @@ fn provider_form_usage_query_page_omits_duplicate_side_panel_status_and_inline_k
 
     let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
     form.focus = FormFocus::Fields;
+    form.claude_base_url.set("https://relay.example.test");
     form.open_usage_query_page();
     form.toggle_usage_query_enabled();
     app.form = Some(FormState::ProviderAdd(form));
@@ -13365,6 +13366,8 @@ fn home_keeps_webdav_visible_below_a_long_quota_on_narrow_terminals() {
     app.focus = Focus::Content;
     let mut data = minimal_data(&app.app_type);
     data.providers.rows[0].is_current = true;
+    data.providers.rows[0].provider.settings_config =
+        json!({"env": {"ANTHROPIC_BASE_URL": "https://relay.example.test"}});
     data.providers.rows[0].provider.meta = Some(crate::provider::ProviderMeta {
         usage_script: Some(crate::provider::UsageScript {
             enabled: true,

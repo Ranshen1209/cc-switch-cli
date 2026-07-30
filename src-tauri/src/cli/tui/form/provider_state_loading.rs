@@ -60,6 +60,10 @@ fn populate_local_proxy_settings_form(form: &mut ProviderAddFormState, provider:
 }
 
 fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    form.usage_query_official_subscription = provider
+        .official_subscription_tool(&form.app_type)
+        .is_some();
+
     let Some(script) = provider
         .meta
         .as_ref()
@@ -68,6 +72,20 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
         form.refresh_default_usage_query_template();
         return;
     };
+
+    if form.usage_query_official_subscription
+        && script.template_type.as_deref()
+            != Some(UsageQueryTemplate::OfficialSubscription.as_str())
+    {
+        // The desktop UI resets incompatible saved templates when an official
+        // Claude/Codex/Gemini provider opens its Usage Query editor.
+        form.usage_query_enabled = false;
+        form.usage_query_template = UsageQueryTemplate::OfficialSubscription;
+        form.usage_query_timeout.set("10");
+        form.usage_query_auto_interval.set("5");
+        form.usage_query_code.clear();
+        return;
+    }
 
     form.usage_query_enabled = script.enabled;
     form.usage_query_timeout
