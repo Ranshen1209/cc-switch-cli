@@ -8433,14 +8433,14 @@ pub mod texts {
     pub fn tui_toast_codex_official_auth_preservation_toggled(enabled: bool) -> String {
         if is_chinese() {
             if enabled {
-                "已启用 Codex 官方登录保护。".to_string()
+                "已开启非接管切换时的官方登录保留。".to_string()
             } else {
-                "已关闭 Codex 官方登录保护。".to_string()
+                "已关闭非接管切换时的官方登录保留。".to_string()
             }
         } else if enabled {
-            "Codex official login preservation enabled.".to_string()
+            "Official login preservation for direct switches enabled.".to_string()
         } else {
-            "Codex official login preservation disabled.".to_string()
+            "Official login preservation for direct switches disabled.".to_string()
         }
     }
 
@@ -12042,9 +12042,9 @@ pub mod texts {
 
     pub fn codex_preserve_official_auth_label() -> &'static str {
         if is_chinese() {
-            "保留 Codex 官方登录"
+            "非接管切换时保留官方登录"
         } else {
-            "Preserve Codex official login"
+            "Keep official login for direct switches"
         }
     }
 

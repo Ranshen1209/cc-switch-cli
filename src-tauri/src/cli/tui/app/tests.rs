@@ -9734,8 +9734,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_codex_login_preservation_has_remote_context_help() {
-        let _lang = use_test_language(Language::English);
+    fn settings_codex_login_preservation_help_matches_direct_switch_scope() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Settings;
         app.focus = Focus::Content;
@@ -9744,13 +9743,35 @@ mod tests {
             .position(|item| matches!(item, SettingsItem::PreserveCodexOfficialAuth))
             .expect("PreserveCodexOfficialAuth missing from SettingsItem::ALL");
 
-        let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
-        let body = help.lines.join("\n");
+        {
+            let _lang = use_test_language(Language::English);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+            let body = help.lines.join("\n");
 
-        assert_eq!(help.title, "Preserve Codex official login");
-        assert!(body.contains("remote user's CODEX_HOME"), "{body}");
-        assert!(body.contains("reconnect the remote project"), "{body}");
-        assert!(body.contains("does not sign you in"), "{body}");
+            assert_eq!(help.title, "Keep official login for direct switches");
+            assert_eq!(
+                help.lines.first().map(String::as_str),
+                Some(
+                    "Controls third-party switches when local routing is off. Takeover routing always preserves the Codex official login."
+                )
+            );
+            assert!(body.contains("remote user's CODEX_HOME"), "{body}");
+            assert!(body.contains("reconnect the remote project"), "{body}");
+            assert!(body.contains("does not sign you in"), "{body}");
+        }
+
+        {
+            let _lang = use_test_language(Language::Chinese);
+            let help = crate::cli::tui::help::context_help_for_app(&app, &UiData::default());
+
+            assert_eq!(help.title, "非接管切换时保留官方登录");
+            assert_eq!(
+                help.lines.first().map(String::as_str),
+                Some(
+                    "控制未开启路由接管时切换第三方供应商是否保留 Codex 官方登录；路由接管期间始终保留"
+                )
+            );
+        }
     }
 
     #[test]

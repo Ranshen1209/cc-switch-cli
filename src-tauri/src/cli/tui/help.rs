@@ -296,8 +296,8 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::CodexOfficialAuthPreservation => HelpContent::new(
             texts::codex_preserve_official_auth_label(),
             help_lines(
-                "开启后，切换到第三方 Codex 供应商或由本地代理接管时不会覆盖现有的官方 ChatGPT 登录；第三方密钥会写入 config.toml。此开关不会替你登录，也不会恢复此前被覆盖的凭据。\nCodex Desktop 的 SSH 项目读取远端用户的 CODEX_HOME、凭据和代理。请在远端 cc-switch-cli 开启本项；切换供应商后重新连接远程项目，使远端 app-server 重新加载配置和模型目录。",
-                "When enabled, switching to a third-party Codex provider or enabling local proxy takeover does not overwrite the existing ChatGPT login; the third-party key is written to config.toml. This setting does not sign you in or recover credentials that were already overwritten.\nCodex Desktop SSH projects use the remote user's CODEX_HOME, credentials, and proxy. Enable this setting in the remote cc-switch-cli, then reconnect the remote project after switching providers so its app-server reloads the config and model catalog.",
+                "控制未开启路由接管时切换第三方供应商是否保留 Codex 官方登录；路由接管期间始终保留\n开启后，非接管切换会将第三方密钥写入 config.toml，而不覆盖现有的官方 ChatGPT 登录。此开关不会替你登录，也不会恢复此前被覆盖的凭据。\nCodex Desktop 的 SSH 项目读取远端用户的 CODEX_HOME、凭据和代理。请在远端 cc-switch-cli 开启本项；切换供应商后重新连接远程项目，使远端 app-server 重新加载配置和模型目录。",
+                "Controls third-party switches when local routing is off. Takeover routing always preserves the Codex official login.\nWhen enabled, direct third-party switches write the third-party key to config.toml without overwriting the existing official ChatGPT login. This setting does not sign you in or recover credentials that were already overwritten.\nCodex Desktop SSH projects use the remote user's CODEX_HOME, credentials, and proxy. Enable this setting in the remote cc-switch-cli, then reconnect the remote project after switching providers so its app-server reloads the config and model catalog.",
             ),
         ),
         HelpTarget::CodexUnifiedSessionHistory => HelpContent::new(

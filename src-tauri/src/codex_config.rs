@@ -989,19 +989,6 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
     Some(json!({ "models": entries }))
 }
 
-pub fn write_codex_live_with_catalog(
-    settings: &Value,
-    auth: &Value,
-    config_text: Option<&str>,
-    profile: CodexCatalogToolProfile,
-) -> Result<(), AppError> {
-    let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
-        .transpose()?;
-
-    write_codex_live_atomic(auth, prepared_config.as_deref())
-}
-
 pub fn write_codex_provider_live_with_catalog(
     settings: &Value,
     category: Option<&str>,
