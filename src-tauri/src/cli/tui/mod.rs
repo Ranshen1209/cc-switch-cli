@@ -512,6 +512,9 @@ impl UsagePricingLoadPhase {
     }
 }
 
+/// Fixed aggregates can always merge because they do not replace custom
+/// fields. A custom aggregate may only merge while that exact window remains
+/// selected.
 fn usage_pricing_range_matches_active(
     cached_range: data::UsageRangePreset,
     active_range: data::UsageRangePreset,
@@ -969,8 +972,9 @@ impl UiDataByAppCache {
             .insert(usage_pricing_load_key(app_type, range));
     }
 
-    /// Start at most one dirty aggregate. The active range wins when both its
-    /// custom window and the fixed default cache need refreshing.
+    /// Start at most one dirty aggregate. The current route's visible
+    /// projection wins when both a custom window and the fixed cache need
+    /// refreshing.
     fn flush_dirty_usage_pricing(
         &mut self,
         app: &mut App,
@@ -980,7 +984,10 @@ impl UiDataByAppCache {
             return false;
         }
 
-        let active_key = usage_pricing_load_key(&app.app_type, app.usage.range);
+        let visible_range = app
+            .usage_pricing_load_range_for_current_route()
+            .unwrap_or(app.usage.range);
+        let active_key = usage_pricing_load_key(&app.app_type, visible_range);
         let key = if self.usage_pricing_dirty_by_key.contains(&active_key) {
             active_key
         } else {
@@ -1207,6 +1214,9 @@ impl UiDataByAppCache {
             self.queue_app_data_load(app, app_data_req_tx, &next);
             data.app_switch_loading_projection(&next)
         };
+        // A selected custom window and the fixed snapshot occupy disjoint
+        // fields, so this retains both while Main consumes only the fixed
+        // 30-day projection.
         self.merge_usage_pricing(&next, &mut next_data, app.usage.range);
         next_data.quota = data.quota.clone();
 
@@ -1287,9 +1297,9 @@ fn handle_usage_pricing_msg(
                     if app.app_type == app_type {
                         // Aggregate/head refreshes are background updates. The
                         // active pager owns a stable keyset snapshot, so do not
-                        // invalidate it here. A custom result for an obsolete
-                        // range is cache-only and must not replace the range the
-                        // user is currently browsing.
+                        // invalidate it here. Fixed and custom fields are
+                        // disjoint, so a fixed result may land after a route
+                        // change; only an obsolete custom result is cache-only.
                         if usage_pricing_range_matches_active(range, app.usage.range) {
                             data.usage.merge_range(range, usage_pricing.usage);
                             app.clamp_selections(data);
@@ -1485,7 +1495,7 @@ const USAGE_SESSION_SYNC_HOME_DELAY_TICKS: u64 = 10;
 const USAGE_AUTO_SYNC_INTERVAL_TICKS: u64 = 60 * 1000 / 200;
 /// Proxy traffic already writes usage rows to SQLite; only the aggregate view
 /// needs refreshing. Keep that query independent from the much heavier local
-/// session scan and throttle it to once every ten seconds.
+/// session scan and throttle fixed projections to once every ten seconds.
 const USAGE_PROXY_REFRESH_INTERVAL_TICKS: u64 = 10 * 1000 / 200;
 
 /// Lazily kick off the session-usage sync the first time a Usage route — or,
@@ -1552,16 +1562,22 @@ fn queue_usage_session_sync_if_due(
     queue_background_session_usage_sync(sync_req_tx, sync_tracker);
 }
 
-/// Refresh the current app's fixed usage projection after proxy activity
-/// without tying it to `usageAutoSync`, which controls local session-log I/O.
+/// Refresh the Usage projection consumed by the current route after proxy
+/// activity, without tying it to `usageAutoSync`, which controls local
+/// session-log I/O.
+///
+/// Fixed projections stay near-live at the home card's ten-second cadence.
+/// Custom windows can span up to ten years, and nested log routes own
+/// interactive queries; both retain the existing session-sync and
+/// manual-refresh paths instead of joining this fast loop.
 fn queue_usage_proxy_refresh_if_due(
     app: &mut App,
     data_cache: &mut UiDataByAppCache,
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
 ) {
-    if !matches!(app.route, route::Route::Main) {
+    let Some(range) = app.proxy_refreshed_usage_projection_for_current_route() else {
         return;
-    }
+    };
     let Some(tx) = usage_pricing_req_tx else {
         return;
     };
@@ -1571,38 +1587,22 @@ fn queue_usage_proxy_refresh_if_due(
 
     let app_type = app.app_type.clone();
     data_cache.invalidate_usage_pricing_cache_for_app(&app_type);
-    data_cache.mark_usage_pricing_dirty(&app_type, data::UsageRangePreset::ThirtyDays);
+    data_cache.mark_usage_pricing_dirty(&app_type, range);
     data_cache.flush_dirty_usage_pricing(app, Some(tx));
 }
 
-/// Lazily load the active app's usage/pricing when a Usage or Pricing view is
-/// shown. The startup full-load no longer computes it, so this fills it in on
-/// demand; the cache guard keeps it from re-querying every frame.
+/// Lazily load the active app's usage/pricing when Main, Usage, or Pricing
+/// consumes it. The startup full-load no longer computes it, so this fills it
+/// in on demand; the cache guard keeps it from re-querying every frame.
 fn maybe_queue_usage_pricing_on_view(
     app: &mut App,
     data_cache: &mut UiDataByAppCache,
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
 ) {
-    let is_usage = matches!(
-        app.route,
-        route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
-    );
-    let is_pricing = matches!(app.route, route::Route::Pricing);
-    // The home chart reads the 30-day per-model buckets from the same fixed
-    // snapshot, so Main shares the Usage page's cache entry.
-    let is_home = matches!(app.route, route::Route::Main);
-    if !is_usage && !is_pricing && !is_home {
+    let Some(range) = app.usage_pricing_load_range_for_current_route() else {
         return;
-    }
-    let app_type = app.app_type.clone();
-    // The Pricing view needs the pricing snapshot, which only fixed ranges
-    // produce (a custom range yields `pricing: None`); force a fixed range there.
-    // The home chart needs the fixed 30-day buckets for the same reason.
-    let range = match app.usage.range {
-        data::UsageRangePreset::Custom(_) if is_home => data::UsageRangePreset::ThirtyDays,
-        data::UsageRangePreset::Custom(_) if is_pricing => data::UsageRangePreset::SevenDays,
-        range => range,
     };
+    let app_type = app.app_type.clone();
     data_cache.ensure_usage_pricing_loaded(app, usage_pricing_req_tx, &app_type, range);
 }
 
@@ -1869,17 +1869,15 @@ fn handle_session_usage_sync_msg(
     // valid. Keep the visible snapshot in place and arrange one final query
     // after any aggregate already in flight has completed.
     let current_app_type = app.app_type.clone();
-    // Always refresh the range the user is actually viewing (Today / 30d / custom),
-    // otherwise the active range would show stale numbers after the sync finishes
-    // while the user is sitting on the Usage view.
-    let active_range = app.usage.range;
-    data_cache.mark_usage_pricing_dirty(&current_app_type, active_range);
-    // The home chart reads the fixed 30-day aggregate even when the Usage page
-    // is parked on a custom range, whose key would otherwise be the only one
-    // marked dirty here.
-    if matches!(app.route, route::Route::Main) {
-        data_cache.mark_usage_pricing_dirty(&current_app_type, data::UsageRangePreset::ThirtyDays);
-    }
+    // Refresh the projection the current route consumes. This matters when the
+    // Usage page was left on a custom range: Main and Pricing still consume
+    // fixed data and must not queue that potentially large custom query ahead
+    // of their visible projection. Routes without a Usage/Pricing projection
+    // retain the selected range.
+    let visible_range = app
+        .usage_pricing_load_range_for_current_route()
+        .unwrap_or(app.usage.range);
+    data_cache.mark_usage_pricing_dirty(&current_app_type, visible_range);
     let aggregate_queued = data_cache.flush_dirty_usage_pricing(app, usage_pricing_req_tx);
     let aggregate_will_complete =
         aggregate_queued || !data_cache.pending_usage_pricing_by_key.is_empty();
@@ -2331,7 +2329,7 @@ fn apply_loaded_data_cache_invalidation(
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
     invalidation: CacheInvalidation,
 ) -> Result<(), AppError> {
-    let active_custom_range = if matches!(invalidation, CacheInvalidation::None) {
+    let selected_custom_range = if matches!(invalidation, CacheInvalidation::None) {
         None
     } else if let data::UsageRangePreset::Custom(range) = app.usage.range {
         data.usage.begin_custom_range(range);
@@ -2349,13 +2347,16 @@ fn apply_loaded_data_cache_invalidation(
     data_cache.handle_data_reloaded(app, data, invalidation);
     if !matches!(invalidation, CacheInvalidation::None) {
         queue_current_quota_refresh_if_due(app, data, quota_req_tx);
-        if let Some(range) = active_custom_range {
+        let refresh_range = app
+            .usage_pricing_load_range_for_current_route()
+            .or_else(|| selected_custom_range.map(data::UsageRangePreset::Custom));
+        if let Some(range) = refresh_range {
             let current_app_type = app.app_type.clone();
             data_cache.queue_usage_pricing_load(
                 app,
                 usage_pricing_req_tx,
                 &current_app_type,
-                data::UsageRangePreset::Custom(range),
+                range,
             );
             data_cache.remember_current(&app.app_type, data);
         }
@@ -2435,20 +2436,15 @@ fn handle_tui_action(
                 }
             }
             let current_app_type = app.app_type.clone();
+            let preload_range = app
+                .usage_pricing_load_range_for_current_route()
+                .unwrap_or(data::UsageRangePreset::SevenDays);
             data_cache.queue_usage_pricing_load(
                 app,
                 usage_pricing_req_tx,
                 &current_app_type,
-                data::UsageRangePreset::SevenDays,
+                preload_range,
             );
-            if matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
-                data_cache.queue_usage_pricing_load(
-                    app,
-                    usage_pricing_req_tx,
-                    &current_app_type,
-                    app.usage.range,
-                );
-            }
             queue_current_quota_refresh_if_due(app, data, quota_req_tx);
             Ok(())
         }
@@ -2473,13 +2469,9 @@ fn handle_tui_action(
                 app.route,
                 route::Route::Usage | route::Route::UsageLogs | route::Route::UsageLogDetail { .. }
             );
-            let range = if matches!(app.route, route::Route::Pricing)
-                && matches!(app.usage.range, data::UsageRangePreset::Custom(_))
-            {
-                data::UsageRangePreset::SevenDays
-            } else {
-                app.usage.range
-            };
+            let range = app
+                .usage_pricing_load_range_for_current_route()
+                .unwrap_or(app.usage.range);
 
             // Match upstream's manual flow: import session logs first, then
             // invalidate/requery Usage. Repeated `r` shares the active import;
@@ -3667,7 +3659,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             crate::settings::usage_auto_sync_enabled(),
         );
         // Lazily aggregate usage/pricing (deferred off the startup full-load)
-        // once the user is actually on a Usage route.
+        // once the current route consumes one of its projections.
         maybe_queue_usage_pricing_on_view(
             &mut app,
             &mut data_cache,
