@@ -2,16 +2,14 @@
 
 # CC-Switch CLI
 
+**通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 和 OpenClaw。**
+
+![CC-Switch CLI，一个面向所有 AI CLI 的统一控制台](assets/screenshots/hero.png)
+
 [![Version](https://img.shields.io/badge/version-5.9.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-
-**支持 TUI + CLI 双模式的 Claude Code、Codex、Gemini、OpenCode、Hermes 与 OpenClaw 管理工具**
-
-日常切换、账号和会话管理可使用交互式 TUI；脚本化、自动化和终端工作流可使用 CLI。
-
-统一管理供应商配置、MCP 服务器、Skills 扩展、提示词、本地代理路由、用量统计和环境检查等能力。
 
 [English](README.md) | 中文
 
