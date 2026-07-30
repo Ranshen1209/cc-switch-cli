@@ -11,9 +11,10 @@ use crate::hermes_config::get_hermes_dir;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
-    SessionSearchHit, SESSION_MESSAGE_PREVIEW_MAX_MESSAGES,
-    SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES,
+    truncate_string_utf8, SearchSnippet, SessionMessage, SessionMessageBatch,
+    SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
+    SESSION_MESSAGE_PREVIEW_MAX_MESSAGES, SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES,
+    SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES,
 };
 
 use super::utils::{
@@ -716,6 +717,73 @@ fn load_messages_sqlite_from_connection(
     Ok(batch)
 }
 
+/// Materialize an ordered page of Hermes SQLite rowids with one read-only
+/// connection. Rowids are local sidecar locators only; user actions continue to
+/// address the stable provider/session identity.
+pub(crate) fn load_transcript_sqlite_messages(
+    source: &str,
+    rowids: &[i64],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Vec<Option<SessionMessage>>, bool), String> {
+    let (db_path, session_id) = parse_sqlite_source(source)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let conn = Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Failed to open Hermes database: {error}"))?;
+    with_sqlite_cancellation(&conn, is_cancelled, || {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT
+                    substr(CAST(role AS TEXT), 1, {SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES}),
+                    length(CAST(role AS BLOB)),
+                    substr(CAST(content AS TEXT), 1, {SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES}),
+                    length(CAST(content AS BLOB)),
+                    created_at
+                 FROM messages
+                 WHERE session_id = ?1 AND rowid = ?2
+                 LIMIT 1"
+            ))
+            .map_err(|error| format!("Failed to prepare Hermes message query: {error}"))?;
+        let mut messages = Vec::with_capacity(rowids.len());
+        let mut truncated = false;
+        for rowid in rowids {
+            if is_cancelled() {
+                return Err("Session message page was cancelled".to_string());
+            }
+            let row = stmt
+                .query_row(rusqlite::params![session_id, rowid], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4).ok().flatten(),
+                    ))
+                })
+                .optional()
+                .map_err(|error| format!("Failed to query Hermes message: {error}"))?;
+            let Some((Some(mut role), role_bytes, Some(content), content_bytes, ts)) = row else {
+                truncated = true;
+                messages.push(None);
+                continue;
+            };
+            truncated |= truncate_string_utf8(&mut role, SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES)
+                || role_bytes
+                    .is_some_and(|bytes| bytes > SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES as i64)
+                || content_bytes
+                    .is_some_and(|bytes| bytes > SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES as i64);
+            messages.push((!content.trim().is_empty()).then_some(SessionMessage {
+                role,
+                content,
+                ts: ts.and_then(|value| parse_timestamp_to_ms(&Value::Number(value.into()))),
+            }));
+        }
+        Ok((messages, truncated))
+    })
+}
+
 /// Delete a session from the Hermes SQLite database.
 pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
     let (db_path, ref_session_id) = parse_sqlite_source(source)
@@ -756,7 +824,7 @@ pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, Str
     Ok(deleted > 0)
 }
 
-fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     let rest = source.strip_prefix("sqlite:")?;
     let hash_pos = rest.rfind('#')?;
     let db_path = PathBuf::from(&rest[..hash_pos]);
@@ -946,46 +1014,7 @@ pub(crate) fn load_messages_cancellable(
 ) -> Result<SessionMessageBatch, String> {
     let mut batch = SessionMessageBatchBuilder::new();
     let status = visit_bounded_lines_cancellable_with_status(path, is_cancelled, &mut |line| {
-        if line.trim().is_empty() {
-            return ControlFlow::Continue(());
-        }
-        let value: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => return ControlFlow::Continue(()),
-        };
-
-        // Support both flat messages and nested {type:"message", message:{...}} format
-        let (role_val, content_val, ts_val) =
-            if value.get("type").and_then(Value::as_str) == Some("message") {
-                let msg = match value.get("message") {
-                    Some(m) => m,
-                    None => return ControlFlow::Continue(()),
-                };
-                (
-                    msg.get("role"),
-                    msg.get("content"),
-                    value.get("timestamp").or_else(|| msg.get("ts")),
-                )
-            } else {
-                (
-                    value.get("role"),
-                    value.get("content"),
-                    value.get("timestamp").or_else(|| value.get("ts")),
-                )
-            };
-
-        let role = match role_val.and_then(Value::as_str) {
-            Some(r) => r.to_string(),
-            None => return ControlFlow::Continue(()),
-        };
-
-        let content = content_val.map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() {
-            return ControlFlow::Continue(());
-        }
-
-        let ts = ts_val.and_then(parse_timestamp_to_ms);
-        batch.push(SessionMessage { role, content, ts })
+        parse_transcript_line(line).map_or(ControlFlow::Continue(()), |message| batch.push(message))
     })
     .map_err(|error| format!("Failed to read session file: {error}"))?
     .ok_or_else(|| "Session message preview was cancelled".to_string())?;
@@ -994,6 +1023,36 @@ pub(crate) fn load_messages_cancellable(
     }
 
     Ok(batch.finish())
+}
+
+/// Decode one logical Hermes JSONL row for every transcript consumer.
+pub(crate) fn parse_transcript_line(line: &str) -> Option<SessionMessage> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let value: Value = serde_json::from_str(line).ok()?;
+    let (role_val, content_val, ts_val) =
+        if value.get("type").and_then(Value::as_str) == Some("message") {
+            let message = value.get("message")?;
+            (
+                message.get("role"),
+                message.get("content"),
+                value.get("timestamp").or_else(|| message.get("ts")),
+            )
+        } else {
+            (
+                value.get("role"),
+                value.get("content"),
+                value.get("timestamp").or_else(|| value.get("ts")),
+            )
+        };
+    let role = role_val.and_then(Value::as_str)?.to_string();
+    let content = content_val.map(extract_text).unwrap_or_default();
+    if content.trim().is_empty() {
+        return None;
+    }
+    let ts = ts_val.and_then(parse_timestamp_to_ms);
+    Some(SessionMessage { role, content, ts })
 }
 
 /// Search Hermes sessions (JSONL or SQLite) for `needle` (case-insensitive).

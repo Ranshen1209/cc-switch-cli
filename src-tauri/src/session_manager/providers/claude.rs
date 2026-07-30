@@ -145,47 +145,7 @@ pub(crate) fn load_messages_cancellable(
 ) -> Result<SessionMessageBatch, String> {
     let mut batch = SessionMessageBatchBuilder::new();
     let status = visit_bounded_lines_cancellable_with_status(path, is_cancelled, &mut |line| {
-        let value: Value = match serde_json::from_str(line) {
-            Ok(parsed) => parsed,
-            Err(_) => return ControlFlow::Continue(()),
-        };
-
-        if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            return ControlFlow::Continue(());
-        }
-
-        let message = match value.get("message") {
-            Some(message) => message,
-            None => return ControlFlow::Continue(()),
-        };
-
-        let mut role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
-        // Claude wraps tool_result inside user messages; reclassify as "tool" role
-        if role == "user" {
-            if let Some(Value::Array(items)) = message.get("content") {
-                let all_tool_results = !items.is_empty()
-                    && items.iter().all(|item| {
-                        item.get("type").and_then(Value::as_str) == Some("tool_result")
-                    });
-                if all_tool_results {
-                    role = "tool".to_string();
-                }
-            }
-        }
-
-        let content = message.get("content").map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() {
-            return ControlFlow::Continue(());
-        }
-
-        let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        batch.push(SessionMessage { role, content, ts })
+        parse_transcript_line(line).map_or(ControlFlow::Continue(()), |message| batch.push(message))
     })
     .map_err(|error| format!("Failed to read session file: {error}"))?
     .ok_or_else(|| "Session message preview was cancelled".to_string())?;
@@ -194,6 +154,37 @@ pub(crate) fn load_messages_cancellable(
     }
 
     Ok(batch.finish())
+}
+
+/// Decode one logical Claude transcript row for every transcript consumer.
+pub(crate) fn parse_transcript_line(line: &str) -> Option<SessionMessage> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let message = value.get("message")?;
+    let mut role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    if role == "user" {
+        if let Some(Value::Array(items)) = message.get("content") {
+            let all_tool_results = !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.get("type").and_then(Value::as_str) == Some("tool_result"));
+            if all_tool_results {
+                role = "tool".to_string();
+            }
+        }
+    }
+    let content = message.get("content").map(extract_text).unwrap_or_default();
+    if content.trim().is_empty() {
+        return None;
+    }
+    let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
+    Some(SessionMessage { role, content, ts })
 }
 
 /// Search a single Claude session file for `needle` (case-insensitive).

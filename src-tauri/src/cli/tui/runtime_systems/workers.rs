@@ -18,14 +18,15 @@ use super::super::data::{
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
-    AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem, LocalEnvMsg,
-    LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg,
-    ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq,
-    QuotaSystem, SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
-    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
-    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
-    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
-    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
+    LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
+    ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq,
+    ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages, SessionMsg, SessionReq,
+    SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg,
+    SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq,
+    StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsageLogLoadError,
+    UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem, WebDavDone,
+    WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -904,28 +905,100 @@ fn session_dispatcher_loop(
 struct SessionMessageJob {
     request_id: u64,
     key: String,
-    provider_id: String,
-    source_path: String,
+    kind: SessionMessageJobKind,
     generation: u64,
     current_generation: Arc<AtomicU64>,
     result_tx: mpsc::Sender<SessionMsg>,
+}
+
+enum SessionMessageJobKind {
+    Open {
+        provider_id: String,
+        source_path: String,
+    },
+    Page {
+        transcript_generation: String,
+        page: usize,
+        refresh_page: usize,
+        refresh_message_key: Option<String>,
+        reader: crate::session_manager::transcript::TranscriptReader,
+    },
 }
 
 fn launch_session_messages(job: SessionMessageJob) -> Result<(), String> {
     std::thread::Builder::new()
         .name("cc-switch-session-messages".to_string())
         .spawn(move || {
-            let result = crate::session_manager::load_messages_cancellable(
-                &job.provider_id,
-                &job.source_path,
-                &|| job.current_generation.load(Ordering::Acquire) != job.generation,
-            );
-            if job.current_generation.load(Ordering::Acquire) == job.generation {
-                let _ = job.result_tx.send(SessionMsg::MessagesLoaded {
-                    request_id: job.request_id,
-                    key: job.key,
-                    result,
-                });
+            let SessionMessageJob {
+                request_id,
+                key,
+                kind,
+                generation,
+                current_generation,
+                result_tx,
+            } = job;
+            let is_cancelled = || current_generation.load(Ordering::Acquire) != generation;
+            match kind {
+                SessionMessageJobKind::Open {
+                    provider_id,
+                    source_path,
+                } => {
+                    let result = crate::session_manager::transcript::open_transcript_cancellable(
+                        &provider_id,
+                        &source_path,
+                        &is_cancelled,
+                    );
+                    if !is_cancelled() {
+                        let _ = result_tx.send(SessionMsg::MessagesLoaded {
+                            request_id,
+                            key,
+                            result,
+                        });
+                    }
+                }
+                SessionMessageJobKind::Page {
+                    transcript_generation,
+                    page,
+                    refresh_page,
+                    refresh_message_key,
+                    reader,
+                } => {
+                    let result = match reader.load_page(page, &is_cancelled) {
+                        Ok(loaded) => Ok(LoadedMessagePage::Page(loaded)),
+                        Err(error) if error.requires_refresh() => {
+                            let provider_id = reader.provider_id().to_string();
+                            let source_path = reader.source_path().to_string();
+                            drop(reader);
+                            crate::session_manager::transcript::open_transcript_pages_cancellable(
+                                &provider_id,
+                                &source_path,
+                                Some(refresh_page),
+                                refresh_message_key.as_deref(),
+                                Some(page),
+                                &is_cancelled,
+                            )
+                            .map(
+                                |(reader, active_page, requested_page)| {
+                                    LoadedMessagePage::Refreshed(Box::new(RefreshedMessagePages {
+                                        reader,
+                                        active_page,
+                                        requested_page,
+                                    }))
+                                },
+                            )
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if !is_cancelled() {
+                        let _ = result_tx.send(SessionMsg::MessagePageLoaded {
+                            request_id,
+                            key,
+                            transcript_generation,
+                            page,
+                            result,
+                        });
+                    }
+                }
             }
         })
         .map(|_| ())
@@ -1203,8 +1276,10 @@ fn session_dispatcher_loop_with<S, L, P, R, M>(
                 let job = SessionMessageJob {
                     request_id,
                     key,
-                    provider_id,
-                    source_path,
+                    kind: SessionMessageJobKind::Open {
+                        provider_id,
+                        source_path,
+                    },
                     generation,
                     current_generation: Arc::clone(&message_generation),
                     result_tx: result_tx.clone(),
@@ -1214,6 +1289,44 @@ fn session_dispatcher_loop_with<S, L, P, R, M>(
                         let _ = result_tx.send(SessionMsg::MessagesLoaded {
                             request_id,
                             key: error_key,
+                            result: Err(error),
+                        });
+                    }
+                }
+            }
+            SessionReq::LoadMessagePage {
+                request_id,
+                key,
+                transcript_generation,
+                page,
+                refresh_page,
+                refresh_message_key,
+                reader,
+            } => {
+                let generation = message_generation.load(Ordering::Acquire);
+                let error_key = key.clone();
+                let error_generation = transcript_generation.clone();
+                let job = SessionMessageJob {
+                    request_id,
+                    key,
+                    kind: SessionMessageJobKind::Page {
+                        transcript_generation,
+                        page,
+                        refresh_page,
+                        refresh_message_key,
+                        reader,
+                    },
+                    generation,
+                    current_generation: Arc::clone(&message_generation),
+                    result_tx: result_tx.clone(),
+                };
+                if let Err(error) = launch_messages(job) {
+                    if message_generation.load(Ordering::Acquire) == generation {
+                        let _ = result_tx.send(SessionMsg::MessagePageLoaded {
+                            request_id,
+                            key: error_key,
+                            transcript_generation: error_generation,
+                            page,
                             result: Err(error),
                         });
                     }
@@ -1485,8 +1598,10 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
             let job = SessionMessageJob {
                 request_id,
                 key,
-                provider_id,
-                source_path,
+                kind: SessionMessageJobKind::Open {
+                    provider_id,
+                    source_path,
+                },
                 generation: 1,
                 current_generation: generation,
                 result_tx: tx.clone(),
@@ -1495,6 +1610,44 @@ fn handle_session_req(req: SessionReq, tx: &mpsc::Sender<SessionMsg>) -> Result<
                 tx.send(SessionMsg::MessagesLoaded {
                     request_id,
                     key: error_key,
+                    result: Err(error),
+                })
+                .map_err(|_| ())?;
+            }
+            Ok(())
+        }
+        SessionReq::LoadMessagePage {
+            request_id,
+            key,
+            transcript_generation,
+            page,
+            refresh_page,
+            refresh_message_key,
+            reader,
+        } => {
+            let generation = Arc::new(AtomicU64::new(1));
+            let error_key = key.clone();
+            let error_generation = transcript_generation.clone();
+            let job = SessionMessageJob {
+                request_id,
+                key,
+                kind: SessionMessageJobKind::Page {
+                    transcript_generation,
+                    page,
+                    refresh_page,
+                    refresh_message_key,
+                    reader,
+                },
+                generation: 1,
+                current_generation: generation,
+                result_tx: tx.clone(),
+            };
+            if let Err(error) = launch_session_messages(job) {
+                tx.send(SessionMsg::MessagePageLoaded {
+                    request_id,
+                    key: error_key,
+                    transcript_generation: error_generation,
+                    page,
                     result: Err(error),
                 })
                 .map_err(|_| ())?;
@@ -1902,8 +2055,6 @@ fn run_session_scan(
     });
 }
 
-const SESSION_LOCATE_PAGE_RADIUS: usize = 1;
-
 fn locate_session_manifest(job: SessionLocateJob) {
     let is_cancelled = || job.current_generation.load(Ordering::Acquire) != job.locate_generation;
     let result = resolve_session_manifest_selection(
@@ -1931,11 +2082,13 @@ fn locate_session_manifest(job: SessionLocateJob) {
     });
 }
 
-/// Resolve against the fallback page and its immediate neighbours only. A
-/// refresh normally moves the selected row by a handful of positions, so this
-/// preserves its identity across page-boundary shifts. A large reorder falls
-/// back to the same absolute position instead of scanning an unbounded number
-/// of immutable pages.
+/// Resolve a stable row identity across the complete immutable generation.
+///
+/// This runs on the dedicated latest-wins locate lane, not the event loop.
+/// Memory remains bounded to two pages: the fallback page stays available
+/// while every other page is inspected and dropped one at a time. The old
+/// page is checked first, followed by the recency head (the common destination
+/// when an old session is continued), then the remaining pages nearest-first.
 fn resolve_session_manifest_selection<F>(
     source: crate::cli::tui::app::SessionPageSource,
     scope: &str,
@@ -1963,47 +2116,84 @@ where
 
     let fallback = fallback_absolute.min(reader.total_rows().saturating_sub(1));
     let fallback_page_index = fallback / crate::session_manager::paged_manifest::PAGE_SIZE;
-    let mut candidate_pages = Vec::with_capacity(1 + SESSION_LOCATE_PAGE_RADIUS * 2);
-    candidate_pages.push(fallback_page_index);
-    if anchor.is_some() {
-        for distance in 1..=SESSION_LOCATE_PAGE_RADIUS {
+    let Some(fallback_page) =
+        load_session_manifest_page_cancellable(reader, fallback_page_index, is_cancelled)?
+    else {
+        return Ok(None);
+    };
+    if let Some(selected) = anchor.and_then(|anchor| {
+        fallback_page
+            .rows
+            .iter()
+            .position(|row| anchor.matches(row))
+    }) {
+        return Ok(Some((fallback_page, selected)));
+    }
+
+    if let Some(anchor) = anchor {
+        if fallback_page_index != 0 {
+            let Some(page) = load_session_manifest_page_cancellable(reader, 0, is_cancelled)?
+            else {
+                return Ok(None);
+            };
+            if let Some(selected) = page.rows.iter().position(|row| anchor.matches(row)) {
+                return Ok(Some((page, selected)));
+            }
+        }
+
+        for distance in 1..reader.page_count() {
             if let Some(previous) = fallback_page_index.checked_sub(distance) {
-                candidate_pages.push(previous);
+                if previous != 0 {
+                    let Some(page) =
+                        load_session_manifest_page_cancellable(reader, previous, is_cancelled)?
+                    else {
+                        return Ok(None);
+                    };
+                    if let Some(selected) = page.rows.iter().position(|row| anchor.matches(row)) {
+                        return Ok(Some((page, selected)));
+                    }
+                }
             }
-            let next = fallback_page_index.saturating_add(distance);
-            if next < reader.page_count() {
-                candidate_pages.push(next);
+            if let Some(next) = fallback_page_index
+                .checked_add(distance)
+                .filter(|page| *page < reader.page_count())
+            {
+                let Some(page) =
+                    load_session_manifest_page_cancellable(reader, next, is_cancelled)?
+                else {
+                    return Ok(None);
+                };
+                if let Some(selected) = page.rows.iter().position(|row| anchor.matches(row)) {
+                    return Ok(Some((page, selected)));
+                }
             }
         }
     }
 
-    let mut fallback_page = None;
-    for page_index in candidate_pages {
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let page = reader
-            .load_page(page_index)
-            .ok_or_else(|| format!("session manifest page {page_index} is unavailable"))?;
-        if is_cancelled() {
-            return Ok(None);
-        }
-        if let Some(selected) =
-            anchor.and_then(|anchor| page.rows.iter().position(|row| anchor.matches(row)))
-        {
-            return Ok(Some((page, selected)));
-        }
-        if page_index == fallback_page_index {
-            fallback_page = Some(page);
-        }
-    }
-
-    let page =
-        fallback_page.ok_or_else(|| "session manifest fallback page is unavailable".to_string())?;
     let selected = fallback
         .saturating_sub(fallback_page_index * crate::session_manager::paged_manifest::PAGE_SIZE)
-        .min(page.rows.len().saturating_sub(1));
-    Ok(Some((page, selected)))
+        .min(fallback_page.rows.len().saturating_sub(1));
+    Ok(Some((fallback_page, selected)))
+}
+
+fn load_session_manifest_page_cancellable<F>(
+    reader: &crate::session_manager::paged_manifest::ManifestReader,
+    page_index: usize,
+    is_cancelled: &F,
+) -> Result<Option<crate::session_manager::paged_manifest::ManifestPage>, String>
+where
+    F: Fn() -> bool,
+{
+    if is_cancelled() {
+        return Ok(None);
+    }
+    let page = reader
+        .load_page(page_index)
+        .ok_or_else(|| format!("session manifest page {page_index} is unavailable"))?;
+    if is_cancelled() {
+        return Ok(None);
+    }
+    Ok(Some(page))
 }
 
 #[cfg(test)]
@@ -4140,7 +4330,7 @@ mod tests {
     }
 
     #[test]
-    fn session_manifest_locator_uses_bounded_neighbourhood_then_fallback() {
+    fn session_manifest_locator_finds_identity_across_the_complete_generation() {
         let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
         let manifest_store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
             manifest_dir.path(),
@@ -4160,18 +4350,36 @@ mod tests {
                 })
                 .expect("manifest fixture row");
         }
-        let published = builder.publish().expect("publish fixture");
-        let reader = published.reader;
-        let distant_page = reader.load_page(4).expect("distant manifest page");
+        let published = builder.publish().expect("publish original fixture");
+        let distant_page = published
+            .reader
+            .load_page(4)
+            .expect("distant manifest page");
         let distant_anchor = crate::cli::tui::app::SessionRowIdentity::capture(
             distant_page.rows.first().expect("distant row"),
         );
 
+        let mut refreshed = manifest_store
+            .begin_build("claude")
+            .expect("refreshed manifest fixture builder");
+        for index in 0..401 {
+            refreshed
+                .push(crate::session_manager::SessionMeta {
+                    provider_id: "claude".to_string(),
+                    session_id: format!("session-{index:03}"),
+                    source_path: Some(format!("/tmp/session-{index:03}.jsonl")),
+                    last_active_at: Some(if index == 0 { 10_000 } else { index as i64 }),
+                    ..crate::session_manager::SessionMeta::default()
+                })
+                .expect("refreshed manifest fixture row");
+        }
+        let refreshed = refreshed.publish().expect("publish refreshed fixture");
+        let reader = refreshed.reader;
         let location = resolve_session_manifest_selection(
             crate::cli::tui::app::SessionPageSource::Base,
             "claude",
             reader.generation(),
-            0,
+            400,
             Some(&distant_anchor),
             &reader,
             &|| false,
@@ -4181,7 +4389,7 @@ mod tests {
 
         assert_eq!(location.0.page_index, 0);
         assert_eq!(location.1, 0);
-        assert!(!distant_anchor.matches(&location.0.rows[location.1]));
+        assert!(distant_anchor.matches(&location.0.rows[location.1]));
     }
 
     #[test]
@@ -4308,6 +4516,116 @@ mod tests {
             second.current_generation.load(Ordering::Acquire),
             second.generation,
             "closing detail must cancel the newest read"
+        );
+
+        drop(req_tx);
+        dispatcher.join().expect("dispatcher exits");
+    }
+
+    #[test]
+    fn transcript_page_jobs_share_the_open_generation_until_detail_is_replaced() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            })
+            .to_string(),
+        )
+        .expect("transcript fixture");
+        let (reader, _) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source.to_string_lossy(),
+        )
+        .expect("transcript reader");
+        let transcript_generation = reader.generation().to_string();
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (control_tx, _control_rx) = mpsc::channel();
+        let (result_tx, _result_rx) = mpsc::channel();
+        let message_generation = Arc::new(AtomicU64::new(0));
+        let dispatcher_message_generation = Arc::clone(&message_generation);
+        let (message_job_tx, message_job_rx) = mpsc::channel();
+        let dispatcher = std::thread::spawn(move || {
+            session_dispatcher_loop_with(
+                req_rx,
+                control_tx,
+                result_tx,
+                Arc::new(AtomicU64::new(0)),
+                dispatcher_message_generation,
+                Arc::new(AtomicU64::new(0)),
+                |_| Ok(()),
+                move |job| message_job_tx.send(job).map_err(|error| error.to_string()),
+                |_| Ok(()),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+        });
+
+        req_tx
+            .send(SessionReq::LoadMessages {
+                request_id: 1,
+                key: "session-1".to_string(),
+                provider_id: "codex".to_string(),
+                source_path: source.to_string_lossy().into_owned(),
+            })
+            .expect("queue open");
+        let open = message_job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("open job");
+        req_tx
+            .send(SessionReq::LoadMessagePage {
+                request_id: 2,
+                key: "session-1".to_string(),
+                transcript_generation,
+                page: 0,
+                refresh_page: 0,
+                refresh_message_key: None,
+                reader,
+            })
+            .expect("queue page");
+        let page = message_job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("page job");
+
+        assert!(matches!(open.kind, SessionMessageJobKind::Open { .. }));
+        assert!(matches!(
+            page.kind,
+            SessionMessageJobKind::Page { page: 0, .. }
+        ));
+        assert_eq!(page.generation, open.generation);
+        assert_eq!(
+            page.current_generation.load(Ordering::Acquire),
+            page.generation,
+            "adjacent page reads must not cancel the transcript open generation"
+        );
+
+        req_tx
+            .send(SessionReq::LoadMessages {
+                request_id: 3,
+                key: "session-2".to_string(),
+                provider_id: "codex".to_string(),
+                source_path: source.to_string_lossy().into_owned(),
+            })
+            .expect("replace detail");
+        let replacement = message_job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("replacement job");
+        assert_ne!(
+            page.current_generation.load(Ordering::Acquire),
+            page.generation,
+            "opening another detail must cancel every old transcript page"
+        );
+        assert_eq!(
+            replacement.current_generation.load(Ordering::Acquire),
+            replacement.generation
         );
 
         drop(req_tx);

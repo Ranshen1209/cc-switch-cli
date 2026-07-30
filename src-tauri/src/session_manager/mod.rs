@@ -10,6 +10,7 @@ pub(crate) mod query_manifest;
 pub mod recent_snapshot;
 pub mod scan_cache_store;
 pub mod terminal;
+pub(crate) mod transcript;
 
 use serde::{Deserialize, Serialize};
 use std::ops::ControlFlow;
@@ -676,6 +677,7 @@ pub(crate) fn purge_deleted_session_from_local_caches(
     source_path: &str,
 ) -> PurgedSessionManifests {
     scan_cache_store::purge_session(provider_id, session_id, source_path);
+    transcript::purge_deleted_transcript_cache(provider_id, source_path);
 
     let mut purged = PurgedSessionManifests::default();
     if let Ok(store) = paged_manifest::PagedManifestStore::open() {

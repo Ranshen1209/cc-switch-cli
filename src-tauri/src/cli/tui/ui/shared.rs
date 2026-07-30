@@ -31,6 +31,7 @@ pub(super) enum PaginationFooterStatus {
     NextReady,
     LoadingPage(usize),
     LoadError,
+    LoadErrorMoveRetry,
     End,
 }
 
@@ -149,6 +150,14 @@ fn pagination_action_spans(
         ),
         PaginationFooterStatus::LoadError => (
             vec![format!("! {}", texts::tui_pagination_load_failed())],
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            false,
+        ),
+        PaginationFooterStatus::LoadErrorMoveRetry => (
+            vec![format!(
+                "! {}",
+                texts::tui_pagination_load_failed_move_retry()
+            )],
             Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             false,
         ),

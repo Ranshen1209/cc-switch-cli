@@ -32,6 +32,7 @@ pub(super) fn render_sessions(
     // contextual help; the action chips come from the dispatch keymap.
     let mut keys = vec![
         ("↑↓", texts::tui_key_select()),
+        ("PgUp/PgDn", texts::tui_key_page()),
         ("←→", texts::tui_key_pane()),
     ];
     keys.extend(crate::cli::tui::keymap::sessions::key_bar_items(app, data));
@@ -123,33 +124,19 @@ fn render_session_list(
         let page_end = page_start.saturating_add(visible.len()).saturating_sub(1);
         let pending_page = app.sessions.remote.pending_cross_page();
         let status = if let Some(target) = pending_page {
-            if app.sessions.remote.is_page_pending(target) {
-                PaginationFooterStatus::LoadingPage(target + 1)
-            } else {
-                PaginationFooterStatus::PreparingNext
-            }
+            PaginationFooterStatus::LoadingPage(target + 1)
         } else if app.sessions.remote.failed_page().is_some() {
-            PaginationFooterStatus::LoadError
+            PaginationFooterStatus::LoadErrorMoveRetry
+        } else if page + 1 == total_rows.div_ceil(crate::session_manager::paged_manifest::PAGE_SIZE)
+            && selected == visible.len() - 1
+        {
+            PaginationFooterStatus::End
+        } else if app.sessions.remote.next_page_is_pending() {
+            PaginationFooterStatus::PreparingNext
+        } else if app.sessions.remote.next_page_is_ready() {
+            PaginationFooterStatus::NextReady
         } else {
-            match app.sessions.pagination.focus() {
-                app::paged_list::PagedListFocus::Boundary(app::paged_list::PageBoundary::Next) => {
-                    PaginationFooterStatus::NextBoundary
-                }
-                app::paged_list::PagedListFocus::Boundary(
-                    app::paged_list::PageBoundary::Previous,
-                ) => PaginationFooterStatus::PreviousBoundary,
-                app::paged_list::PagedListFocus::Empty | app::paged_list::PagedListFocus::Row
-                    if page + 1
-                        == total_rows
-                            .div_ceil(crate::session_manager::paged_manifest::PAGE_SIZE)
-                        && selected == visible.len() - 1 =>
-                {
-                    PaginationFooterStatus::End
-                }
-                app::paged_list::PagedListFocus::Empty | app::paged_list::PagedListFocus::Row => {
-                    PaginationFooterStatus::Idle
-                }
-            }
+            PaginationFooterStatus::Idle
         };
         block = with_pagination_footer(
             block,
@@ -393,14 +380,43 @@ fn render_session_messages(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(session_pane_border_style(app, SessionsPane::Detail, theme))
-        .title(format!(
-            " {} ",
-            texts::tui_sessions_messages_preview_title(app.sessions.messages_truncated)
-        ));
+        .title(format!(" {} ", texts::tui_sessions_messages_title()));
+    let total_messages = app.sessions.logical_total_messages();
+    if app.sessions.messages_loaded && total_messages > 0 {
+        let page = app.sessions.message_remote.current_page();
+        let page_start =
+            page.saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        let page_end = page_start
+            .saturating_add(app.sessions.messages.len())
+            .min(total_messages);
+        let selected = app.sessions.selected_message_absolute();
+        let status = if let Some(target) = app.sessions.message_remote.pending_cross_page() {
+            PaginationFooterStatus::LoadingPage(target + 1)
+        } else if app.sessions.message_remote.failed_page().is_some() {
+            PaginationFooterStatus::LoadErrorMoveRetry
+        } else if selected + 1 == total_messages {
+            PaginationFooterStatus::End
+        } else {
+            PaginationFooterStatus::Idle
+        };
+        block = with_pagination_footer(
+            block,
+            area.width,
+            PaginationFooter {
+                page: page + 1,
+                start: page_start + 1,
+                end: page_end,
+                total: total_messages,
+                status,
+            },
+            theme,
+            app.tick,
+        );
+    }
     frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
 

@@ -455,6 +455,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_session_message_page_filter_title() -> &'static str {
+        if is_chinese() {
+            "过滤 · 当前消息页"
+        } else {
+            "Filter · Current message page"
+        }
+    }
+
     pub fn tui_footer_global() -> &'static str {
         if is_chinese() {
             "[ ] 切换应用  ←→ 切换菜单/内容  ↑↓ 移动  Enter 详情  Space 切换  / 过滤  Esc 返回  ? 帮助"
@@ -4398,6 +4406,14 @@ pub mod texts {
             "滚动"
         } else {
             "scroll"
+        }
+    }
+
+    pub fn tui_key_page() -> &'static str {
+        if is_chinese() {
+            "翻页"
+        } else {
+            "page"
         }
     }
 
@@ -9302,22 +9318,6 @@ pub mod texts {
         title
     }
 
-    pub fn tui_sessions_messages_preview_title(truncated: bool) -> String {
-        let mut title = if is_chinese() {
-            "消息 · 有界预览".to_string()
-        } else {
-            "Messages · Bounded preview".to_string()
-        };
-        if truncated {
-            title.push_str(if is_chinese() {
-                " · 已截断"
-            } else {
-                " · Truncated"
-            });
-        }
-        title
-    }
-
     pub fn tui_sessions_empty_title() -> &'static str {
         if is_chinese() {
             "未找到本地会话"
@@ -9547,6 +9547,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_pagination_load_failed_move_retry() -> &'static str {
+        if is_chinese() {
+            "加载失败 · 再次移动重试"
+        } else {
+            "Load failed · Move again to retry"
+        }
+    }
+
     pub fn tui_pagination_end(total: usize) -> String {
         if is_chinese() {
             format!("已到末尾 · 共 {total} 条")
@@ -9671,9 +9679,9 @@ pub mod texts {
 
     pub fn tui_sessions_messages_filtered_empty() -> &'static str {
         if is_chinese() {
-            "没有符合当前筛选/搜索的消息。"
+            "当前消息页没有符合筛选的消息；PgUp/PgDn 可继续浏览历史。"
         } else {
-            "No messages match the current filters."
+            "No matches on this message page; use PgUp/PgDn to browse history."
         }
     }
 

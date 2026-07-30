@@ -145,6 +145,59 @@ pub(super) struct RuntimeActionContext<'a> {
     managed_auth_req_tx: Option<&'a mpsc::Sender<ManagedAuthReq>>,
 }
 
+fn queue_active_session_message_refresh(app: &mut App, tx: &mpsc::Sender<SessionReq>) {
+    if !app.sessions.request_message_source_refresh() {
+        return;
+    }
+    let _ = queue_pending_session_message_refresh(app, Some(tx));
+}
+
+/// Dispatch one remembered manual transcript refresh when paging state allows
+/// it. Returning `false` means no request was ready, so the caller may continue
+/// with ordinary adjacent-page prefetch. A refresh requested during a page
+/// crossing remains remembered in the pager and is retried by the event loop.
+pub(super) fn queue_pending_session_message_refresh(
+    app: &mut App,
+    tx: Option<&mpsc::Sender<SessionReq>>,
+) -> bool {
+    let Some(key) = app.sessions.messages_key.clone() else {
+        return false;
+    };
+    let Some((request_id, transcript_generation, refresh_page, refresh_message_key, reader)) =
+        app.sessions.next_message_source_refresh_request()
+    else {
+        return false;
+    };
+    let result = tx
+        .ok_or_else(|| "sessions worker is not running".to_string())
+        .and_then(|tx| {
+            tx.send(SessionReq::LoadMessagePage {
+                request_id,
+                key: key.clone(),
+                transcript_generation: transcript_generation.clone(),
+                page: refresh_page,
+                refresh_page,
+                refresh_message_key,
+                reader,
+            })
+            .map_err(|error| error.to_string())
+        });
+    if let Err(error) = result {
+        app.sessions.fail_message_page_request(
+            request_id,
+            &key,
+            &transcript_generation,
+            refresh_page,
+            error.clone(),
+        );
+        app.push_toast(
+            texts::tui_sessions_toast_messages_failed(&error),
+            ToastKind::Warning,
+        );
+    }
+    true
+}
+
 /// Start one materialized Sessions search and settle it immediately if its
 /// worker channel is absent or disconnected. The request id check prevents an
 /// old send failure from clearing a newer query's spinner.
@@ -519,40 +572,44 @@ pub(crate) fn handle_action(
             // start another scan here it bumps scan_active to a new id, so the
             // in-flight thread's partial/finished messages (carrying the old id)
             // get rejected — and if the worker were to drop the superseding
-            // Refresh, the UI would stay loading forever. Serialize from the entry
-            // side instead: while a scan is active, ignore `r` (a reload during an
-            // ongoing scan is a no-op by design). The automatic entry point
-            // (queue_sessions_refresh_if_needed) already guards on `loading`.
-            if ctx.app.sessions.scan_active.is_some() {
-                return Ok(());
-            }
+            // Refresh, the UI would stay loading forever. Serialize only the list
+            // scan from the entry side; the independently paged open transcript
+            // still records and dispatches its own revalidation request.
             let provider_id = ctx.app.app_type.as_str().to_string();
             let Some(tx) = ctx.session_req_tx else {
-                let request_id = ctx.app.sessions.start_scan(provider_id);
-                ctx.app
-                    .sessions
-                    .fail_scan(request_id, "sessions worker is not running".to_string());
-                ctx.app.push_toast(
-                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
-                    ToastKind::Warning,
-                );
+                if ctx.app.sessions.scan_active.is_none() {
+                    let request_id = ctx.app.sessions.start_scan(provider_id);
+                    ctx.app
+                        .sessions
+                        .fail_scan(request_id, "sessions worker is not running".to_string());
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_worker_unavailable(
+                            "sessions worker is not running",
+                        ),
+                        ToastKind::Warning,
+                    );
+                }
                 return Ok(());
             };
-            let request_id = ctx.app.sessions.start_scan(provider_id.clone());
-            if let Err(err) = tx.send(SessionReq::Refresh {
-                request_id,
-                scope_epoch: ctx.app.sessions.scope_epoch,
-                provider_id,
-                // Manual `r` reload forces a full re-parse (ignore the mtime/size
-                // snapshot); the fresh results still refresh the persistent cache.
-                force: true,
-            }) {
-                ctx.app.sessions.fail_scan(request_id, err.to_string());
-                ctx.app.push_toast(
-                    texts::tui_sessions_toast_refresh_failed(&err.to_string()),
-                    ToastKind::Warning,
-                );
+            if ctx.app.sessions.scan_active.is_none() {
+                let request_id = ctx.app.sessions.start_scan(provider_id.clone());
+                if let Err(err) = tx.send(SessionReq::Refresh {
+                    request_id,
+                    scope_epoch: ctx.app.sessions.scope_epoch,
+                    provider_id,
+                    // Manual `r` reload forces a full re-parse (ignore the mtime/size
+                    // snapshot); the fresh results still refresh the persistent cache.
+                    force: true,
+                }) {
+                    ctx.app.sessions.fail_scan(request_id, err.to_string());
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                    return Ok(());
+                }
             }
+            queue_active_session_message_refresh(ctx.app, tx);
             Ok(())
         }
         Action::SessionsDeepSearch { query } => {
@@ -1099,6 +1156,38 @@ mod tests {
         )
     }
 
+    fn run_action_with_sessions(
+        app: &mut App,
+        data: &mut UiData,
+        session_req_tx: &mpsc::Sender<SessionReq>,
+        action: Action,
+    ) -> Result<(), AppError> {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+
+        handle_action(
+            &mut terminal,
+            app,
+            data,
+            None,
+            None,
+            None,
+            None,
+            &mut proxy_loading,
+            None,
+            Some(session_req_tx),
+            None,
+            &mut webdav_loading,
+            None,
+            &mut update_check,
+            None,
+            None,
+            action,
+        )
+    }
+
     fn app_with_base_session_manifest() -> (App, TempDir) {
         let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
         let store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
@@ -1161,6 +1250,120 @@ mod tests {
             app.toast.as_ref(),
             Some(toast) if toast.kind == ToastKind::Warning
         ));
+    }
+
+    #[test]
+    fn manual_sessions_refresh_also_revalidates_the_open_transcript() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "message"}],
+                    }
+                })
+            ),
+        )
+        .expect("write transcript fixture");
+        let (reader, page) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source.to_string_lossy(),
+        )
+        .expect("open transcript fixture");
+        let mut app = App::new(Some(AppType::Codex));
+        app.sessions.provider_id = Some("codex".to_string());
+        let key = "codex:session:test".to_string();
+        app.sessions.detail_key = Some(key.clone());
+        let message_request = app.sessions.start_message_load(key.clone());
+        assert!(app
+            .sessions
+            .finish_message_load(message_request, &key, reader, page));
+        let mut data = UiData::default();
+        let (tx, rx) = mpsc::channel();
+
+        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
+            .expect("manual refresh");
+
+        assert!(matches!(
+            rx.recv().expect("session-list refresh"),
+            SessionReq::Refresh {
+                provider_id,
+                force: true,
+                ..
+            } if provider_id == "codex"
+        ));
+        assert!(matches!(
+            rx.recv().expect("transcript refresh"),
+            SessionReq::LoadMessagePage {
+                key: queued_key,
+                page: 0,
+                refresh_page: 0,
+                refresh_message_key: Some(_),
+                ..
+            } if queued_key == key
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn manual_sessions_refresh_revalidates_transcript_while_list_scan_is_active() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "message"}],
+                    }
+                })
+            ),
+        )
+        .expect("write transcript fixture");
+        let (reader, page) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source.to_string_lossy(),
+        )
+        .expect("open transcript fixture");
+        let mut app = App::new(Some(AppType::Codex));
+        app.sessions.provider_id = Some("codex".to_string());
+        let key = "codex:session:test".to_string();
+        app.sessions.detail_key = Some(key.clone());
+        let message_request = app.sessions.start_message_load(key.clone());
+        assert!(app
+            .sessions
+            .finish_message_load(message_request, &key, reader, page));
+        let scan_request = app.sessions.start_scan("codex".to_string());
+        let mut data = UiData::default();
+        let (tx, rx) = mpsc::channel();
+
+        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
+            .expect("manual refresh during list scan");
+
+        assert_eq!(app.sessions.scan_active, Some(scan_request));
+        assert!(matches!(
+            rx.recv().expect("transcript refresh"),
+            SessionReq::LoadMessagePage {
+                key: queued_key,
+                page: 0,
+                refresh_page: 0,
+                refresh_message_key: Some(_),
+                ..
+            } if queued_key == key
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

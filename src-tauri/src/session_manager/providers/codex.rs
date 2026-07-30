@@ -980,58 +980,7 @@ pub(crate) fn load_messages_cancellable(
 ) -> Result<SessionMessageBatch, String> {
     let mut batch = SessionMessageBatchBuilder::new();
     let status = visit_bounded_lines_cancellable_with_status(path, is_cancelled, &mut |line| {
-        let value: Value = match serde_json::from_str(line) {
-            Ok(parsed) => parsed,
-            Err(_) => return ControlFlow::Continue(()),
-        };
-
-        if value.get("type").and_then(Value::as_str) != Some("response_item") {
-            return ControlFlow::Continue(());
-        }
-
-        let payload = match value.get("payload") {
-            Some(payload) => payload,
-            None => return ControlFlow::Continue(()),
-        };
-
-        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-
-        // Codex uses separate payload types for tool interactions
-        let (role, content) = match payload_type {
-            "message" => {
-                let role = payload
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let content = payload.get("content").map(extract_text).unwrap_or_default();
-                (role, content)
-            }
-            "function_call" => {
-                let name = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                ("assistant".to_string(), format!("[Tool: {name}]"))
-            }
-            "function_call_output" => {
-                let output = payload
-                    .get("output")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                ("tool".to_string(), output)
-            }
-            _ => return ControlFlow::Continue(()),
-        };
-
-        if content.trim().is_empty() {
-            return ControlFlow::Continue(());
-        }
-
-        let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        batch.push(SessionMessage { role, content, ts })
+        parse_transcript_line(line).map_or(ControlFlow::Continue(()), |message| batch.push(message))
     })
     .map_err(|error| format!("Failed to read session file: {error}"))?
     .ok_or_else(|| "Session message preview was cancelled".to_string())?;
@@ -1040,6 +989,50 @@ pub(crate) fn load_messages_cancellable(
     }
 
     Ok(batch.finish())
+}
+
+/// Decode one logical Codex transcript row. Transcript indexing and the legacy
+/// bounded preview both use this adapter so format semantics cannot drift.
+pub(crate) fn parse_transcript_line(line: &str) -> Option<SessionMessage> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+
+    let payload = value.get("payload")?;
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    let (role, content) = match payload_type {
+        "message" => {
+            let role = payload
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let content = payload.get("content").map(extract_text).unwrap_or_default();
+            (role, content)
+        }
+        "function_call" => {
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            ("assistant".to_string(), format!("[Tool: {name}]"))
+        }
+        "function_call_output" => {
+            let output = payload
+                .get("output")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            ("tool".to_string(), output)
+        }
+        _ => return None,
+    };
+    if content.trim().is_empty() {
+        return None;
+    }
+    let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
+    Some(SessionMessage { role, content, ts })
 }
 
 /// Search a single Codex session file for `needle` (case-insensitive).

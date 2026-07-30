@@ -535,7 +535,7 @@ fn scan_sessions_json() -> Vec<SessionMeta> {
 /// Uses `rfind(":ses_")` to split the path from the session ID because the
 /// db path itself may contain colons (e.g. `C:\Users\...` on Windows).
 /// This relies on the OpenCode convention that session IDs start with `ses_`.
-fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     let rest = source.strip_prefix("sqlite:")?;
     let sep = rest.rfind(":ses_")?;
     let db_path = PathBuf::from(&rest[..sep]);
@@ -960,6 +960,164 @@ fn load_opencode_part_preview(
     } else {
         Ok((content, truncated))
     }
+}
+
+/// Materialize one file-backed OpenCode message selected by the transcript
+/// index. The returned flag reports content/metadata truncation, independently
+/// from whether additional messages exist.
+pub(crate) fn load_transcript_file_message(
+    message_path: &Path,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Option<SessionMessage>, bool), String> {
+    let data = match read_to_string_cancellable(message_path, is_cancelled) {
+        Ok(Some(data)) => data,
+        Ok(None) => return Err("Session message page was cancelled".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+            return Ok((None, true));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to read OpenCode message {}: {error}",
+                message_path.display()
+            ))
+        }
+    };
+    let value: Value = serde_json::from_str(&data)
+        .map_err(|error| format!("Failed to parse OpenCode message: {error}"))?;
+    let Some(message_id) = value.get("id").and_then(Value::as_str) else {
+        return Ok((None, false));
+    };
+    if message_id.len() > SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES {
+        return Ok((None, true));
+    }
+    let mut role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let mut truncated = truncate_string_utf8(&mut role, SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES);
+    let created_ts = value
+        .get("time")
+        .and_then(|time| time.get("created"))
+        .and_then(parse_timestamp_to_ms)
+        .unwrap_or(0);
+    let storage = message_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            format!(
+                "Cannot determine OpenCode storage root from {}",
+                message_path.display()
+            )
+        })?;
+    let (content, content_truncated) =
+        load_opencode_part_preview(&storage.join("part").join(message_id), is_cancelled)?;
+    truncated |= content_truncated;
+    if content.trim().is_empty() {
+        return Ok((None, truncated));
+    }
+    Ok((
+        Some(SessionMessage {
+            role,
+            content,
+            ts: (created_ts > 0).then_some(created_ts),
+        }),
+        truncated,
+    ))
+}
+
+/// Materialize an ordered page of OpenCode SQLite rowids with one
+/// read-only connection and prepared statements.
+pub(crate) fn load_transcript_sqlite_messages(
+    source: &str,
+    rowids: &[i64],
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(Vec<Option<SessionMessage>>, bool), String> {
+    let (db_path, session_id) = parse_sqlite_source(source)
+        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
+    let conn = Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Failed to open OpenCode database: {error}"))?;
+    with_sqlite_cancellation(&conn, is_cancelled, || {
+        let mut header_stmt = conn
+            .prepare(&format!(
+                "SELECT
+                    time_created,
+                    CASE WHEN length(CAST(id AS BLOB)) <= {SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES}
+                         THEN CAST(id AS TEXT) ELSE NULL END,
+                    CASE WHEN length(CAST(data AS BLOB)) <= {MAX_METADATA_FILE_BYTES}
+                         THEN CAST(data AS TEXT) ELSE NULL END,
+                    length(CAST(data AS BLOB))
+                 FROM message
+                 WHERE session_id = ?1 AND rowid = ?2
+                 LIMIT 1"
+            ))
+            .map_err(|error| format!("Failed to prepare OpenCode message query: {error}"))?;
+        let mut part_stmt = conn
+            .prepare(&format!(
+                "SELECT
+                    CASE WHEN length(CAST(data AS BLOB)) <= {MAX_METADATA_FILE_BYTES}
+                         THEN CAST(data AS TEXT) ELSE NULL END,
+                    length(CAST(data AS BLOB))
+                 FROM part
+                 WHERE session_id = ?1 AND message_id = ?2
+                 ORDER BY time_created ASC
+                 LIMIT {}",
+                SESSION_MESSAGE_PREVIEW_MAX_MESSAGES + 1
+            ))
+            .map_err(|error| format!("Failed to prepare OpenCode part query: {error}"))?;
+        let mut messages = Vec::with_capacity(rowids.len());
+        let mut truncated = false;
+        for rowid in rowids {
+            if is_cancelled() {
+                return Err("Session message page was cancelled".to_string());
+            }
+            let header = header_stmt
+                .query_row(rusqlite::params![session_id, rowid], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                })
+                .optional()
+                .map_err(|error| format!("Failed to query OpenCode message: {error}"))?;
+            let Some((created_ts, message_id, data, data_bytes)) = header else {
+                truncated = true;
+                messages.push(None);
+                continue;
+            };
+            let Some(message_id) = message_id else {
+                truncated = true;
+                messages.push(None);
+                continue;
+            };
+            truncated |= data_bytes.is_some_and(|bytes| bytes > MAX_METADATA_FILE_BYTES as i64);
+            let mut role = data
+                .as_deref()
+                .and_then(|data| serde_json::from_str::<Value>(data).ok())
+                .and_then(|value| value.get("role").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_string());
+            truncated |= truncate_string_utf8(&mut role, SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES);
+            let (content, content_truncated) = load_opencode_sqlite_parts_preview(
+                &mut part_stmt,
+                &session_id,
+                &message_id,
+                is_cancelled,
+            )?;
+            truncated |= content_truncated;
+            messages.push((!content.trim().is_empty()).then_some(SessionMessage {
+                role,
+                content,
+                ts: Some(created_ts),
+            }));
+        }
+        Ok((messages, truncated))
+    })
 }
 
 fn load_opencode_sqlite_parts_preview(
@@ -1831,6 +1989,54 @@ mod tests {
             ",
         )
         .expect("create sqlite schema");
+    }
+
+    #[test]
+    fn oversized_sqlite_message_metadata_does_not_hide_valid_parts() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).expect("database");
+        create_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO session (id, title, directory, time_created, time_updated)
+             VALUES ('ses_1', 'Session', '/tmp/project', 1, 1)",
+            [],
+        )
+        .expect("session");
+        let oversized_data = serde_json::json!({
+            "role": "user",
+            "padding": "x".repeat(MAX_METADATA_FILE_BYTES + 1),
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data)
+             VALUES ('msg_1', 'ses_1', 1, ?1)",
+            [&oversized_data],
+        )
+        .expect("message");
+        let rowid: i64 = conn
+            .query_row("SELECT rowid FROM message WHERE id = 'msg_1'", [], |row| {
+                row.get(0)
+            })
+            .expect("message rowid");
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, time_created, data)
+             VALUES ('part_1', 'ses_1', 'msg_1', 1,
+                     '{\"type\":\"text\",\"text\":\"still visible\"}')",
+            [],
+        )
+        .expect("part");
+        drop(conn);
+        let source = format!("sqlite:{}:ses_1", db_path.display());
+
+        let (messages, truncated) = load_transcript_sqlite_messages(&source, &[rowid], &|| false)
+            .expect("load transcript page");
+
+        assert!(truncated);
+        assert_eq!(messages.len(), 1);
+        let message = messages[0].as_ref().expect("valid part-backed message");
+        assert_eq!(message.role, "unknown");
+        assert_eq!(message.content, "still visible");
     }
 
     #[test]

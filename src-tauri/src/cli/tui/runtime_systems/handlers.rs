@@ -14,9 +14,9 @@ use super::super::data::{load_state, UiData};
 use super::super::runtime_actions::app_display_name;
 use super::super::CacheInvalidation;
 use super::types::{
-    build_stream_check_result_lines, CodexHistoryMsg, LocalEnvMsg, ManagedAuthMsg, ModelFetchMsg,
-    ProxyMsg, QuotaMsg, RequestTracker, SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg,
-    UpdateMsg, WebDavDone, WebDavErr, WebDavMsg, WebDavReqKind,
+    build_stream_check_result_lines, CodexHistoryMsg, LoadedMessagePage, LocalEnvMsg,
+    ManagedAuthMsg, ModelFetchMsg, ProxyMsg, QuotaMsg, RequestTracker, SessionMsg, SkillsMsg,
+    SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr, WebDavMsg, WebDavReqKind,
 };
 
 pub(crate) fn handle_codex_history_msg(
@@ -623,12 +623,15 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             key,
             result,
         } => match result {
-            Ok(batch) => {
+            Ok((reader, page)) => {
                 if !app.sessions.message_load_is_current(request_id, &key) {
-                    super::super::app::retire_session_messages(batch.messages);
+                    super::super::app::retire_session_messages(page.messages);
                     return;
                 }
-                if app.sessions.finish_message_load(request_id, &key, batch) {
+                if app
+                    .sessions
+                    .finish_message_load(request_id, &key, reader, page)
+                {
                     crate::cli::tui::app::clamp_session_message_selection(&mut app.sessions);
                 }
             }
@@ -641,6 +644,48 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                 app.push_toast(
                     texts::tui_sessions_toast_messages_failed(&error),
                     ToastKind::Warning,
+                );
+            }
+        },
+        SessionMsg::MessagePageLoaded {
+            request_id,
+            key,
+            transcript_generation,
+            page,
+            result,
+        } => match result {
+            Ok(LoadedMessagePage::Page(loaded)) => {
+                if app.sessions.finish_message_page_request(
+                    request_id,
+                    &key,
+                    &transcript_generation,
+                    page,
+                    loaded,
+                ) {
+                    crate::cli::tui::app::clamp_session_message_selection(&mut app.sessions);
+                }
+            }
+            Ok(LoadedMessagePage::Refreshed(refreshed)) => {
+                let refreshed = *refreshed;
+                if app.sessions.finish_message_source_refresh(
+                    request_id,
+                    &key,
+                    &transcript_generation,
+                    page,
+                    refreshed.reader,
+                    refreshed.active_page,
+                    refreshed.requested_page,
+                ) {
+                    crate::cli::tui::app::clamp_session_message_selection(&mut app.sessions);
+                }
+            }
+            Err(error) => {
+                app.sessions.fail_message_page_request(
+                    request_id,
+                    &key,
+                    &transcript_generation,
+                    page,
+                    error,
                 );
             }
         },

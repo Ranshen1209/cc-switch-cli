@@ -439,55 +439,53 @@ pub(crate) fn load_messages_cancellable(
         if is_cancelled() {
             return Err("Session message preview was cancelled".to_string());
         }
-        let role = match msg.get("type").and_then(Value::as_str) {
-            Some("gemini") => "assistant",
-            Some("user") => "user",
-            Some("info") | Some("error") => continue,
-            Some(_) | None => continue,
-        };
-
-        // Gemini content may be a plain string or an array of {text: ...} objects
-        let mut content = match msg.get("content") {
-            Some(Value::String(s)) => s.to_string(),
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(|item| item.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-
-        // Append tool call names from the optional toolCalls array
-        if let Some(Value::Array(calls)) = msg.get("toolCalls") {
-            for call in calls {
-                if let Some(name) = call.get("name").and_then(Value::as_str) {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&format!("[Tool: {name}]"));
-                }
-            }
-        }
-
-        if content.trim().is_empty() {
+        let Some(message) = parse_transcript_message(msg) else {
             continue;
-        }
-
-        let ts = msg.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        if batch
-            .push(SessionMessage {
-                role: role.to_string(),
-                content,
-                ts,
-            })
-            .is_break()
-        {
+        };
+        if batch.push(message).is_break() {
             break;
         }
     }
 
     Ok(batch.finish())
+}
+
+/// Decode one Gemini `messages[]` element for every transcript consumer.
+pub(crate) fn parse_transcript_message(message: &Value) -> Option<SessionMessage> {
+    let role = match message.get("type").and_then(Value::as_str) {
+        Some("gemini") => "assistant",
+        Some("user") => "user",
+        Some("info") | Some("error") | Some(_) | None => return None,
+    };
+
+    let mut content = match message.get("content") {
+        Some(Value::String(value)) => value.to_string(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    if let Some(Value::Array(calls)) = message.get("toolCalls") {
+        for call in calls {
+            if let Some(name) = call.get("name").and_then(Value::as_str) {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("[Tool: {name}]"));
+            }
+        }
+    }
+    if content.trim().is_empty() {
+        return None;
+    }
+    let ts = message.get("timestamp").and_then(parse_timestamp_to_ms);
+    Some(SessionMessage {
+        role: role.to_string(),
+        content,
+        ts,
+    })
 }
 
 /// Search a single Gemini session JSON file for `needle` (case-insensitive).

@@ -2575,7 +2575,7 @@ fn maybe_queue_session_page_load(
     if !matches!(app.route, route::Route::Sessions) {
         return;
     }
-    let Some(page) = app.sessions.remote.pending_cross_page() else {
+    let Some(page) = app.sessions.remote.preferred_load_page() else {
         return;
     };
     let Some((request_id, token, reader)) = app.sessions.next_page_request(page) else {
@@ -2598,6 +2598,59 @@ fn maybe_queue_session_page_load(
     }) {
         app.sessions
             .fail_page_request(request_id, &token, page, error.to_string());
+    }
+}
+
+fn maybe_queue_session_message_page_load(
+    app: &mut App,
+    session_req_tx: Option<&mpsc::Sender<runtime_systems::SessionReq>>,
+) {
+    if !matches!(app.route, route::Route::Sessions)
+        || app.sessions.detail_key.is_none()
+        || !app.sessions.messages_loaded
+    {
+        return;
+    }
+    if runtime_actions::queue_pending_session_message_refresh(app, session_req_tx) {
+        return;
+    }
+    let Some(page) = app.sessions.message_remote.preferred_load_page() else {
+        return;
+    };
+    let Some(key) = app.sessions.messages_key.clone() else {
+        return;
+    };
+    let Some((request_id, transcript_generation, refresh_page, refresh_message_key, reader)) =
+        app.sessions.next_message_page_request(page)
+    else {
+        return;
+    };
+    let Some(tx) = session_req_tx else {
+        app.sessions.fail_message_page_request(
+            request_id,
+            &key,
+            &transcript_generation,
+            page,
+            "sessions worker is not running".to_string(),
+        );
+        return;
+    };
+    if let Err(error) = tx.send(runtime_systems::SessionReq::LoadMessagePage {
+        request_id,
+        key: key.clone(),
+        transcript_generation: transcript_generation.clone(),
+        page,
+        refresh_page,
+        refresh_message_key,
+        reader,
+    }) {
+        app.sessions.fail_message_page_request(
+            request_id,
+            &key,
+            &transcript_generation,
+            page,
+            error.to_string(),
+        );
     }
 }
 
@@ -3142,6 +3195,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
 
         queue_sessions_refresh_if_needed(&mut app, sessions.as_ref().map(|s| &s.req_tx));
         maybe_queue_session_page_load(&mut app, sessions.as_ref().map(|s| &s.req_tx));
+        maybe_queue_session_message_page_load(&mut app, sessions.as_ref().map(|s| &s.req_tx));
         maybe_queue_session_manifest_reconcile(&mut app, sessions.as_ref().map(|s| &s.req_tx));
 
         if let Some(speedtest) = speedtest.as_ref() {

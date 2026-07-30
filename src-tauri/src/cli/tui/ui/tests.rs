@@ -907,7 +907,9 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
     assert!(all.contains("No local sessions found"), "{all}");
     assert!(all.contains("local session files"), "{all}");
     assert!(all.contains("database"), "{all}");
-    assert!(all.contains("←→ switch panel"), "{all}");
+    assert!(all.contains("switch panel"), "{all}");
+    assert!(all.contains("PgUp/PgDn"), "{all}");
+    assert!(all.contains(texts::tui_key_page()), "{all}");
     assert!(!all.contains("←→/h/l"), "{all}");
     assert!(!all.contains("show all"), "{all}");
 }
@@ -1676,7 +1678,108 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
 }
 
 #[test]
-fn tui_sessions_page_boundary_uses_compact_bottom_border_cta() {
+fn tui_sessions_transcript_footer_reports_the_complete_logical_history() {
+    let _lang = use_test_language(Language::English);
+    let temp = tempfile::tempdir().expect("transcript fixture directory");
+    let source = temp.path().join("session.jsonl");
+    let body = (0_usize..205)
+        .map(|index| {
+            serde_json::json!({
+                "type": "response_item",
+                "timestamp": index as i64,
+                "payload": {
+                    "type": "message",
+                    "role": if index.is_multiple_of(2) { "user" } else { "assistant" },
+                    "content": [{
+                        "type": "input_text",
+                        "text": format!("complete-message-{index}")
+                    }]
+                }
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&source, body).expect("write transcript fixture");
+    let source_text = source.to_string_lossy().into_owned();
+    let (reader, _) = crate::session_manager::transcript::open_transcript_at(
+        &temp.path().join("config"),
+        "codex",
+        &source_text,
+    )
+    .expect("open transcript fixture");
+    let first = reader
+        .load_page(0, &|| false)
+        .expect("first transcript page");
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "codex".to_string(),
+        session_id: "complete-history".to_string(),
+        title: Some("Complete history".to_string()),
+        source_path: Some(source_text),
+        ..crate::session_manager::SessionMeta::default()
+    });
+    let key = app::session_key(&app.sessions.rows[0]);
+    app.sessions.open_detail(key.clone());
+    app.sessions.pane = app::SessionsPane::Detail;
+    let request_id = app.sessions.start_message_load(key.clone());
+    assert!(app
+        .sessions
+        .finish_message_load(request_id, &key, reader, first));
+    app.sessions.messages_truncated = true;
+    assert_eq!(app.sessions.selected_message_absolute(), 0);
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        180,
+        40,
+    ));
+
+    assert!(all.contains("┌ Messages ─"), "{all}");
+    assert!(!all.contains("Messages ·"), "{all}");
+    assert!(!all.contains("Full history"), "{all}");
+    assert!(!all.contains("Body preview shortened"), "{all}");
+    assert!(all.contains("Page 1 · 1–100 of 205"), "{all}");
+    assert!(!all.contains("End of list · 205 total"), "{all}");
+    assert!(all.contains("complete-message-0"), "{all}");
+    assert!(!all.contains("complete-message-100"), "{all}");
+
+    let previous_gate = app.sessions.message_pagination.clone();
+    app.sessions.message_pagination.select(199);
+    assert!(!app
+        .sessions
+        .begin_message_page_cross(1, previous_gate, None));
+    let (page_request, generation, _refresh_page, _refresh_key, _reader) = app
+        .sessions
+        .next_message_page_request(1)
+        .expect("message page request");
+    assert!(app.sessions.fail_message_page_request(
+        page_request,
+        &key,
+        &generation,
+        1,
+        "offline".to_string(),
+    ));
+    let failed = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        180,
+        40,
+    ));
+    assert!(
+        failed.contains("Load failed · Move again to retry"),
+        "{failed}"
+    );
+    assert!(!failed.contains("Enter to retry"), "{failed}");
+}
+
+#[test]
+fn tui_sessions_seamless_page_cross_uses_loading_footer() {
     use crate::cli::tui::input::{ScrollDirection, WheelGestureId};
 
     let _lang = use_test_language(Language::English);
@@ -1730,9 +1833,9 @@ fn tui_sessions_page_boundary_uses_compact_bottom_border_cta() {
         180,
         40,
     ));
-    assert!(all.contains("next page"), "{all}");
-    assert!(all.contains("Enter"), "{all}");
-    assert!(all.contains("Session 99"), "{all}");
+    assert!(all.contains("Loading page 2"), "{all}");
+    assert!(!all.contains("Enter to load"), "{all}");
+    assert!(all.contains("Session 0"), "{all}");
     assert!(!all.contains("Session 100"), "{all}");
 }
 

@@ -939,6 +939,7 @@ pub struct PricingState {
 }
 
 const SESSION_PAGE_CACHE_PAGES: usize = 2;
+const TRANSCRIPT_PAGE_CACHE_PAGES: usize = 2;
 
 /// Identifies one immutable, generation-pinned Sessions page source.
 ///
@@ -988,7 +989,50 @@ struct CachedSessionPage {
 struct PendingSessionPageCross {
     page: usize,
     previous_gate: super::paged_list::PagedListState,
+    target_gate: super::paged_list::PagedListState,
     wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedTranscriptPage {
+    messages: Vec<crate::session_manager::SessionMessage>,
+    message_keys: Vec<String>,
+    content_truncated: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTranscriptPageCross {
+    page: usize,
+    previous_gate: super::paged_list::PagedListState,
+    target_gate: super::paged_list::PagedListState,
+    wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTranscriptPageRequest {
+    request_id: u64,
+    refresh_page: usize,
+    refresh_message_key: Option<String>,
+}
+
+/// Bounded window over one immutable transcript locator generation. Provider
+/// parsing and disk access stay in `session_manager::transcript`; this state
+/// owns only TUI selection, adjacent-page caching, request identity and
+/// asynchronous page activation.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TranscriptRemotePager {
+    reader: Option<crate::session_manager::transcript::TranscriptReader>,
+    generation: Option<String>,
+    current_page: usize,
+    total_rows: usize,
+    active_message_keys: Vec<String>,
+    cache: super::page_window::BoundedPageWindow<CachedTranscriptPage, TRANSCRIPT_PAGE_CACHE_PAGES>,
+    pending: HashMap<usize, PendingTranscriptPageRequest>,
+    errors: HashMap<usize, String>,
+    pending_cross: Option<PendingTranscriptPageCross>,
+    source_refresh_requested: bool,
+    failed_page: Option<usize>,
+    request_seq: u64,
 }
 
 /// A newly-published source waits here while a worker locates the stable
@@ -1054,8 +1098,7 @@ pub(crate) struct SessionRemotePager {
     active_reader: Option<crate::session_manager::paged_manifest::ManifestReader>,
     current_page: usize,
     total_rows: usize,
-    cache: HashMap<usize, CachedSessionPage>,
-    lru: std::collections::VecDeque<usize>,
+    cache: super::page_window::BoundedPageWindow<CachedSessionPage, SESSION_PAGE_CACHE_PAGES>,
     pending: HashMap<usize, u64>,
     errors: HashMap<usize, String>,
     pending_cross: Option<PendingSessionPageCross>,
@@ -1113,6 +1156,8 @@ pub struct SessionsState {
     pub(crate) visibility_cache: std::cell::RefCell<super::helpers::SessionVisibilityCache>,
     pub pane: SessionsPane,
     pub message_idx: usize,
+    pub(crate) message_pagination: super::paged_list::PagedListState,
+    pub(crate) message_remote: TranscriptRemotePager,
     pub loading: bool,
     pub loaded_once: bool,
     pub last_error: Option<String>,
@@ -1141,8 +1186,9 @@ pub struct SessionsState {
     pub message_filter: TextInput,
     pub messages_loading: bool,
     pub messages_loaded: bool,
-    /// True when the detail pane contains only the bounded prefix/window of a
-    /// larger transcript.
+    /// True when at least one body on the active complete-history page was
+    /// shortened for bounded display. It never means logical messages were
+    /// omitted from the transcript pager.
     pub messages_truncated: bool,
     pub messages_error: Option<String>,
     pub message_seq: u64,
@@ -1193,7 +1239,10 @@ impl Default for SessionsState {
             time_anchor_ms: chrono::Utc::now().timestamp_millis(),
             rows: Vec::new(),
             selected_idx: 0,
-            pagination: super::paged_list::PagedListState::new(100, 0),
+            pagination: super::paged_list::PagedListState::seamless(
+                crate::session_manager::paged_manifest::PAGE_SIZE,
+                0,
+            ),
             remote: SessionRemotePager::default(),
             pending_manifest: None,
             base_manifest: None,
@@ -1218,6 +1267,11 @@ impl Default for SessionsState {
             ),
             pane: SessionsPane::List,
             message_idx: 0,
+            message_pagination: super::paged_list::PagedListState::seamless(
+                crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE,
+                0,
+            ),
+            message_remote: TranscriptRemotePager::default(),
             loading: false,
             loaded_once: false,
             last_error: None,
@@ -1322,6 +1376,674 @@ fn retire_large_vec<T: Send + 'static>(rows: Vec<T>, thread_name: &'static str) 
         .spawn(move || drop(rows));
 }
 
+impl TranscriptRemotePager {
+    pub(crate) const fn current_page(&self) -> usize {
+        self.current_page
+    }
+
+    pub(crate) const fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    pub(crate) fn page_count(&self) -> usize {
+        self.total_rows
+            .div_ceil(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE)
+    }
+
+    pub(crate) fn has_pending_requests(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub(crate) const fn failed_page(&self) -> Option<usize> {
+        self.failed_page
+    }
+
+    pub(crate) fn dismiss_page_error(&mut self) {
+        if let Some(page) = self.failed_page.take() {
+            self.errors.remove(&page);
+        }
+    }
+
+    pub(crate) fn has_page(&self, page: usize) -> bool {
+        self.reader.is_some() && (page == self.current_page || self.cache.contains(page))
+    }
+
+    pub(crate) fn sync_loaded_selection(
+        &self,
+        messages_len: usize,
+        selected_idx: &mut usize,
+        gate: &mut super::paged_list::PagedListState,
+    ) {
+        let total = if self.reader.is_some() {
+            self.total_rows
+        } else {
+            messages_len
+        };
+        gate.sync_len(total);
+        if total == 0 {
+            gate.select(0);
+            *selected_idx = 0;
+            return;
+        }
+        *selected_idx = (*selected_idx).min(messages_len.saturating_sub(1));
+        let absolute = self
+            .current_page
+            .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE)
+            .saturating_add(*selected_idx)
+            .min(total - 1);
+        gate.select(absolute);
+    }
+
+    pub(crate) fn reset(
+        &mut self,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+    ) {
+        self.reader = None;
+        self.generation = None;
+        self.current_page = 0;
+        self.total_rows = 0;
+        retire_session_messages(std::mem::take(active_messages));
+        self.active_message_keys.clear();
+        for page in self.cache.clear() {
+            retire_session_messages(page.messages);
+        }
+        self.pending.clear();
+        self.errors.clear();
+        self.pending_cross = None;
+        self.source_refresh_requested = false;
+        self.failed_page = None;
+    }
+
+    pub(crate) fn install_source(
+        &mut self,
+        reader: crate::session_manager::transcript::TranscriptReader,
+        page: crate::session_manager::transcript::TranscriptPage,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+        selected_idx: &mut usize,
+        content_truncated: &mut bool,
+        gate: &mut super::paged_list::PagedListState,
+    ) -> bool {
+        let page_start = page
+            .page_index
+            .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        self.install_source_at_selection(
+            reader,
+            page,
+            Some(page_start),
+            active_messages,
+            selected_idx,
+            content_truncated,
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn install_source_at_selection(
+        &mut self,
+        reader: crate::session_manager::transcript::TranscriptReader,
+        page: crate::session_manager::transcript::TranscriptPage,
+        selected_absolute: Option<usize>,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+        selected_idx: &mut usize,
+        content_truncated: &mut bool,
+        gate: &mut super::paged_list::PagedListState,
+    ) -> bool {
+        let expected_len = page
+            .total_rows
+            .saturating_sub(
+                page.page_index
+                    .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE),
+            )
+            .min(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        if page.generation != reader.generation()
+            || page.total_rows != reader.total_rows()
+            || page.page_index >= reader.page_count().max(1)
+            || page.messages.len() != expected_len
+            || page.message_keys.len() != page.messages.len()
+        {
+            retire_session_messages(page.messages);
+            return false;
+        }
+
+        // A second manual refresh may have arrived while the request that
+        // produced this source was still running. Installing the new
+        // generation settles only that in-flight request; preserve the newer
+        // intent so the event loop performs one more revalidation.
+        let source_refresh_requested = self.source_refresh_requested;
+        self.reset(active_messages);
+        self.source_refresh_requested = source_refresh_requested;
+        self.generation = Some(page.generation.clone());
+        self.current_page = page.page_index;
+        self.total_rows = page.total_rows;
+        self.active_message_keys = page.message_keys;
+        *active_messages = page.messages;
+        *content_truncated = page.content_truncated;
+        self.reader = Some(reader);
+
+        let page_start = self
+            .current_page
+            .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        let page_end = page_start
+            .saturating_add(active_messages.len().saturating_sub(1))
+            .min(self.total_rows.saturating_sub(1));
+        let selected_absolute = (self.total_rows > 0).then(|| {
+            selected_absolute
+                .unwrap_or(page_end)
+                .min(self.total_rows - 1)
+                .clamp(page_start.min(page_end), page_end)
+        });
+        gate.reset(self.total_rows, selected_absolute);
+        *selected_idx = selected_absolute
+            .unwrap_or(0)
+            .saturating_sub(page_start)
+            .min(active_messages.len().saturating_sub(1));
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn refresh_source_if_pending(
+        &mut self,
+        request_id: u64,
+        previous_generation: &str,
+        requested_page: usize,
+        reader: crate::session_manager::transcript::TranscriptReader,
+        active_page: crate::session_manager::transcript::TranscriptPage,
+        refreshed_requested_page: Option<crate::session_manager::transcript::TranscriptPage>,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+        selected_idx: &mut usize,
+        content_truncated: &mut bool,
+        gate: &mut super::paged_list::PagedListState,
+    ) -> bool {
+        let pending = self.pending.get(&requested_page).cloned();
+        if self.generation.as_deref() != Some(previous_generation)
+            || pending.as_ref().map(|pending| pending.request_id) != Some(request_id)
+        {
+            retire_session_messages(active_page.messages);
+            if let Some(page) = refreshed_requested_page {
+                retire_session_messages(page.messages);
+            }
+            return false;
+        }
+        let pending = pending.expect("matching transcript request checked above");
+        let requested_page_became_cross = self
+            .pending_cross
+            .as_ref()
+            .is_some_and(|cross| cross.page == requested_page);
+        if !requested_page_became_cross
+            && (self.current_page != pending.refresh_page
+                || self.pending_cross.is_some()
+                || self.selected_active_message_key(gate) != pending.refresh_message_key)
+        {
+            // The request began as a speculative prefetch, but navigation has
+            // since moved to another cached page or started a different page
+            // crossing. Its refreshed viewport snapshot is no longer allowed
+            // to replace the newer UI state. Keep the newer request/crossing
+            // intact; the next missing-page read will refresh that viewport.
+            self.pending.remove(&requested_page);
+            retire_session_messages(active_page.messages);
+            if let Some(page) = refreshed_requested_page {
+                retire_session_messages(page.messages);
+            }
+            return false;
+        }
+        let selected_absolute = if requested_page_became_cross {
+            self.pending_cross
+                .as_ref()
+                .and_then(|cross| cross.target_gate.selected_index())
+        } else {
+            pending
+                .refresh_message_key
+                .as_deref()
+                .and_then(|message_key| reader.locate_message_key(message_key).ok().flatten())
+                .or_else(|| gate.selected_index())
+        };
+        let (page, companion) = if requested_page_became_cross {
+            match refreshed_requested_page {
+                Some(page) => (page, Some(active_page)),
+                None => (active_page, None),
+            }
+        } else {
+            (active_page, refreshed_requested_page)
+        };
+        let installed = self.install_source_at_selection(
+            reader,
+            page,
+            selected_absolute,
+            active_messages,
+            selected_idx,
+            content_truncated,
+            gate,
+        );
+        if installed {
+            if let Some(page) = companion {
+                self.cache_refreshed_companion(page);
+            }
+        } else {
+            if let Some(page) = companion {
+                retire_session_messages(page.messages);
+            }
+            self.pending.remove(&requested_page);
+            self.errors.insert(
+                requested_page,
+                "Session transcript refresh returned an invalid page".to_string(),
+            );
+            if self
+                .pending_cross
+                .as_ref()
+                .is_some_and(|cross| cross.page == requested_page)
+            {
+                if let Some(cross) = self.pending_cross.take() {
+                    *gate = cross.previous_gate;
+                }
+                self.failed_page = Some(requested_page);
+            }
+        }
+        installed
+    }
+
+    fn cache_refreshed_companion(
+        &mut self,
+        page: crate::session_manager::transcript::TranscriptPage,
+    ) {
+        let expected_len = self
+            .total_rows
+            .saturating_sub(
+                page.page_index
+                    .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE),
+            )
+            .min(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        if self.generation.as_deref() != Some(page.generation.as_str())
+            || page.total_rows != self.total_rows
+            || page.page_index == self.current_page
+            || page.page_index >= self.page_count()
+            || page.messages.len() != expected_len
+            || page.message_keys.len() != page.messages.len()
+        {
+            retire_session_messages(page.messages);
+            return;
+        }
+        self.insert_cached(
+            page.page_index,
+            CachedTranscriptPage {
+                messages: page.messages,
+                message_keys: page.message_keys,
+                content_truncated: page.content_truncated,
+            },
+        );
+    }
+
+    pub(crate) fn next_request(
+        &mut self,
+        page: usize,
+        gate: &super::paged_list::PagedListState,
+    ) -> Option<(
+        u64,
+        String,
+        usize,
+        Option<String>,
+        crate::session_manager::transcript::TranscriptReader,
+    )> {
+        if page >= self.page_count()
+            || self.has_page(page)
+            || self.pending.contains_key(&page)
+            || self.errors.contains_key(&page)
+        {
+            return None;
+        }
+        let requested_page_is_cross = self
+            .pending_cross
+            .as_ref()
+            .is_some_and(|cross| cross.page == page);
+        let refresh_page = if requested_page_is_cross {
+            page
+        } else {
+            self.current_page
+        };
+        let refresh_message_key = (!requested_page_is_cross)
+            .then(|| self.selected_active_message_key(gate))
+            .flatten();
+        self.enqueue_request(page, refresh_page, refresh_message_key)
+    }
+
+    /// Explicitly revalidate the active materialized page even when every
+    /// adjacent page is already cached. Manual refresh uses the same request
+    /// and reconciliation path as background paging, so the old page remains
+    /// visible while a changed source is rebuilt around the stable selection.
+    pub(crate) fn request_source_refresh(&mut self) -> bool {
+        if self.reader.is_none() {
+            return false;
+        }
+        self.source_refresh_requested = true;
+        true
+    }
+
+    pub(crate) fn next_source_refresh_request(
+        &mut self,
+        gate: &super::paged_list::PagedListState,
+    ) -> Option<(
+        u64,
+        String,
+        usize,
+        Option<String>,
+        crate::session_manager::transcript::TranscriptReader,
+    )> {
+        if !self.source_refresh_requested || self.reader.is_none() || self.pending_cross.is_some() {
+            return None;
+        }
+        let page = self.current_page;
+        if self.pending.contains_key(&page) {
+            return None;
+        }
+        let refresh_message_key = self.selected_active_message_key(gate);
+        let request = self.enqueue_request(page, page, refresh_message_key);
+        if request.is_some() {
+            self.source_refresh_requested = false;
+        }
+        request
+    }
+
+    fn enqueue_request(
+        &mut self,
+        page: usize,
+        refresh_page: usize,
+        refresh_message_key: Option<String>,
+    ) -> Option<(
+        u64,
+        String,
+        usize,
+        Option<String>,
+        crate::session_manager::transcript::TranscriptReader,
+    )> {
+        let generation = self.generation.clone()?;
+        let reader = self.reader.as_ref()?;
+        if reader.generation() != generation {
+            return None;
+        }
+        self.request_seq = self.request_seq.wrapping_add(1);
+        let request_id = self.request_seq;
+        self.errors.remove(&page);
+        self.pending.insert(
+            page,
+            PendingTranscriptPageRequest {
+                request_id,
+                refresh_page,
+                refresh_message_key: refresh_message_key.clone(),
+            },
+        );
+        Some((
+            request_id,
+            generation,
+            refresh_page,
+            refresh_message_key,
+            reader.clone(),
+        ))
+    }
+
+    fn selected_active_message_key(
+        &self,
+        gate: &super::paged_list::PagedListState,
+    ) -> Option<String> {
+        let page_start = self
+            .current_page
+            .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        let local = gate.selected_index()?.checked_sub(page_start)?;
+        self.active_message_keys.get(local).cloned()
+    }
+
+    pub(crate) fn start_cross(
+        &mut self,
+        page: usize,
+        previous_gate: super::paged_list::PagedListState,
+        target_gate: super::paged_list::PagedListState,
+        wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
+    ) {
+        if !self.has_page(page) {
+            self.errors.remove(&page);
+            self.failed_page = None;
+            self.pending_cross = Some(PendingTranscriptPageCross {
+                page,
+                previous_gate,
+                target_gate,
+                wheel_gesture,
+            });
+        }
+    }
+
+    pub(crate) fn input_is_blocked(&self) -> bool {
+        self.pending_cross.is_some()
+    }
+
+    pub(crate) fn pending_cross_page(&self) -> Option<usize> {
+        self.pending_cross.as_ref().map(|cross| cross.page)
+    }
+
+    /// Prefer the previous adjacent page when revisiting a later viewport;
+    /// a newly-opened detail starts on page zero and therefore naturally
+    /// prepares the next page. Once both adjacent pages are present the
+    /// fixed-size cache applies the same deterministic LRU bound used by the
+    /// Sessions list.
+    pub(crate) fn preferred_load_page(&self) -> Option<usize> {
+        if let Some(page) = self.pending_cross_page() {
+            return (!self.has_page(page) && !self.pending.contains_key(&page)).then_some(page);
+        }
+        if let Some(page) = self.current_page.checked_sub(1).filter(|page| {
+            !self.has_page(*page)
+                && !self.pending.contains_key(page)
+                && !self.errors.contains_key(page)
+        }) {
+            return Some(page);
+        }
+        self.current_page.checked_add(1).filter(|page| {
+            *page < self.page_count()
+                && !self.has_page(*page)
+                && !self.pending.contains_key(page)
+                && !self.errors.contains_key(page)
+        })
+    }
+
+    fn cancel_cross(
+        &mut self,
+        direction: super::paged_list::PageDirection,
+        gate: &mut super::paged_list::PagedListState,
+    ) -> bool {
+        let Some(cross) = self.pending_cross.as_ref() else {
+            return false;
+        };
+        let is_reverse = match direction {
+            super::paged_list::PageDirection::Previous => cross.page > self.current_page,
+            super::paged_list::PageDirection::Next => cross.page < self.current_page,
+        };
+        if !is_reverse {
+            return false;
+        }
+        let cross = self.pending_cross.take().expect("checked above");
+        *gate = cross.previous_gate;
+        self.failed_page = None;
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_page(
+        &mut self,
+        request_id: u64,
+        generation: &str,
+        page_index: usize,
+        page: crate::session_manager::transcript::TranscriptPage,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+        selected_idx: &mut usize,
+        content_truncated: &mut bool,
+        gate: &mut super::paged_list::PagedListState,
+    ) -> bool {
+        let expected_len = self
+            .total_rows
+            .saturating_sub(
+                page_index.saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE),
+            )
+            .min(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE);
+        if self.generation.as_deref() != Some(generation)
+            || self
+                .pending
+                .get(&page_index)
+                .map(|pending| pending.request_id)
+                != Some(request_id)
+            || page.generation != generation
+            || page.page_index != page_index
+            || page.total_rows != self.total_rows
+            || page.messages.len() != expected_len
+            || page.message_keys.len() != page.messages.len()
+        {
+            retire_session_messages(page.messages);
+            return false;
+        }
+        self.pending.remove(&page_index);
+        self.errors.remove(&page_index);
+        self.failed_page = None;
+        let cached = CachedTranscriptPage {
+            messages: page.messages,
+            message_keys: page.message_keys,
+            content_truncated: page.content_truncated,
+        };
+        if self
+            .pending_cross
+            .as_ref()
+            .is_some_and(|cross| cross.page == page_index)
+        {
+            let cross = self
+                .pending_cross
+                .take()
+                .expect("matching transcript cross must remain pending");
+            *gate = cross.target_gate;
+            self.activate_page(
+                page_index,
+                cached,
+                active_messages,
+                selected_idx,
+                content_truncated,
+                gate,
+            );
+        } else if page_index == self.current_page {
+            // Explicit source refreshes deliberately reload the materialized
+            // page. A generation may stay valid while provider-owned message
+            // bodies change in place, so treating this as a speculative cache
+            // fill would discard the newly-read content.
+            self.activate_page(
+                page_index,
+                cached,
+                active_messages,
+                selected_idx,
+                content_truncated,
+                gate,
+            );
+        } else {
+            self.insert_cached(page_index, cached);
+        }
+        true
+    }
+
+    pub(crate) fn fail_page(
+        &mut self,
+        request_id: u64,
+        generation: &str,
+        page: usize,
+        error: String,
+        gate: &mut super::paged_list::PagedListState,
+    ) -> bool {
+        if self.generation.as_deref() != Some(generation)
+            || self.pending.get(&page).map(|pending| pending.request_id) != Some(request_id)
+        {
+            return false;
+        }
+        self.pending.remove(&page);
+        self.errors.insert(page, error);
+        if self
+            .pending_cross
+            .as_ref()
+            .is_some_and(|cross| cross.page == page)
+        {
+            if let Some(cross) = self.pending_cross.take() {
+                *gate = cross.previous_gate;
+                if let Some(gesture) = cross.wheel_gesture {
+                    gate.block_wheel_gesture_after_failed_cross(gesture);
+                }
+            }
+            self.failed_page = Some(page);
+        }
+        true
+    }
+
+    pub(crate) fn activate_cached(
+        &mut self,
+        page: usize,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+        selected_idx: &mut usize,
+        content_truncated: &mut bool,
+        gate: &super::paged_list::PagedListState,
+    ) -> bool {
+        let Some(cached) = self.cache.take(page) else {
+            return false;
+        };
+        self.failed_page = None;
+        self.activate_page(
+            page,
+            cached,
+            active_messages,
+            selected_idx,
+            content_truncated,
+            gate,
+        );
+        true
+    }
+
+    fn activate_page(
+        &mut self,
+        page: usize,
+        cached: CachedTranscriptPage,
+        active_messages: &mut Vec<crate::session_manager::SessionMessage>,
+        selected_idx: &mut usize,
+        content_truncated: &mut bool,
+        gate: &super::paged_list::PagedListState,
+    ) {
+        let old_page = self.current_page;
+        let old = CachedTranscriptPage {
+            messages: std::mem::replace(active_messages, cached.messages),
+            message_keys: std::mem::replace(&mut self.active_message_keys, cached.message_keys),
+            content_truncated: std::mem::replace(content_truncated, cached.content_truncated),
+        };
+        self.current_page = page;
+        if old_page != page {
+            self.insert_cached(old_page, old);
+        } else {
+            retire_session_messages(old.messages);
+        }
+        let absolute = gate.selected_index().unwrap_or(0);
+        *selected_idx = absolute
+            .saturating_sub(
+                page.saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE),
+            )
+            .min(active_messages.len().saturating_sub(1));
+    }
+
+    fn insert_cached(&mut self, page: usize, cached: CachedTranscriptPage) {
+        if cached.messages.is_empty() || page == self.current_page {
+            retire_session_messages(cached.messages);
+            return;
+        }
+        for retired in self.cache.insert(page, cached) {
+            retire_session_messages(retired.messages);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_messages(&self, active_len: usize) -> usize {
+        active_len
+            + self
+                .cache
+                .values()
+                .map(|page| page.messages.len())
+                .sum::<usize>()
+    }
+}
+
 impl SessionRemotePager {
     pub(crate) fn token(&self) -> Option<&SessionPageToken> {
         self.token.as_ref()
@@ -1340,10 +2062,6 @@ impl SessionRemotePager {
             .div_ceil(crate::session_manager::paged_manifest::PAGE_SIZE)
     }
 
-    pub(crate) fn is_page_pending(&self, page: usize) -> bool {
-        self.pending.contains_key(&page)
-    }
-
     pub(crate) const fn failed_page(&self) -> Option<usize> {
         self.failed_page
     }
@@ -1355,7 +2073,7 @@ impl SessionRemotePager {
     }
 
     pub(crate) fn has_page(&self, page: usize) -> bool {
-        page == self.current_page || self.cache.contains_key(&page)
+        page == self.current_page || self.cache.contains(page)
     }
 
     pub(crate) fn reset_scope(&mut self) {
@@ -1434,6 +2152,7 @@ impl SessionRemotePager {
         &mut self,
         page: usize,
         previous_gate: super::paged_list::PagedListState,
+        target_gate: super::paged_list::PagedListState,
         wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
     ) {
         if !self.has_page(page) {
@@ -1442,6 +2161,7 @@ impl SessionRemotePager {
             self.pending_cross = Some(PendingSessionPageCross {
                 page,
                 previous_gate,
+                target_gate,
                 wheel_gesture,
             });
         }
@@ -1453,6 +2173,47 @@ impl SessionRemotePager {
 
     pub(crate) fn pending_cross_page(&self) -> Option<usize> {
         self.pending_cross.as_ref().map(|cross| cross.page)
+    }
+
+    /// Select one adjacent page for speculative loading.
+    ///
+    /// A user-initiated cross always wins. Otherwise the forward page is
+    /// prepared first because Sessions are ordered newest-to-oldest; the
+    /// previous page is the fallback after a direct jump or cache eviction.
+    /// Keeping this policy in the pager lets the event loop remain a transport
+    /// layer and makes cache/prefetch decisions independently testable.
+    pub(crate) fn preferred_load_page(&self) -> Option<usize> {
+        if let Some(page) = self.pending_cross_page() {
+            return (!self.has_page(page) && !self.pending.contains_key(&page)).then_some(page);
+        }
+
+        let next = self.current_page.checked_add(1);
+        if let Some(page) = next.filter(|page| {
+            *page < self.page_count()
+                && !self.has_page(*page)
+                && !self.pending.contains_key(page)
+                && !self.errors.contains_key(page)
+        }) {
+            return Some(page);
+        }
+
+        self.current_page.checked_sub(1).filter(|page| {
+            !self.has_page(*page)
+                && !self.pending.contains_key(page)
+                && !self.errors.contains_key(page)
+        })
+    }
+
+    pub(crate) fn next_page_is_ready(&self) -> bool {
+        self.current_page
+            .checked_add(1)
+            .is_some_and(|page| page < self.page_count() && self.has_page(page))
+    }
+
+    pub(crate) fn next_page_is_pending(&self) -> bool {
+        self.current_page
+            .checked_add(1)
+            .is_some_and(|page| self.pending.contains_key(&page))
     }
 
     fn cancel_cross(
@@ -1502,7 +2263,11 @@ impl SessionRemotePager {
             .as_ref()
             .is_some_and(|cross| cross.page == page)
         {
-            self.pending_cross = None;
+            let cross = self
+                .pending_cross
+                .take()
+                .expect("matching session cross must remain pending");
+            *gate = cross.target_gate;
             self.activate_page(page, rows, active_rows, selected_idx, gate);
         } else {
             self.insert_cached(page, rows);
@@ -1548,11 +2313,10 @@ impl SessionRemotePager {
         selected_idx: &mut usize,
         gate: &super::paged_list::PagedListState,
     ) -> bool {
-        let Some(cached) = self.cache.remove(&page) else {
+        let Some(cached) = self.cache.take(page) else {
             return false;
         };
         self.failed_page = None;
-        self.lru.retain(|cached_page| *cached_page != page);
         self.activate_page(page, cached.rows, active_rows, selected_idx, gate);
         true
     }
@@ -1567,12 +2331,12 @@ impl SessionRemotePager {
     ) {
         let old_page = self.current_page;
         let old_rows = std::mem::replace(active_rows, rows);
+        self.current_page = page;
         if old_page != page {
             self.insert_cached(old_page, old_rows);
         } else {
             retire_session_rows(old_rows);
         }
-        self.current_page = page;
         let absolute = gate.selected_index().unwrap_or(0);
         *selected_idx = absolute
             .saturating_sub(page.saturating_mul(crate::session_manager::paged_manifest::PAGE_SIZE))
@@ -1584,26 +2348,15 @@ impl SessionRemotePager {
             retire_session_rows(rows);
             return;
         }
-        if let Some(old) = self.cache.insert(page, CachedSessionPage { rows }) {
-            retire_session_rows(old.rows);
-        }
-        self.lru.retain(|cached_page| *cached_page != page);
-        self.lru.push_back(page);
-        while self.cache.len() > SESSION_PAGE_CACHE_PAGES {
-            let Some(evicted) = self.lru.pop_front() else {
-                break;
-            };
-            if let Some(page) = self.cache.remove(&evicted) {
-                retire_session_rows(page.rows);
-            }
+        for retired in self.cache.insert(page, CachedSessionPage { rows }) {
+            retire_session_rows(retired.rows);
         }
     }
 
     fn retire_cache(&mut self) {
-        for (_, page) in self.cache.drain() {
+        for page in self.cache.clear() {
             retire_session_rows(page.rows);
         }
-        self.lru.clear();
     }
 
     fn remove_by_key(&mut self, key: &str) -> bool {
@@ -1673,6 +2426,9 @@ impl SessionsState {
         let total = self.logical_total_rows();
         if total == 0 {
             return 0;
+        }
+        if self.remote.token().is_none() {
+            return self.selected_idx.min(total.saturating_sub(1));
         }
         let page_start = self
             .remote
@@ -2728,10 +3484,13 @@ impl SessionsState {
             &self.pagination,
         ) {
             self.rows_revision = self.rows_revision.wrapping_add(1);
+            self.clear_detail();
             return true;
         }
+        let target_gate = self.pagination.clone();
+        self.pagination = previous_gate.clone();
         self.remote
-            .start_cross(target_page, previous_gate, wheel_gesture);
+            .start_cross(target_page, previous_gate, target_gate, wheel_gesture);
         false
     }
 
@@ -3052,10 +3811,12 @@ impl SessionsState {
     }
 
     fn clear_messages(&mut self) {
-        self.message_cancel_pending |= self.message_active.is_some();
+        self.message_cancel_pending |=
+            self.message_active.is_some() || self.message_remote.has_pending_requests();
         self.messages_key = None;
-        retire_session_messages(std::mem::take(&mut self.messages));
+        self.message_remote.reset(&mut self.messages);
         self.messages_revision = self.messages_revision.wrapping_add(1);
+        self.message_pagination.reset(0, None);
         self.messages_loading = false;
         self.messages_loaded = false;
         self.messages_truncated = false;
@@ -3068,8 +3829,9 @@ impl SessionsState {
         self.message_seq = self.message_seq.wrapping_add(1);
         self.message_active = Some(self.message_seq);
         self.messages_key = Some(key);
-        retire_session_messages(std::mem::take(&mut self.messages));
+        self.message_remote.reset(&mut self.messages);
         self.messages_revision = self.messages_revision.wrapping_add(1);
+        self.message_pagination.reset(0, None);
         self.messages_loading = true;
         self.messages_loaded = false;
         self.messages_truncated = false;
@@ -3090,26 +3852,244 @@ impl SessionsState {
         }
     }
 
-    pub(crate) fn finish_message_load<B>(&mut self, request_id: u64, key: &str, batch: B) -> bool
-    where
-        B: Into<crate::session_manager::SessionMessageBatch>,
-    {
+    pub(crate) fn finish_message_load(
+        &mut self,
+        request_id: u64,
+        key: &str,
+        reader: crate::session_manager::transcript::TranscriptReader,
+        page: crate::session_manager::transcript::TranscriptPage,
+    ) -> bool {
         if self.message_active != Some(request_id)
             || self.messages_key.as_deref() != Some(key)
             || self.detail_key.as_deref() != Some(key)
         {
+            retire_session_messages(page.messages);
+            return false;
+        }
+        if !self.message_remote.install_source(
+            reader,
+            page,
+            &mut self.messages,
+            &mut self.message_idx,
+            &mut self.messages_truncated,
+            &mut self.message_pagination,
+        ) {
+            self.message_active = None;
+            self.messages_loading = false;
+            self.messages_loaded = true;
+            self.messages_error = Some("Session transcript page is invalid".to_string());
             return false;
         }
         self.message_active = None;
         self.messages_loading = false;
         self.messages_loaded = true;
         self.messages_error = None;
-        let batch = batch.into();
-        self.messages = batch.messages;
-        self.messages_truncated = batch.truncated;
         self.messages_revision = self.messages_revision.wrapping_add(1);
-        self.message_idx = self.message_idx.min(self.messages.len().saturating_sub(1));
         true
+    }
+
+    pub(crate) fn logical_total_messages(&self) -> usize {
+        if self.message_remote.reader.is_some() {
+            self.message_remote.total_rows()
+        } else {
+            self.messages.len()
+        }
+    }
+
+    pub(crate) fn selected_message_absolute(&self) -> usize {
+        self.message_pagination
+            .selected_index()
+            .unwrap_or_else(|| {
+                self.message_remote
+                    .current_page()
+                    .saturating_mul(crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE)
+                    .saturating_add(self.message_idx)
+            })
+            .min(self.logical_total_messages().saturating_sub(1))
+    }
+
+    /// Keep the page-local row used by filtered views and the absolute pager
+    /// selection as one invariant. Filter navigation deliberately stays on the
+    /// materialized page, but refresh reconciliation and the footer consume
+    /// the absolute selection.
+    pub(crate) fn sync_loaded_message_selection(&mut self) {
+        self.message_remote.sync_loaded_selection(
+            self.messages.len(),
+            &mut self.message_idx,
+            &mut self.message_pagination,
+        );
+    }
+
+    pub(crate) fn begin_message_page_cross(
+        &mut self,
+        target_page: usize,
+        previous_gate: super::paged_list::PagedListState,
+        wheel_gesture: Option<crate::cli::tui::input::WheelGestureId>,
+    ) -> bool {
+        if self.message_remote.reader.is_none() {
+            self.message_idx = self
+                .message_pagination
+                .selected_index()
+                .unwrap_or(0)
+                .min(self.messages.len().saturating_sub(1));
+            return true;
+        }
+        if self.message_remote.activate_cached(
+            target_page,
+            &mut self.messages,
+            &mut self.message_idx,
+            &mut self.messages_truncated,
+            &self.message_pagination,
+        ) {
+            self.messages_revision = self.messages_revision.wrapping_add(1);
+            return true;
+        }
+        let target_gate = self.message_pagination.clone();
+        self.message_pagination = previous_gate.clone();
+        self.message_remote
+            .start_cross(target_page, previous_gate, target_gate, wheel_gesture);
+        false
+    }
+
+    pub(crate) fn cancel_message_page_cross(
+        &mut self,
+        direction: super::paged_list::PageDirection,
+    ) -> bool {
+        self.message_remote
+            .cancel_cross(direction, &mut self.message_pagination)
+    }
+
+    pub(crate) fn next_message_page_request(
+        &mut self,
+        page: usize,
+    ) -> Option<(
+        u64,
+        String,
+        usize,
+        Option<String>,
+        crate::session_manager::transcript::TranscriptReader,
+    )> {
+        self.message_remote
+            .next_request(page, &self.message_pagination)
+    }
+
+    pub(crate) fn next_message_source_refresh_request(
+        &mut self,
+    ) -> Option<(
+        u64,
+        String,
+        usize,
+        Option<String>,
+        crate::session_manager::transcript::TranscriptReader,
+    )> {
+        if !self.messages_loaded
+            || self.detail_key.is_none()
+            || self.messages_key.as_deref() != self.detail_key.as_deref()
+        {
+            return None;
+        }
+        self.message_remote
+            .next_source_refresh_request(&self.message_pagination)
+    }
+
+    pub(crate) fn request_message_source_refresh(&mut self) -> bool {
+        if !self.messages_loaded
+            || self.detail_key.is_none()
+            || self.messages_key.as_deref() != self.detail_key.as_deref()
+        {
+            return false;
+        }
+        self.message_remote.request_source_refresh()
+    }
+
+    pub(crate) fn finish_message_page_request(
+        &mut self,
+        request_id: u64,
+        key: &str,
+        generation: &str,
+        page_index: usize,
+        page: crate::session_manager::transcript::TranscriptPage,
+    ) -> bool {
+        if self.messages_key.as_deref() != Some(key) || self.detail_key.as_deref() != Some(key) {
+            retire_session_messages(page.messages);
+            return false;
+        }
+        let active_page_before = self.message_remote.current_page();
+        let applied = self.message_remote.finish_page(
+            request_id,
+            generation,
+            page_index,
+            page,
+            &mut self.messages,
+            &mut self.message_idx,
+            &mut self.messages_truncated,
+            &mut self.message_pagination,
+        );
+        if applied
+            && (self.message_remote.current_page() != active_page_before
+                || page_index == active_page_before)
+        {
+            self.messages_revision = self.messages_revision.wrapping_add(1);
+        }
+        applied
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_message_source_refresh(
+        &mut self,
+        request_id: u64,
+        key: &str,
+        previous_generation: &str,
+        requested_page: usize,
+        reader: crate::session_manager::transcript::TranscriptReader,
+        active_page: crate::session_manager::transcript::TranscriptPage,
+        refreshed_requested_page: Option<crate::session_manager::transcript::TranscriptPage>,
+    ) -> bool {
+        if self.messages_key.as_deref() != Some(key) || self.detail_key.as_deref() != Some(key) {
+            retire_session_messages(active_page.messages);
+            if let Some(page) = refreshed_requested_page {
+                retire_session_messages(page.messages);
+            }
+            return false;
+        }
+        let applied = self.message_remote.refresh_source_if_pending(
+            request_id,
+            previous_generation,
+            requested_page,
+            reader,
+            active_page,
+            refreshed_requested_page,
+            &mut self.messages,
+            &mut self.message_idx,
+            &mut self.messages_truncated,
+            &mut self.message_pagination,
+        );
+        if applied {
+            self.messages_loading = false;
+            self.messages_loaded = true;
+            self.messages_error = None;
+            self.messages_revision = self.messages_revision.wrapping_add(1);
+        }
+        applied
+    }
+
+    pub(crate) fn fail_message_page_request(
+        &mut self,
+        request_id: u64,
+        key: &str,
+        generation: &str,
+        page: usize,
+        error: String,
+    ) -> bool {
+        self.messages_key.as_deref() == Some(key)
+            && self.detail_key.as_deref() == Some(key)
+            && self.message_remote.fail_page(
+                request_id,
+                generation,
+                page,
+                error,
+                &mut self.message_pagination,
+            )
     }
 
     pub(crate) fn message_load_is_current(&self, request_id: u64, key: &str) -> bool {
@@ -3845,6 +4825,29 @@ mod sessions_state_tests {
         (published, reader)
     }
 
+    fn write_codex_transcript(path: &std::path::Path, count: usize) {
+        let mut body = String::new();
+        for index in 0..count {
+            body.push_str(
+                &serde_json::json!({
+                    "type": "response_item",
+                    "timestamp": index as i64,
+                    "payload": {
+                        "type": "message",
+                        "role": if index.is_multiple_of(2) { "user" } else { "assistant" },
+                        "content": [{
+                            "type": "input_text",
+                            "text": format!("message-{index}")
+                        }]
+                    }
+                })
+                .to_string(),
+            );
+            body.push('\n');
+        }
+        std::fs::write(path, body).expect("write transcript fixture");
+    }
+
     #[test]
     fn large_project_values_are_dropped_off_the_event_thread() {
         struct DropProbe(std::sync::mpsc::Sender<std::thread::ThreadId>);
@@ -3924,6 +4927,44 @@ mod sessions_state_tests {
             .rows
             .iter()
             .all(|row| row.session_id.starts_with("old-")));
+    }
+
+    #[test]
+    fn session_page_switch_retains_the_previous_page_for_instant_back_navigation() {
+        let directory = tempfile::tempdir().expect("manifest fixture directory");
+        let store =
+            crate::session_manager::paged_manifest::PagedManifestStore::open_at(directory.path())
+                .expect("manifest fixture store");
+        let (published, reader) = publish_rows(&store, "claude", "row", 205);
+        let mut state = SessionsState::default();
+        let _request_id = state.start_scan("claude".to_string());
+        let scope_epoch = state.scope_epoch;
+        assert!(state.apply_opened_manifest(
+            scope_epoch,
+            "claude",
+            published.generation,
+            published.total_rows,
+            published.first_page.page_index,
+            published.first_page.rows,
+            reader,
+        ));
+        let first_page_first_id = state.rows[0].session_id.clone();
+
+        let previous_gate = state.pagination.clone();
+        state.pagination.select(100);
+        assert!(!state.begin_page_cross(1, previous_gate, None));
+        let (request_id, token, reader) = state.next_page_request(1).expect("second page request");
+        let page = reader.load_page(1).expect("second page");
+        assert!(state.finish_page_request(request_id, &token, 1, page.rows));
+        assert_eq!(state.remote.current_page(), 1);
+        assert!(state.remote.has_page(0));
+        assert_eq!(state.remote.retained_rows(state.rows.len()), 200);
+
+        let previous_gate = state.pagination.clone();
+        state.pagination.select(0);
+        assert!(state.begin_page_cross(0, previous_gate, None));
+        assert_eq!(state.remote.current_page(), 0);
+        assert_eq!(state.rows[0].session_id, first_page_first_id);
     }
 
     #[test]
@@ -4346,10 +5387,6 @@ mod sessions_state_tests {
         let source_edge = state.selected_source_absolute(state.rows.len(), true);
         assert_eq!(source_edge, 99);
         state.pagination.select(source_edge);
-        assert!(matches!(
-            state.pagination.line(PageDirection::Next),
-            PagedListOutcome::BoundaryFocused { .. }
-        ));
         let previous_gate = state.pagination.clone();
         let crossed = state.pagination.line(PageDirection::Next);
         assert!(matches!(
@@ -4383,15 +5420,7 @@ mod sessions_state_tests {
             reader,
         ));
 
-        let armed_by = WheelGestureId::from_raw(1);
-        assert!(matches!(
-            state
-                .pagination
-                .wheel(PageDirection::Next, armed_by, usize::MAX),
-            PagedListOutcome::BoundaryFocused { .. }
-        ));
-
-        let crossing = WheelGestureId::from_raw(2);
+        let crossing = WheelGestureId::from_raw(1);
         let previous_gate = state.pagination.clone();
         assert!(matches!(
             state
@@ -4417,7 +5446,7 @@ mod sessions_state_tests {
         );
         assert!(state.next_page_request(1).is_none());
 
-        let retry = WheelGestureId::from_raw(3);
+        let retry = WheelGestureId::from_raw(2);
         let previous_gate = state.pagination.clone();
         assert!(matches!(
             state
@@ -4428,6 +5457,598 @@ mod sessions_state_tests {
         assert!(!state.begin_page_cross(1, previous_gate, Some(retry)));
         assert!(state.next_page_request(1).is_some());
         assert!(state.next_page_request(1).is_none());
+    }
+
+    #[test]
+    fn transcript_pager_starts_first_and_reaches_every_page_with_a_fixed_window() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        write_codex_transcript(&source, 205);
+        let source = source.to_string_lossy().into_owned();
+        let (reader, _) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source,
+        )
+        .expect("open transcript fixture");
+        let first = reader.load_page(0, &|| false).expect("first page");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let request_id = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(request_id, &key, reader, first));
+        assert_eq!(state.logical_total_messages(), 205);
+        assert_eq!(state.message_remote.current_page(), 0);
+        assert_eq!(state.messages.len(), 100);
+        assert_eq!(state.message_idx, 0);
+        assert_eq!(state.selected_message_absolute(), 0);
+        assert_eq!(state.messages[0].content, "message-0");
+
+        let page_one = state
+            .message_remote
+            .preferred_load_page()
+            .expect("next adjacent page");
+        assert_eq!(page_one, 1);
+        let (page_one_request, generation, _refresh_page, _refresh_key, reader) = state
+            .next_message_page_request(page_one)
+            .expect("page one request");
+        let loaded = reader.load_page(page_one, &|| false).expect("page one");
+        assert!(state.finish_message_page_request(
+            page_one_request,
+            &key,
+            &generation,
+            page_one,
+            loaded,
+        ));
+        assert_eq!(state.message_remote.current_page(), 0);
+
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(100);
+        assert!(state.begin_message_page_cross(1, previous_gate, None));
+        assert_eq!(state.message_remote.current_page(), 1);
+        assert_eq!(state.message_idx, 0);
+        assert_eq!(state.messages[0].content, "message-100");
+
+        let page_two = state
+            .message_remote
+            .preferred_load_page()
+            .expect("final adjacent page");
+        assert_eq!(page_two, 2);
+        let (page_two_request, generation, _refresh_page, _refresh_key, reader) = state
+            .next_message_page_request(page_two)
+            .expect("page two request");
+        let loaded = reader.load_page(page_two, &|| false).expect("page two");
+        assert!(state.finish_message_page_request(
+            page_two_request,
+            &key,
+            &generation,
+            page_two,
+            loaded,
+        ));
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(200);
+        assert!(state.begin_message_page_cross(2, previous_gate, None));
+        assert_eq!(state.message_remote.current_page(), 2);
+        assert_eq!(state.message_idx, 0);
+        assert_eq!(state.messages[0].content, "message-200");
+        assert_eq!(state.messages[4].content, "message-204");
+        assert_eq!(
+            state.message_remote.retained_messages(state.messages.len()),
+            205,
+            "one active page plus two cached pages is the hard ownership bound"
+        );
+
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(199);
+        assert!(state.begin_message_page_cross(1, previous_gate, None));
+        assert_eq!(state.message_remote.current_page(), 1);
+        assert_eq!(state.messages[state.message_idx].content, "message-199");
+
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(99);
+        assert!(state.begin_message_page_cross(0, previous_gate, None));
+        assert_eq!(state.message_remote.current_page(), 0);
+        assert_eq!(state.messages[state.message_idx].content, "message-99");
+        assert_eq!(
+            state.message_remote.retained_messages(state.messages.len()),
+            205,
+            "back navigation must preserve the same bounded ownership window"
+        );
+    }
+
+    #[test]
+    fn speculative_stale_page_refresh_preserves_the_active_selection() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        let config = temp.path().join("config");
+        write_codex_transcript(&source, 205);
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, newest) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, newest));
+        assert_eq!(state.selected_message_absolute(), 200);
+
+        let page = state
+            .message_remote
+            .preferred_load_page()
+            .expect("speculative older page");
+        let (request_id, old_generation, _refresh_page, _refresh_key, _old_reader) = state
+            .next_message_page_request(page)
+            .expect("speculative request");
+        write_codex_transcript(&source, 206);
+        let (refreshed_reader, refreshed_active_page) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("refresh transcript fixture");
+
+        assert!(state.finish_message_source_refresh(
+            request_id,
+            &key,
+            &old_generation,
+            page,
+            refreshed_reader,
+            refreshed_active_page,
+            None,
+        ));
+        assert_eq!(state.logical_total_messages(), 206);
+        assert_eq!(state.message_remote.current_page(), 2);
+        assert_eq!(
+            state.selected_message_absolute(),
+            200,
+            "speculative refresh must not jump to the prefetched page or newest row"
+        );
+        assert_eq!(state.messages[state.message_idx].content, "message-200");
+    }
+
+    #[test]
+    fn speculative_stale_page_refresh_honors_a_late_page_cross() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        let config = temp.path().join("config");
+        write_codex_transcript(&source, 205);
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, newest) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, newest));
+
+        let requested_page = state
+            .message_remote
+            .preferred_load_page()
+            .expect("speculative older page");
+        let (request_id, old_generation, _refresh_page, _refresh_key, _old_reader) = state
+            .next_message_page_request(requested_page)
+            .expect("speculative request");
+
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(199);
+        assert!(!state.begin_message_page_cross(requested_page, previous_gate, None));
+        assert_eq!(
+            state.message_remote.pending_cross_page(),
+            Some(requested_page)
+        );
+
+        write_codex_transcript(&source, 206);
+        let (refreshed_reader, refreshed_active_page) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("refresh transcript fixture");
+        let refreshed_requested_page = refreshed_reader
+            .load_page(requested_page, &|| false)
+            .expect("requested refreshed page");
+
+        assert!(state.finish_message_source_refresh(
+            request_id,
+            &key,
+            &old_generation,
+            requested_page,
+            refreshed_reader,
+            refreshed_active_page,
+            Some(refreshed_requested_page),
+        ));
+        assert_eq!(state.logical_total_messages(), 206);
+        assert_eq!(state.message_remote.current_page(), requested_page);
+        assert_eq!(state.selected_message_absolute(), 199);
+        assert_eq!(state.messages[state.message_idx].content, "message-199");
+        assert!(
+            state.message_remote.has_page(2),
+            "the refreshed viewport page should remain in the bounded cache"
+        );
+    }
+
+    #[test]
+    fn stale_speculative_refresh_cannot_replace_newer_cached_navigation() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        let config = temp.path().join("config");
+        write_codex_transcript(&source, 305);
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, newest) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, newest));
+
+        let page_two = state
+            .message_remote
+            .preferred_load_page()
+            .expect("adjacent page");
+        assert_eq!(page_two, 2);
+        let (page_two_request, generation, _, _, reader) = state
+            .next_message_page_request(page_two)
+            .expect("page two request");
+        let loaded = reader.load_page(page_two, &|| false).expect("page two");
+        assert!(state.finish_message_page_request(
+            page_two_request,
+            &key,
+            &generation,
+            page_two,
+            loaded,
+        ));
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(299);
+        assert!(state.begin_message_page_cross(page_two, previous_gate, None));
+        assert_eq!(state.messages[state.message_idx].content, "message-299");
+
+        let stale_page = state
+            .message_remote
+            .preferred_load_page()
+            .expect("speculative page");
+        assert_eq!(stale_page, 1);
+        let (stale_request, old_generation, _, _, _old_reader) = state
+            .next_message_page_request(stale_page)
+            .expect("speculative request");
+
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(300);
+        assert!(state.begin_message_page_cross(3, previous_gate, None));
+        assert_eq!(state.message_remote.current_page(), 3);
+        assert_eq!(state.messages[state.message_idx].content, "message-300");
+
+        write_codex_transcript(&source, 306);
+        let (refreshed_reader, newest) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("refresh transcript fixture");
+        let refreshed_active = refreshed_reader
+            .load_page(page_two, &|| false)
+            .expect("stale request viewport");
+        let refreshed_requested = refreshed_reader
+            .load_page(stale_page, &|| false)
+            .expect("stale requested page");
+        drop(newest);
+
+        assert!(!state.finish_message_source_refresh(
+            stale_request,
+            &key,
+            &old_generation,
+            stale_page,
+            refreshed_reader,
+            refreshed_active,
+            Some(refreshed_requested),
+        ));
+        assert_eq!(state.message_remote.current_page(), 3);
+        assert_eq!(state.selected_message_absolute(), 300);
+        assert_eq!(
+            state.messages[state.message_idx].content, "message-300",
+            "an older prefetch completion must not replace newer navigation"
+        );
+    }
+
+    #[test]
+    fn codex_refresh_keeps_the_selected_message_when_prepend_moves_its_page() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        let config = temp.path().join("config");
+        write_codex_transcript(&source, 205);
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, newest) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, newest));
+
+        let page_one = state
+            .message_remote
+            .preferred_load_page()
+            .expect("adjacent page");
+        let (page_one_request, generation, _, _, reader) = state
+            .next_message_page_request(page_one)
+            .expect("page one request");
+        let loaded = reader.load_page(page_one, &|| false).expect("page one");
+        assert!(state.finish_message_page_request(
+            page_one_request,
+            &key,
+            &generation,
+            page_one,
+            loaded,
+        ));
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(199);
+        assert!(state.begin_message_page_cross(page_one, previous_gate, None));
+        assert_eq!(state.messages[state.message_idx].content, "message-199");
+
+        let requested_page = state
+            .message_remote
+            .preferred_load_page()
+            .expect("speculative older page");
+        let (request_id, old_generation, _, refresh_key, _old_reader) = state
+            .next_message_page_request(requested_page)
+            .expect("speculative request");
+        let refresh_key = refresh_key.expect("selected message identity");
+
+        let original = std::fs::read_to_string(&source).expect("read original transcript");
+        let prepended = serde_json::json!({
+            "type": "response_item",
+            "timestamp": -1,
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "prepended-message"}],
+            }
+        })
+        .to_string();
+        std::fs::write(&source, format!("{prepended}\n{original}"))
+            .expect("prepend transcript message");
+
+        let (refreshed_reader, newest) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("refresh transcript fixture");
+        let selected_absolute = refreshed_reader
+            .locate_message_key(&refresh_key)
+            .expect("locate selected identity")
+            .expect("selected identity remains present");
+        let selected_page =
+            selected_absolute / crate::session_manager::transcript::TRANSCRIPT_PAGE_SIZE;
+        let refreshed_active = if newest.page_index == selected_page {
+            newest
+        } else {
+            refreshed_reader
+                .load_page(selected_page, &|| false)
+                .expect("selected refreshed page")
+        };
+
+        assert!(state.finish_message_source_refresh(
+            request_id,
+            &key,
+            &old_generation,
+            requested_page,
+            refreshed_reader,
+            refreshed_active,
+            None,
+        ));
+        assert_eq!(selected_absolute, 200);
+        assert_eq!(state.selected_message_absolute(), 200);
+        assert_eq!(state.message_remote.current_page(), 2);
+        assert_eq!(
+            state.messages[state.message_idx].content, "message-199",
+            "refresh must follow the selected Codex message rather than its old ordinal"
+        );
+    }
+
+    #[test]
+    fn explicit_transcript_refresh_revalidates_a_fully_cached_single_page() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        let config = temp.path().join("config");
+        write_codex_transcript(&source, 1);
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, page) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, page));
+        assert!(
+            state.message_remote.preferred_load_page().is_none(),
+            "the whole old transcript is already materialized"
+        );
+
+        assert!(state.request_message_source_refresh());
+        let (request_id, old_generation, refresh_page, refresh_key, old_reader) = state
+            .next_message_source_refresh_request()
+            .expect("explicit source refresh request");
+        assert_eq!(refresh_page, 0);
+        assert!(refresh_key.is_some());
+
+        write_codex_transcript(&source, 2);
+        assert!(matches!(
+            old_reader.load_page(refresh_page, &|| false),
+            Err(crate::session_manager::transcript::TranscriptPageError::RefreshRequired(_))
+        ));
+        let (refreshed_reader, refreshed_page) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("refresh transcript fixture");
+
+        assert!(state.finish_message_source_refresh(
+            request_id,
+            &key,
+            &old_generation,
+            refresh_page,
+            refreshed_reader,
+            refreshed_page,
+            None,
+        ));
+        assert_eq!(state.logical_total_messages(), 2);
+        assert_eq!(state.selected_message_absolute(), 0);
+        assert_eq!(state.messages[state.message_idx].content, "message-0");
+        assert_eq!(state.messages[1].content, "message-1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_transcript_refresh_replaces_a_reused_generation_page() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        let config = temp.path().join("config");
+        write_codex_transcript(&source, 1);
+        let original_modified = std::fs::metadata(&source)
+            .and_then(|metadata| metadata.modified())
+            .expect("original transcript mtime");
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, page) =
+            crate::session_manager::transcript::open_transcript_at(&config, "codex", &source_text)
+                .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, page));
+        let previous_revision = state.messages_revision;
+
+        assert!(state.request_message_source_refresh());
+        let (request_id, generation, refresh_page, _refresh_key, reader) = state
+            .next_message_source_refresh_request()
+            .expect("explicit source refresh request");
+
+        let original = std::fs::read_to_string(&source).expect("read original transcript");
+        let replacement = original.replace("message-0", "message-2");
+        assert_eq!(replacement.len(), original.len());
+        let staged = temp.path().join("replacement.jsonl");
+        std::fs::write(&staged, replacement).expect("write replacement transcript");
+        std::fs::File::options()
+            .write(true)
+            .open(&staged)
+            .and_then(|file| {
+                file.set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            })
+            .expect("preserve replacement transcript mtime");
+        std::fs::rename(&staged, &source).expect("replace transcript");
+
+        let refreshed_page = reader
+            .load_page(refresh_page, &|| false)
+            .expect("reload reused generation page");
+        assert_eq!(refreshed_page.generation, generation);
+        assert!(state.finish_message_page_request(
+            request_id,
+            &key,
+            &generation,
+            refresh_page,
+            refreshed_page,
+        ));
+        assert_eq!(state.messages[state.message_idx].content, "message-2");
+        assert_ne!(state.messages_revision, previous_revision);
+    }
+
+    #[test]
+    fn manual_transcript_refresh_waits_for_an_inflight_page_cross() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        write_codex_transcript(&source, 205);
+        let source_text = source.to_string_lossy().into_owned();
+        let (reader, newest) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source_text,
+        )
+        .expect("open transcript fixture");
+
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let load_request = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(load_request, &key, reader, newest));
+
+        let target_page = state
+            .message_remote
+            .preferred_load_page()
+            .expect("missing adjacent page");
+        let previous_gate = state.message_pagination.clone();
+        state.message_pagination.select(199);
+        assert!(!state.begin_message_page_cross(target_page, previous_gate, None));
+
+        assert!(state.request_message_source_refresh());
+        assert!(
+            state.next_message_source_refresh_request().is_none(),
+            "the explicit refresh must wait instead of racing the page crossing"
+        );
+
+        let (page_request, generation, _, _, reader) = state
+            .next_message_page_request(target_page)
+            .expect("crossing page request");
+        let loaded = reader
+            .load_page(target_page, &|| false)
+            .expect("crossing page");
+        assert!(state.finish_message_page_request(
+            page_request,
+            &key,
+            &generation,
+            target_page,
+            loaded,
+        ));
+
+        let (_, _, refresh_page, refresh_key, _) = state
+            .next_message_source_refresh_request()
+            .expect("remembered explicit refresh");
+        assert_eq!(refresh_page, target_page);
+        assert!(refresh_key.is_some());
+    }
+
+    #[test]
+    fn closing_detail_cancels_an_inflight_transcript_page() {
+        let temp = tempfile::tempdir().expect("transcript fixture directory");
+        let source = temp.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            (0..101)
+                .map(|index| {
+                    serde_json::json!({
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{
+                                "type": "input_text",
+                                "text": format!("message-{index}")
+                            }]
+                        }
+                    })
+                    .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .expect("write transcript fixture");
+        let source = source.to_string_lossy().into_owned();
+        let (reader, newest) = crate::session_manager::transcript::open_transcript_at(
+            &temp.path().join("config"),
+            "codex",
+            &source,
+        )
+        .expect("open transcript fixture");
+        let mut state = SessionsState::default();
+        let key = "codex:session:test".to_string();
+        state.detail_key = Some(key.clone());
+        let request_id = state.start_message_load(key.clone());
+        assert!(state.finish_message_load(request_id, &key, reader, newest));
+        assert!(state.next_message_page_request(0).is_some());
+
+        state.clear_detail();
+
+        assert!(state.take_message_cancel_pending());
+        assert!(state.messages.is_empty());
+        assert_eq!(state.logical_total_messages(), 0);
     }
 
     /// 渐进回传：partial 只替换对应 provider 的行、保留其他 provider 的行，

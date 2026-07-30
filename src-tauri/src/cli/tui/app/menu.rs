@@ -23,6 +23,15 @@ impl App {
         self.filter.active || !self.displayed_filter_input().value.trim().is_empty()
     }
 
+    pub(crate) fn displayed_filter_title(&self) -> &'static str {
+        match self.displayed_filter_scope() {
+            FilterScope::Global => crate::cli::i18n::texts::tui_filter_title(),
+            FilterScope::SessionMessages => {
+                crate::cli::i18n::texts::tui_session_message_page_filter_title()
+            }
+        }
+    }
+
     fn displayed_filter_scope(&self) -> FilterScope {
         if self.filter.active {
             return self.filter.scope;

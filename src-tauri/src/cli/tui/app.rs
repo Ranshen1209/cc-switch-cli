@@ -31,6 +31,7 @@ mod form_handlers;
 mod helpers;
 mod menu;
 mod overlay_handlers;
+mod page_window;
 pub(crate) mod paged_list;
 #[cfg(test)]
 mod tests;

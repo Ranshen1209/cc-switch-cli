@@ -225,7 +225,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
         } else {
             Style::default().fg(theme.dim)
         })
-        .title(texts::tui_filter_title());
+        .title(app.displayed_filter_title());
 
     frame.render_widget(outer.clone(), area);
 

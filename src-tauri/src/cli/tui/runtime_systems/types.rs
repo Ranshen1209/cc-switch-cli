@@ -101,6 +101,20 @@ pub(crate) enum SessionReq {
         provider_id: String,
         source_path: String,
     },
+    LoadMessagePage {
+        request_id: u64,
+        key: String,
+        transcript_generation: String,
+        page: usize,
+        /// Page that owns the current user selection. If `page` was only a
+        /// speculative prefetch and its generation is stale, refresh this page
+        /// instead so a background revision change cannot move the viewport.
+        refresh_page: usize,
+        /// Stable message identity that owned the selection when a speculative
+        /// request began. Refresh follows it across insertion/reordering.
+        refresh_message_key: Option<String>,
+        reader: crate::session_manager::transcript::TranscriptReader,
+    },
     /// Invalidate the current bounded detail read without entering the ordered
     /// delete/control lane.
     CancelMessages,
@@ -143,6 +157,17 @@ pub(crate) enum SessionReq {
         trailing_matches: Vec<usize>,
     },
     CancelProjectFilter,
+}
+
+pub(crate) enum LoadedMessagePage {
+    Page(crate::session_manager::transcript::TranscriptPage),
+    Refreshed(Box<RefreshedMessagePages>),
+}
+
+pub(crate) struct RefreshedMessagePages {
+    pub(crate) reader: crate::session_manager::transcript::TranscriptReader,
+    pub(crate) active_page: crate::session_manager::transcript::TranscriptPage,
+    pub(crate) requested_page: Option<crate::session_manager::transcript::TranscriptPage>,
 }
 
 pub(crate) enum SessionMsg {
@@ -201,7 +226,20 @@ pub(crate) enum SessionMsg {
     MessagesLoaded {
         request_id: u64,
         key: String,
-        result: Result<crate::session_manager::SessionMessageBatch, String>,
+        result: Result<
+            (
+                crate::session_manager::transcript::TranscriptReader,
+                crate::session_manager::transcript::TranscriptPage,
+            ),
+            String,
+        >,
+    },
+    MessagePageLoaded {
+        request_id: u64,
+        key: String,
+        transcript_generation: String,
+        page: usize,
+        result: Result<LoadedMessagePage, String>,
     },
     DeleteFinished {
         request_id: u64,
