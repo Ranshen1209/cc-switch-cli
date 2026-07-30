@@ -119,10 +119,6 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
         theme,
         texts::tui_provider_empty_title(),
         texts::tui_provider_empty_subtitle(),
-        &[
-            ("Enter", texts::tui_key_import_current_config()),
-            ("a", texts::tui_key_add_provider()),
-        ],
     );
 }
 
