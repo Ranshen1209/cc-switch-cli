@@ -6938,7 +6938,7 @@ fn breadcrumb_title_strips_leading_emoji_in_ascii_mode() {
 }
 
 #[test]
-fn nav_drops_emoji_icons_in_ascii_mode() {
+fn nav_respects_icon_mode_and_home_title_stays_plain() {
     let _lock = lock_env();
     let _icons_lock = lock_test_home_and_settings();
     let _lang = use_test_language(Language::English);
@@ -6953,8 +6953,8 @@ fn nav_drops_emoji_icons_in_ascii_mode() {
         "emoji mode should render the nav provider icon: {emoji_view}"
     );
     assert!(
-        emoji_view.contains('🎯'),
-        "emoji mode should render the home title icon: {emoji_view}"
+        !emoji_view.contains('🎯'),
+        "the home title should stay plain in emoji mode: {emoji_view}"
     );
 
     let _ascii = EnvGuard::set("CC_SWITCH_ICONS", "ascii");
@@ -12953,7 +12953,8 @@ fn home_usage_chart_renders_title_bars_and_legend() {
     assert!(opus_row.contains('%'), "{opus_row}");
     assert!(opus_row.contains('$'), "{opus_row}");
 
-    // 120 columns leaves the list 40 wide, under the detail line's floor: the
+    // Near the split floor the expanded list yields enough room to keep the
+    // chart readable, remaining under the detail line's floor: the
     // rows stay one-liners.
     assert!(!card.contains("In: "), "{card}");
 }
@@ -12971,7 +12972,7 @@ fn home_usage_chart_lists_the_token_breakdown_under_each_model() {
     let mut data = minimal_data(&app.app_type);
     data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
 
-    // 160 columns leaves the list its 52-column cap: wide enough for detail.
+    // 160 columns leaves the list its revised 59-column cap: ample detail room.
     let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 45));
 
     let opus = card
@@ -13018,7 +13019,7 @@ fn home_usage_chart_drops_only_the_detail_lines_when_the_list_is_short() {
     let mut data = minimal_data(&app.app_type);
     data.usage = usage_with_daily_models(&HOME_CHART_MODELS);
 
-    // Wide enough for the detail line (52 columns), one card row too short for
+    // Wide enough for the detail line, one card row too short for
     // the header plus two rows per model. Main no longer reserves a blank row
     // above the connection card, so the terminal fixture is one row shorter.
     let card = usage_card_inner_text(&render_with_size(&app, &data, 160, 32));
@@ -13058,8 +13059,8 @@ fn home_usage_chart_bars_span_the_whole_card_width() {
     assert_eq!(rule, 1, "the list rule spans the card height:\n{card}");
     let drawn = axis.chars().filter(|ch| *ch == '─').count();
     assert!(
-        drawn >= 60,
-        "a 160-column terminal should give the bars ~67 columns, got {drawn}:\n{card}"
+        drawn >= 58,
+        "a 160-column terminal should leave the revised-list chart ~60 columns, got {drawn}:\n{card}"
     );
 }
 

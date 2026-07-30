@@ -268,11 +268,7 @@ pub mod texts {
 
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
-        if is_chinese() {
-            "🎯 CC-Switch"
-        } else {
-            "🎯 CC-Switch"
-        }
+        "CC-Switch"
     }
 
     pub fn application() -> &'static str {
@@ -13045,7 +13041,7 @@ mod tests {
             texts::provider_duplicated_success("source", "source-copy"),
             "✓ 已复制供应商 'source' 为 'source-copy'"
         );
-        assert_eq!(texts::welcome_title(), "🎯 CC-Switch");
+        assert_eq!(texts::welcome_title(), "CC-Switch");
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");
