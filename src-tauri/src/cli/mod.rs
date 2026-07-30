@@ -402,6 +402,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_settings_codex_auth_preservation_subcommands() {
+        let show = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-auth-preservation",
+            "show",
+            "--json",
+        ]);
+        assert!(matches!(
+            show.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Show { json: true },
+                ),
+            ))
+        ));
+
+        let enable =
+            Cli::parse_from(["cc-switch", "settings", "codex-auth-preservation", "enable"]);
+        assert!(matches!(
+            enable.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Enable,
+                ),
+            ))
+        ));
+
+        let disable = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-auth-preservation",
+            "disable",
+        ]);
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Disable,
+                ),
+            ))
+        ));
+    }
+
+    #[test]
     fn parses_settings_codex_history_disable_restore_subcommand() {
         let cli = Cli::parse_from([
             "cc-switch",
