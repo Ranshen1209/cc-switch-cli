@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod data;
 mod form;
 pub(crate) mod help;
@@ -1956,6 +1957,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::Quit
         | Action::SetAppType(_)
         | Action::LocalEnvRefresh
+        | Action::CopyToClipboard { .. }
         | Action::SessionsRefresh
         | Action::SessionsDeepSearch { .. }
         | Action::SessionsDeepSearchCancel

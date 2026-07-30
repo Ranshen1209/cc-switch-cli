@@ -17502,6 +17502,88 @@ mod tests {
     }
 
     #[test]
+    fn copyable_toast_routes_its_shortcut_to_the_clipboard_action() {
+        let mut app = app_with_session_page();
+        app.push_copyable_toast(
+            "Could not open a terminal",
+            ToastKind::Warning,
+            "claude --resume session-1",
+        );
+
+        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::CopyToClipboard { text }
+                if text == "claude --resume session-1"
+        ));
+    }
+
+    #[test]
+    fn copyable_toast_does_not_capture_text_input() {
+        let mut app = app_with_session_page();
+        app.push_copyable_toast(
+            "Could not open a terminal",
+            ToastKind::Warning,
+            "claude --resume session-1",
+        );
+        app.filter.active = true;
+
+        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+
+        assert!(!matches!(action, Action::CopyToClipboard { .. }));
+        assert_eq!(app.filter.input.value, "c");
+    }
+
+    #[test]
+    fn copyable_toast_does_not_capture_shortcuts_after_context_changes() {
+        let mut app = app_with_session_page();
+        app.push_copyable_toast(
+            "Could not open a terminal",
+            ToastKind::Warning,
+            "claude --resume session-1",
+        );
+
+        let _ = app.set_route_no_history(Route::Providers);
+        assert!(
+            app.toast.is_none(),
+            "leaving the action scope should retire the toast"
+        );
+        let route_action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+        assert!(!matches!(route_action, Action::CopyToClipboard { .. }));
+
+        app.push_copyable_toast(
+            "Could not open a terminal",
+            ToastKind::Warning,
+            "claude --resume session-1",
+        );
+        app.route = Route::Sessions;
+        app.app_type = AppType::Codex;
+        let app_action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+        assert!(!matches!(app_action, Action::CopyToClipboard { .. }));
+    }
+
+    #[test]
+    fn copyable_toast_does_not_capture_modal_shortcuts() {
+        let mut app = app_with_session_page();
+        app.push_copyable_toast(
+            "Could not open a terminal",
+            ToastKind::Warning,
+            "claude --resume session-1",
+        );
+        app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: "Confirm".to_string(),
+            message: "Continue?".to_string(),
+            action: ConfirmAction::Quit,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('c')), &UiData::default());
+
+        assert!(!matches!(action, Action::CopyToClipboard { .. }));
+        assert!(matches!(app.overlay, Overlay::Confirm(_)));
+    }
+
+    #[test]
     fn sessions_delete_shortcut_opens_confirm_overlay() {
         let mut app = app_with_session_page();
         let action = app.on_key(key(KeyCode::Char('d')), &UiData::default());
