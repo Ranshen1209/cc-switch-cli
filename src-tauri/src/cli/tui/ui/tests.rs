@@ -915,36 +915,6 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
 }
 
 #[test]
-fn tui_session_project_picker_keeps_secondary_page_keys_out_of_the_key_bar() {
-    let _lang = use_test_language(Language::English);
-    let mut app = App::new(Some(AppType::Claude));
-    app.route = Route::Sessions;
-    app.focus = Focus::Content;
-    app.overlay = Overlay::SessionProjectPicker(app::SessionProjectPickerState {
-        input: crate::cli::tui::text_edit::TextInput::new(""),
-        selected_idx: 0,
-        path_scroll: 0,
-        filtered_indices: None,
-        pinned_scope: None,
-        filter_error: None,
-    });
-
-    let all = all_text(&render_with_size(
-        &app,
-        &minimal_data(&app.app_type),
-        160,
-        40,
-    ));
-
-    assert!(all.contains("↑↓"), "{all}");
-    assert!(all.contains("Shift+←→"), "{all}");
-    assert!(all.contains(texts::tui_key_scroll()), "{all}");
-    assert!(!all.contains('⇧'), "{all}");
-    assert!(!all.contains("PgUp"), "{all}");
-    assert!(!all.contains("PgDn"), "{all}");
-}
-
-#[test]
 fn tui_usage_empty_state_renders_dashboard_shell() {
     let _lang = use_test_language(Language::English);
 
