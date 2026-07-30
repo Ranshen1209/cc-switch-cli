@@ -4,13 +4,13 @@ use crate::app_config::AppType;
 use crate::cli::i18n::{set_language, texts};
 use crate::error::AppError;
 
-use super::app::{Action, App, Focus, Overlay, TextViewState, ToastKind};
+use super::app::{Action, App, Focus, Overlay, ToastKind};
 use super::data::UiData;
 use super::runtime_systems::{
     LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, RequestTracker, SessionReq, SkillsReq,
     StreamCheckReq, UpdateReq, WebDavReq,
 };
-use super::terminal::TuiTerminal;
+use super::terminal::{ClipboardCopyOutcome, TuiTerminal};
 
 mod claude_temp_launch;
 mod codex_temp_launch;
@@ -99,6 +99,7 @@ pub(crate) fn apply_preloaded_app_switch(
     app.app_type = next;
     let original_route = app.route.clone();
     app.route = normalize_route_for_app(&app.app_type, &app.route);
+    app.clear_out_of_scope_action_toast();
     for route in &mut app.route_stack {
         *route = normalize_route_for_app(&app.app_type, route);
     }
@@ -526,6 +527,27 @@ pub(crate) fn handle_action(
 
     match action {
         Action::None => Ok(()),
+        Action::CopyToClipboard { text } => {
+            match ctx.terminal.copy_to_clipboard(&text) {
+                Ok(ClipboardCopyOutcome::Confirmed) => ctx
+                    .app
+                    .push_toast(texts::tui_toast_copied_to_clipboard(), ToastKind::Success),
+                Ok(ClipboardCopyOutcome::Requested) => ctx.app.push_copyable_toast(
+                    texts::tui_toast_clipboard_request_sent(),
+                    ToastKind::Info,
+                    text,
+                ),
+                Err(err) => {
+                    log::debug!("failed to copy TUI toast content to clipboard: {err}");
+                    ctx.app.push_copyable_toast(
+                        texts::tui_toast_copy_to_clipboard_failed(),
+                        ToastKind::Warning,
+                        text,
+                    );
+                }
+            }
+            Ok(())
+        }
         Action::ReloadData => {
             *ctx.data = UiData::load(&ctx.app.app_type)?;
             ctx.app.maybe_prompt_import_candidate(ctx.data);
@@ -699,18 +721,7 @@ pub(crate) fn handle_action(
                         ToastKind::Success,
                     );
                 }
-                Err(err) => {
-                    ctx.app.overlay = Overlay::TextView(TextViewState {
-                        title: texts::tui_sessions_resume_command().to_string(),
-                        lines: command.lines().map(|line| line.to_string()).collect(),
-                        scroll: 0,
-                        action: None,
-                    });
-                    ctx.app.push_toast(
-                        texts::tui_sessions_toast_resume_fallback(&err.to_string()),
-                        ToastKind::Warning,
-                    );
-                }
+                Err(err) => show_session_resume_fallback(ctx.app, command, &err),
             }
             Ok(())
         }
@@ -1055,6 +1066,15 @@ pub(crate) fn handle_action(
             Ok(())
         }
     }
+}
+
+fn show_session_resume_fallback(app: &mut App, command: String, err: &AppError) {
+    log::debug!("failed to launch a terminal for session resume: {err}");
+    app.push_copyable_toast(
+        texts::tui_sessions_toast_resume_fallback(),
+        ToastKind::Warning,
+        command,
+    );
 }
 
 fn session_terminal_target(preferred_terminal: Option<&str>) -> String {
@@ -1435,6 +1455,47 @@ mod tests {
         assert_eq!(session_terminal_target(Some("")), "terminal");
         assert_eq!(session_terminal_target(Some("iterm2")), "iterm");
         assert_eq!(session_terminal_target(Some("ghostty")), "ghostty");
+    }
+
+    #[test]
+    fn session_resume_fallback_uses_copyable_toast_without_opening_an_overlay() {
+        let mut app = App::new(Some(AppType::Codex));
+        let command = "codex resume session-1".to_string();
+        let err = AppError::Message("Terminal resume is only supported on macOS".to_string());
+
+        show_session_resume_fallback(&mut app, command.clone(), &err);
+
+        assert!(matches!(app.overlay, Overlay::None));
+        let toast = app.toast.as_ref().expect("fallback toast");
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert_eq!(toast.message, texts::tui_sessions_toast_resume_fallback());
+        assert!(!toast.message.contains("macOS"));
+        assert_eq!(toast.copy_text(), Some(command.as_str()));
+    }
+
+    #[test]
+    fn clipboard_action_keeps_recovery_command_after_sending_terminal_request() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.push_copyable_toast(
+            texts::tui_sessions_toast_resume_fallback(),
+            ToastKind::Warning,
+            "codex resume session-1",
+        );
+        let mut data = UiData::default();
+
+        run_action(
+            &mut app,
+            &mut data,
+            Action::CopyToClipboard {
+                text: "codex resume session-1".to_string(),
+            },
+        )
+        .expect("copy action");
+
+        let toast = app.toast.as_ref().expect("clipboard request toast");
+        assert_eq!(toast.kind, ToastKind::Info);
+        assert_eq!(toast.message, texts::tui_toast_clipboard_request_sent());
+        assert_eq!(toast.copy_text(), Some("codex resume session-1"));
     }
 
     fn write_invalid_legacy_config(home: &Path) {

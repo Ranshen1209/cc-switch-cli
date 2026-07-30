@@ -9,6 +9,9 @@ pub enum Action {
     Quit,
     SetAppType(AppType),
     LocalEnvRefresh,
+    CopyToClipboard {
+        text: String,
+    },
 
     SessionsRefresh,
     SessionsDeepSearch {

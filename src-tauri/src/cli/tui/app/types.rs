@@ -4162,12 +4162,51 @@ pub enum ToastKind {
     Error,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToastAction {
+    CopyToClipboard {
+        text: String,
+        scope: ToastActionScope,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastActionScope {
+    app_type: AppType,
+    route: Route,
+}
+
+impl ToastActionScope {
+    pub fn new(app_type: AppType, route: Route) -> Self {
+        Self { app_type, route }
+    }
+
+    pub fn matches(&self, app_type: &AppType, route: &Route) -> bool {
+        &self.app_type == app_type && &self.route == route
+    }
+}
+
+impl ToastAction {
+    pub fn shortcut(&self) -> char {
+        match self {
+            Self::CopyToClipboard { .. } => 'c',
+        }
+    }
+
+    pub fn is_available_in(&self, app_type: &AppType, route: &Route) -> bool {
+        match self {
+            Self::CopyToClipboard { scope, .. } => scope.matches(app_type, route),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
     pub remaining_ticks: u16,
     pub persistent: bool,
+    pub action: Option<ToastAction>,
 }
 
 impl Toast {
@@ -4177,6 +4216,7 @@ impl Toast {
             kind,
             remaining_ticks: 12,
             persistent: false,
+            action: None,
         }
     }
 
@@ -4186,6 +4226,34 @@ impl Toast {
             kind,
             remaining_ticks: 0,
             persistent: true,
+            action: None,
+        }
+    }
+
+    pub fn copyable(
+        message: impl Into<String>,
+        kind: ToastKind,
+        text: impl Into<String>,
+        scope: ToastActionScope,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+            // Actionable feedback stays visible for twelve seconds at the
+            // standard 200 ms TUI tick rate.
+            remaining_ticks: 60,
+            persistent: false,
+            action: Some(ToastAction::CopyToClipboard {
+                text: text.into(),
+                scope,
+            }),
+        }
+    }
+
+    pub fn copy_text(&self) -> Option<&str> {
+        match self.action.as_ref() {
+            Some(ToastAction::CopyToClipboard { text, .. }) => Some(text),
+            None => None,
         }
     }
 }

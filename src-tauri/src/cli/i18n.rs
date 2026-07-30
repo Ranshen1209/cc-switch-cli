@@ -268,11 +268,7 @@ pub mod texts {
 
     // Welcome & Headers
     pub fn welcome_title() -> &'static str {
-        if is_chinese() {
-            "🎯 CC-Switch"
-        } else {
-            "🎯 CC-Switch"
-        }
+        "CC-Switch"
     }
 
     pub fn application() -> &'static str {
@@ -367,6 +363,30 @@ pub mod texts {
 
     pub fn tui_toast_prefix_error() -> &'static str {
         " ✗ "
+    }
+
+    pub fn tui_toast_clipboard_request_sent() -> &'static str {
+        if is_chinese() {
+            "复制请求已发送到终端。"
+        } else {
+            "Clipboard request sent to the terminal."
+        }
+    }
+
+    pub fn tui_toast_copied_to_clipboard() -> &'static str {
+        if is_chinese() {
+            "已复制到剪贴板。"
+        } else {
+            "Copied to clipboard."
+        }
+    }
+
+    pub fn tui_toast_copy_to_clipboard_failed() -> &'static str {
+        if is_chinese() {
+            "无法复制到剪贴板，请重试。"
+        } else {
+            "Could not copy to the clipboard. Please try again."
+        }
     }
 
     pub fn tui_toast_invalid_json(details: &str) -> String {
@@ -9799,11 +9819,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_sessions_toast_resume_fallback(err: &str) -> String {
+    pub fn tui_sessions_toast_resume_fallback() -> &'static str {
         if is_chinese() {
-            format!("无法自动打开终端，已显示恢复命令：{err}")
+            "无法自动打开终端，已显示恢复命令"
         } else {
-            format!("Could not open a terminal; showing the resume command instead: {err}")
+            "Could not open a terminal; showing the resume command instead."
         }
     }
 
@@ -13021,7 +13041,7 @@ mod tests {
             texts::provider_duplicated_success("source", "source-copy"),
             "✓ 已复制供应商 'source' 为 'source-copy'"
         );
-        assert_eq!(texts::welcome_title(), "🎯 CC-Switch");
+        assert_eq!(texts::welcome_title(), "CC-Switch");
         assert_eq!(texts::tui_home_section_connection(), "连接信息");
         assert_eq!(texts::tui_home_status_online(), "在线");
         assert_eq!(texts::tui_home_status_offline(), "离线");
@@ -13087,6 +13107,38 @@ mod tests {
             texts::tui_proxy_dashboard_manual_routing_copy("Claude"),
             "手动路由：Claude 的流量会通过 cc-switch。"
         );
+    }
+
+    #[test]
+    fn session_resume_fallback_omits_backend_error_details() {
+        {
+            let _lang = use_test_language(Language::Chinese);
+            assert_eq!(
+                texts::tui_sessions_toast_resume_fallback(),
+                "无法自动打开终端，已显示恢复命令"
+            );
+            assert_eq!(
+                texts::tui_toast_clipboard_request_sent(),
+                "复制请求已发送到终端。"
+            );
+            assert_eq!(texts::tui_toast_copied_to_clipboard(), "已复制到剪贴板。");
+        }
+
+        {
+            let _lang = use_test_language(Language::English);
+            assert_eq!(
+                texts::tui_sessions_toast_resume_fallback(),
+                "Could not open a terminal; showing the resume command instead."
+            );
+            assert_eq!(
+                texts::tui_toast_clipboard_request_sent(),
+                "Clipboard request sent to the terminal."
+            );
+            assert_eq!(
+                texts::tui_toast_copied_to_clipboard(),
+                "Copied to clipboard."
+            );
+        }
     }
 
     #[test]

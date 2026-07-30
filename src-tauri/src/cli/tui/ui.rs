@@ -21,7 +21,7 @@ use super::{
     app,
     app::{
         App, CloudSyncBackend, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay,
-        S3ConfigItem, SessionsPane, ToastKind, WebDavConfigItem,
+        S3ConfigItem, SessionsPane, Toast, ToastAction, ToastKind, WebDavConfigItem,
     },
     data::{McpRow, ProviderRow, UiData},
     form::{

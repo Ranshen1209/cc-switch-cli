@@ -21,33 +21,35 @@ const MIN_BAR_CHART_WIDTH: u16 = 44;
 /// Below the split-chart threshold the model list owns the card. At widths
 /// below this floor even its compact name/share/cost row is no longer useful.
 const MIN_LIST_ONLY_WIDTH: u16 = 24;
-/// Rows a bar chart needs besides the bars: the axis and the date labels.
-const BAR_CHART_FIXED_ROWS: u16 = 2;
+/// Optical breathing room between bars and axes. One blank column separates
+/// the first bar from the y-axis. The x-axis needs no whole blank row because
+/// its centered stroke already leaves roughly half a terminal row below the
+/// bars, which is visually comparable on cells that are taller than wide.
+const BAR_AXIS_INSET_COLUMNS: u16 = 1;
+const BAR_AXIS_INSET_ROWS: u16 = 0;
+/// Rows a bar chart needs besides the bars: optional inset, axis, and labels.
+const BAR_CHART_FIXED_ROWS: u16 = BAR_AXIS_INSET_ROWS + 2;
 /// Blank columns kept between each card rail and the content.
 const CARD_PAD_X: u16 = 1;
 /// Blank rows kept under the title rail. The bottom rail stays flush, so the
 /// card only ever spends one row on breathing space.
 const CARD_PAD_TOP: u16 = 1;
-/// Card *content* width from which the model list gets its own column.
-///
-/// Derived, not chosen: it is the narrowest content width whose list clamp
-/// still leaves the chart [`MIN_BAR_CHART_WIDTH`] columns. At 82 the list takes
-/// 37 and the chart keeps exactly 44; at 81 the chart would drop to 43.
-/// A 120-column terminal leaves 87 content columns here (89 inner minus the
-/// two side pads), so the split still starts below that.
-const LIST_MIN_CONTENT_WIDTH: u16 = 82;
-/// Share of the card content the list asks for before clamping.
-const LIST_WIDTH_PERCENT: u16 = 46;
-const LIST_MIN_WIDTH: u16 = 34;
-const LIST_MAX_WIDTH: u16 = 52;
 /// The dim rule between the chart column and the list column.
 const LIST_RULE_WIDTH: u16 = 1;
+/// Share of card content requested by the model-cost list. This is the former
+/// 46% allocation widened by 20%, then trimmed by 5% relative to that result.
+const LIST_WIDTH_PERCENT: u16 = 52;
+/// The former 34..=52 list-width clamp follows the same net 14% expansion.
+const LIST_MIN_WIDTH: u16 = 39;
+const LIST_MAX_WIDTH: u16 = 59;
+/// Narrowest content width that can hold both minimum columns without overlap.
+const LIST_MIN_CONTENT_WIDTH: u16 = MIN_BAR_CHART_WIDTH + LIST_RULE_WIDTH + LIST_MIN_WIDTH;
 /// Columns the list reserves for the share percentage (` 42%`).
 const LIST_SHARE_WIDTH: usize = 4;
 /// Columns the detail line is indented by. The model name starts at column 3
 /// (` ● `); one more column reads as a hanging indent and still leaves a
 /// realistic six-character counter set (`In: 12.5M • Out: 16.1M • CR: 975.9M •
-/// CW: 109.7M` = 52) fitting the widest list column untruncated.
+/// CW: 109.7M` = 52) fitting comfortably in the expanded list.
 const LIST_DETAIL_INDENT: usize = 4;
 /// Narrowest list column that can host the `In/Out/CR/CW` detail line: the
 /// indent plus four `Label: 12.3M` chunks plus their three separators.
@@ -176,12 +178,11 @@ pub(super) fn home_chart_geometry(
     // name (one header + one row per series). Otherwise the list takes the card
     // and marks any vertically hidden rows in its header.
     let list_rows_fit = model_rows > 0 && usize::from(height).saturating_sub(1) >= model_rows;
-    if width < LIST_MIN_CONTENT_WIDTH || height < 3 || !list_rows_fit {
+    if width < LIST_MIN_CONTENT_WIDTH || height <= BAR_CHART_FIXED_ROWS || !list_rows_fit {
         return list_only;
     }
 
-    let list_width =
-        (width.saturating_mul(LIST_WIDTH_PERCENT) / 100).clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+    let list_width = list_width_for_split(width);
     let chart_width = width
         .saturating_sub(list_width)
         .saturating_sub(LIST_RULE_WIDTH);
@@ -196,8 +197,8 @@ pub(super) fn home_chart_geometry(
         return list_only;
     };
 
-    let body_width = chart_width.saturating_sub(y_axis_width);
-    if body_width == 0 || (body_width as usize) < days {
+    let axis_body_width = usize::from(chart_width.saturating_sub(y_axis_width));
+    if bar_plot_width(axis_body_width) < days {
         return list_only;
     }
 
@@ -208,6 +209,23 @@ pub(super) fn home_chart_geometry(
         list_width,
         y_axis_width,
     }
+}
+
+/// Responsive model-list width while preserving the chart's readable floor.
+///
+/// The list receives its widened percentage on roomy terminals. Near the split
+/// threshold it yields only the excess columns, keeping
+/// [`MIN_BAR_CHART_WIDTH`] intact instead of making the whole chart disappear.
+fn list_width_for_split(content_width: u16) -> u16 {
+    let desired = (content_width.saturating_mul(LIST_WIDTH_PERCENT) / 100)
+        .clamp(LIST_MIN_WIDTH, LIST_MAX_WIDTH);
+    let chart_safe_max = content_width.saturating_sub(MIN_BAR_CHART_WIDTH + LIST_RULE_WIDTH);
+    desired.min(chart_safe_max)
+}
+
+/// Columns available to the day bars after the visual axis inset.
+fn bar_plot_width(axis_body_width: usize) -> usize {
+    axis_body_width.saturating_sub(usize::from(BAR_AXIS_INSET_COLUMNS))
 }
 
 /// Start column and width of day `index` inside a `chart_width`-wide body.
@@ -730,14 +748,19 @@ fn render_bars(
     }
 
     let day_count = series.days.len();
-    let body_width = area.width.saturating_sub(geometry.y_axis_width) as usize;
-    let gutter = use_bar_gutter(day_count, body_width);
+    let axis_body_width = area.width.saturating_sub(geometry.y_axis_width) as usize;
+    let plot_width = bar_plot_width(axis_body_width);
+    if plot_width == 0 {
+        return;
+    }
+    let gutter = use_bar_gutter(day_count, plot_width);
     let axis_style = Style::default().fg(theme.dim);
     let label_style = Style::default().fg(theme.comment);
     let max_value = series.max_total.max(1) as f64;
     let chart_height = bar_rows as usize;
 
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(chart_height + 2);
+    let mut lines: Vec<Line<'static>> =
+        Vec::with_capacity(chart_height + usize::from(BAR_CHART_FIXED_ROWS));
     for row_index in 0..chart_height {
         // Rows are emitted top-down; `row_from_bottom` counts up from the axis.
         let row_from_bottom = chart_height - 1 - row_index;
@@ -755,12 +778,13 @@ fn render_bars(
                 label_style,
             ),
             Span::styled(axis_vertical().to_string(), axis_style),
+            Span::raw(" ".repeat(usize::from(BAR_AXIS_INSET_COLUMNS))),
         ];
 
         let row_top = ((row_from_bottom + 1) as f64 / chart_height as f64) * max_value;
         let row_bottom = (row_from_bottom as f64 / chart_height as f64) * max_value;
         for (index, day) in series.days.iter().enumerate() {
-            let (_, span) = bar_span(index, day_count, body_width);
+            let (_, span) = bar_span(index, day_count, plot_width);
             if span == 0 {
                 continue;
             }
@@ -779,18 +803,25 @@ fn render_bars(
         lines.push(Line::from(spans));
     }
 
+    for _ in 0..BAR_AXIS_INSET_ROWS {
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(geometry.y_axis_width.saturating_sub(1) as usize)),
+            Span::styled(axis_vertical().to_string(), axis_style),
+        ]));
+    }
+
     lines.push(Line::styled(
         format!(
             "{:>width$}{}{}",
             "0",
             axis_corner(),
-            axis_horizontal().repeat(body_width),
+            axis_horizontal().repeat(axis_body_width),
             width = geometry.y_axis_width.saturating_sub(1) as usize
         ),
         axis_style,
     ));
     lines.push(Line::styled(
-        date_label_row(series, geometry.y_axis_width, body_width),
+        date_label_row(series, geometry.y_axis_width, axis_body_width),
         label_style,
     ));
 
@@ -1084,14 +1115,15 @@ fn stacked_cell(day: &UsageDailyChartDay, row_bottom: f64, row_top: f64) -> (usi
 pub(super) fn date_label_row(
     series: &UsageDailyChartSeries,
     y_axis_width: u16,
-    body_width: usize,
+    axis_body_width: usize,
 ) -> String {
-    let total_width = y_axis_width as usize + body_width;
+    let total_width = y_axis_width as usize + axis_body_width;
     let mut row = vec![b' '; total_width];
     let day_count = series.days.len();
     if day_count == 0 {
         return String::from_utf8(row).unwrap_or_default();
     }
+    let plot_width = bar_plot_width(axis_body_width);
 
     let mut indices = vec![0usize, day_count / 2, day_count - 1];
     indices.dedup();
@@ -1108,7 +1140,9 @@ pub(super) fn date_label_row(
         let ideal = if index == last_index {
             total_width.saturating_sub(width)
         } else {
-            y_axis_width as usize + bar_span(index, day_count, body_width).0
+            y_axis_width as usize
+                + usize::from(BAR_AXIS_INSET_COLUMNS)
+                + bar_span(index, day_count, plot_width).0
         };
         if ideal < next_free || ideal + width > total_width {
             continue;
@@ -1178,6 +1212,7 @@ mod tests {
         let one_model = home_chart_geometry(120, 3, 30, 1, 1_000);
         assert_eq!(one_model.mode, HomeChartMode::Bars);
         assert!(one_model.list_width > 0);
+        assert_eq!(one_model.bar_rows, 1);
     }
 
     #[test]
@@ -1188,15 +1223,16 @@ mod tests {
         assert_eq!(narrow.list_width, LIST_MIN_CONTENT_WIDTH - 1);
         assert_eq!(narrow.chart_width, 0);
 
-        // At the threshold the chart keeps exactly the bar-chart minimum.
+        // At the derived threshold both sides keep their readable minimum.
         let edge = home_chart_geometry(LIST_MIN_CONTENT_WIDTH, 10, 30, 5, 1_000);
-        assert_eq!(edge.list_width, 37);
+        assert_eq!(LIST_MIN_CONTENT_WIDTH, 84);
+        assert_eq!(edge.list_width, LIST_MIN_WIDTH);
         assert_eq!(edge.chart_width, MIN_BAR_CHART_WIDTH);
 
         // 87 columns is what a 120-column terminal leaves as card content.
         let split = home_chart_geometry(87, 10, 30, 5, 1_000);
-        assert_eq!(split.list_width, 40);
-        assert_eq!(split.chart_width, 46);
+        assert_eq!(split.list_width, 42);
+        assert_eq!(split.chart_width, MIN_BAR_CHART_WIDTH);
         assert!(
             split.list_width < LIST_DETAIL_MIN_WIDTH,
             "a 120-column terminal is too narrow for the detail lines"
@@ -1206,8 +1242,25 @@ mod tests {
         // and is wide enough for the In/Out/CR/CW detail line.
         let wide = home_chart_geometry(127, 10, 30, 5, 1_000);
         assert_eq!(wide.list_width, LIST_MAX_WIDTH);
-        assert_eq!(wide.chart_width, 127 - LIST_MAX_WIDTH - 1);
+        assert_eq!(wide.chart_width, 127 - LIST_MAX_WIDTH - LIST_RULE_WIDTH);
         assert!(wide.list_width >= LIST_DETAIL_MIN_WIDTH);
+    }
+
+    #[test]
+    fn model_list_applies_revised_width_without_starving_the_chart() {
+        assert_eq!(LIST_WIDTH_PERCENT, 52);
+        assert_eq!((LIST_MIN_WIDTH, LIST_MAX_WIDTH), (39, 59));
+
+        assert_eq!(
+            list_width_for_split(LIST_MIN_CONTENT_WIDTH),
+            LIST_MIN_WIDTH,
+            "the list yields to the chart at the split floor"
+        );
+        assert_eq!(
+            list_width_for_split(127),
+            LIST_MAX_WIDTH,
+            "roomy cards receive the widened cap"
+        );
     }
 
     #[test]
@@ -1344,11 +1397,9 @@ mod tests {
             cache_read_tokens: 975_900_000,
             cache_creation_tokens: 109_700_000,
         });
-        assert_eq!(
-            UnicodeWidthStr::width(widest.as_str()),
-            LIST_MAX_WIDTH as usize,
-            "{widest}"
-        );
+        let detail_width = UnicodeWidthStr::width(widest.as_str());
+        assert_eq!(detail_width, 52, "{widest}");
+        assert!(detail_width <= LIST_MAX_WIDTH as usize, "{widest}");
     }
 
     #[test]
@@ -1391,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn large_maximum_keeps_the_top_and_zero_axes_aligned() {
+    fn large_maximum_keeps_axes_aligned_and_first_bar_inset_visually_balanced() {
         let _lock = lock_env();
         let _no_color = EnvGuard::remove("NO_COLOR");
         let theme = crate::cli::tui::theme::theme_for_mode(
@@ -1417,8 +1468,10 @@ mod tests {
         assert_eq!(geometry.mode, HomeChartMode::Bars);
         assert_eq!(geometry.y_axis_width, 8);
 
-        let backend =
-            ratatui::backend::TestBackend::new(geometry.chart_width, geometry.bar_rows + 2);
+        let backend = ratatui::backend::TestBackend::new(
+            geometry.chart_width,
+            geometry.bar_rows + BAR_CHART_FIXED_ROWS,
+        );
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         terminal
             .draw(|frame| {
@@ -1428,7 +1481,7 @@ mod tests {
                         x: 0,
                         y: 0,
                         width: geometry.chart_width,
-                        height: geometry.bar_rows + 2,
+                        height: geometry.bar_rows + BAR_CHART_FIXED_ROWS,
                     },
                     &theme,
                     &series,
@@ -1442,11 +1495,43 @@ mod tests {
         let top_axis = (0..geometry.chart_width)
             .find(|x| buffer[(*x, 0)].symbol() == axis_vertical())
             .expect("top-row axis");
+        let x_axis_row = geometry.bar_rows + BAR_AXIS_INSET_ROWS;
         let zero_axis = (0..geometry.chart_width)
-            .find(|x| buffer[(*x, geometry.bar_rows)].symbol() == axis_corner())
+            .find(|x| buffer[(*x, x_axis_row)].symbol() == axis_corner())
             .expect("zero-row axis");
         assert_eq!(top_axis, 7);
         assert_eq!(zero_axis, top_axis, "every axis row starts in one column");
+
+        let bottom_bar_row = geometry.bar_rows - 1;
+        let first_bar_column = top_axis + 1 + BAR_AXIS_INSET_COLUMNS;
+        assert_eq!(
+            buffer[(first_bar_column, bottom_bar_row)].symbol(),
+            bar_cell_glyph(&theme, 8, Some(0))
+        );
+        assert_eq!(
+            first_bar_column - top_axis - 1,
+            BAR_AXIS_INSET_COLUMNS,
+            "horizontal inset from y-axis to first bar"
+        );
+        assert_eq!(
+            x_axis_row - bottom_bar_row - 1,
+            BAR_AXIS_INSET_ROWS,
+            "vertical inset from bottom bar to x-axis"
+        );
+        assert_eq!(BAR_AXIS_INSET_COLUMNS, 1);
+        assert_eq!(BAR_AXIS_INSET_ROWS, 0);
+        for x in (top_axis + 1)..first_bar_column {
+            assert_eq!(
+                buffer[(x, bottom_bar_row)].symbol(),
+                " ",
+                "the horizontal inset stays blank"
+            );
+        }
+        assert_eq!(
+            buffer[(first_bar_column, bottom_bar_row + 1)].symbol(),
+            axis_horizontal(),
+            "the centered x-axis follows the bars without a whole blank row"
+        );
     }
 
     #[test]
@@ -1916,7 +2001,7 @@ mod tests {
         let row = date_label_row(&series, MIN_Y_AXIS_WIDTH, 60);
 
         assert_eq!(row.len(), MIN_Y_AXIS_WIDTH as usize + 60);
-        assert!(row.starts_with("       07/01"), "{row:?}");
+        assert!(row.starts_with("        07/01"), "{row:?}");
         assert!(row.contains("07/16"), "{row:?}");
         assert!(row.ends_with("07/30"), "{row:?}");
     }

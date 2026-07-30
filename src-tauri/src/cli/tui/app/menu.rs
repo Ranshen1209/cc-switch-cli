@@ -245,6 +245,7 @@ impl App {
         }
 
         self.route = route.clone();
+        self.clear_out_of_scope_action_toast();
         self.focus = route_default_focus(&route);
 
         let nav_item = Self::nav_item_for_route(&self.app_type, &route);
@@ -486,6 +487,27 @@ impl App {
         self.toast = Some(Toast::persistent(message, kind));
     }
 
+    pub fn push_copyable_toast(
+        &mut self,
+        message: impl Into<String>,
+        kind: ToastKind,
+        text: impl Into<String>,
+    ) {
+        let scope = ToastActionScope::new(self.app_type.clone(), self.route.clone());
+        self.toast = Some(Toast::copyable(message, kind, text, scope));
+    }
+
+    pub(crate) fn clear_out_of_scope_action_toast(&mut self) {
+        let is_out_of_scope = self
+            .toast
+            .as_ref()
+            .and_then(|toast| toast.action.as_ref())
+            .is_some_and(|action| !action.is_available_in(&self.app_type, &self.route));
+        if is_out_of_scope {
+            self.toast = None;
+        }
+    }
+
     pub(crate) fn clear_managed_auth_login_toast(&mut self) {
         if self.toast.as_ref().is_some_and(|toast| toast.persistent) {
             self.toast = None;
@@ -610,6 +632,24 @@ impl App {
             || self.form_text_input_is_active()
     }
 
+    fn toast_action_input_is_available(&self) -> bool {
+        !self.overlay.is_active()
+            && self.editor.is_none()
+            && self.form.is_none()
+            && !self.filter.active
+    }
+
+    pub(crate) fn available_toast_action(&self) -> Option<&ToastAction> {
+        if !self.toast_action_input_is_available() {
+            return None;
+        }
+        self.toast
+            .as_ref()?
+            .action
+            .as_ref()
+            .filter(|action| action.is_available_in(&self.app_type, &self.route))
+    }
+
     fn normalize_vim_navigation_key(&self, key: KeyEvent) -> KeyEvent {
         if self.text_input_is_active() {
             return key;
@@ -644,6 +684,18 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
             return Action::Quit;
+        }
+
+        if key.modifiers.is_empty() {
+            if let (Some(action), KeyCode::Char(ch)) = (self.available_toast_action(), key.code) {
+                if action.shortcut() == ch {
+                    match action {
+                        ToastAction::CopyToClipboard { text, .. } => {
+                            return Action::CopyToClipboard { text: text.clone() };
+                        }
+                    }
+                }
+            }
         }
 
         if self.managed_auth_login.is_some()
