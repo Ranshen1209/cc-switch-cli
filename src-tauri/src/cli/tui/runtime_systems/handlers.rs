@@ -10,13 +10,14 @@ use super::super::app::{
     model_fetch_filter, App, CloudSyncBackend, CloudSyncTransferIntent, ConfirmAction,
     ConfirmOverlay, LoadingKind, Overlay, SessionsPane, ToastKind,
 };
-use super::super::data::{load_state, UiData};
+use super::super::data::{load_state, ProviderRuntimeSnapshot, UiData};
 use super::super::runtime_actions::app_display_name;
 use super::super::CacheInvalidation;
 use super::types::{
     build_stream_check_result_lines, CodexHistoryMsg, LoadedMessagePage, LocalEnvMsg,
-    ManagedAuthMsg, ModelFetchMsg, ProxyMsg, QuotaMsg, RequestTracker, SessionMsg, SkillsMsg,
-    SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr, WebDavMsg, WebDavReqKind,
+    ManagedAuthMsg, ManagedSessionOutcome, ModelFetchMsg, ProxyMsg, QuotaMsg, RequestTracker,
+    SessionMsg, SkillsMsg, SpeedtestMsg, StreamCheckMsg, UpdateMsg, WebDavDone, WebDavErr,
+    WebDavMsg, WebDavReqKind,
 };
 
 pub(crate) fn handle_codex_history_msg(
@@ -955,8 +956,12 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
 
 pub(crate) fn handle_quota_msg(app: &mut App, data: &mut UiData, msg: QuotaMsg) {
     match msg {
-        QuotaMsg::Finished { target, result } => {
-            if !data.quota.target_is_current(&target) {
+        QuotaMsg::Finished {
+            generation,
+            target,
+            result,
+        } => {
+            if !data.quota.target_is_current(generation, &target) {
                 return;
             }
 
@@ -1622,44 +1627,55 @@ pub(crate) fn handle_webdav_msg(
     }
 }
 
+pub(crate) enum ProxyMsgEffect {
+    None,
+    ApplyProviderRuntime {
+        app_type: crate::app_config::AppType,
+        base_reload_token: super::super::data::UiDataReloadToken,
+        snapshot: Box<ProviderRuntimeSnapshot>,
+    },
+    ReloadProviderRuntime {
+        app_type: crate::app_config::AppType,
+    },
+}
+
 pub(crate) fn handle_proxy_msg(
     app: &mut App,
     data: &mut UiData,
     proxy_loading: &mut RequestTracker,
     proxy_snapshot_refresh: &mut RequestTracker,
     msg: ProxyMsg,
-) -> Result<CacheInvalidation, AppError> {
-    let mut invalidation = CacheInvalidation::None;
+) -> ProxyMsgEffect {
     match msg {
         ProxyMsg::ManagedSessionFinished {
             request_id,
             app_type,
             enabled,
-            result,
+            base_reload_token,
+            outcome,
         } => {
-            if !proxy_loading.finish_if_active(request_id) {
-                return Ok(CacheInvalidation::None);
-            }
-
-            if matches!(
-                &app.overlay,
-                Overlay::Loading {
-                    kind: LoadingKind::Proxy,
-                    ..
-                }
-            ) {
+            // The proxy worker executes mutations serially. A newer request may
+            // own the loading overlay, but an older completed mutation still
+            // owns an app-scoped provider/proxy projection that must not be
+            // discarded. Only the active request may finish the shared UI
+            // tracker and close its overlay.
+            let completed_active_request = proxy_loading.finish_if_active(request_id);
+            if completed_active_request
+                && matches!(
+                    &app.overlay,
+                    Overlay::Loading {
+                        kind: LoadingKind::Proxy,
+                        ..
+                    }
+                )
+            {
                 app.overlay = Overlay::None;
             }
 
-            match result {
-                Ok(()) => {
-                    *data = UiData::load(&app.app_type)?;
-                    proxy_snapshot_refresh.cancel();
-                    invalidation = CacheInvalidation::DataReloaded;
-                    app.reset_proxy_activity(
-                        data.proxy.estimated_input_tokens_total,
-                        data.proxy.estimated_output_tokens_total,
-                    );
+            match outcome {
+                ManagedSessionOutcome::Applied {
+                    snapshot: Ok(snapshot),
+                } => {
                     app.push_toast(
                         texts::tui_toast_proxy_managed_current_app_updated(
                             app_display_name(&app_type),
@@ -1667,8 +1683,24 @@ pub(crate) fn handle_proxy_msg(
                         ),
                         ToastKind::Success,
                     );
+                    return ProxyMsgEffect::ApplyProviderRuntime {
+                        app_type,
+                        base_reload_token,
+                        snapshot,
+                    };
                 }
-                Err(err) => {
+                ManagedSessionOutcome::Applied { snapshot: Err(err) } => {
+                    app.push_toast(
+                        texts::tui_toast_proxy_managed_updated_refresh_failed(
+                            app_display_name(&app_type),
+                            enabled,
+                            &err,
+                        ),
+                        ToastKind::Warning,
+                    );
+                    return ProxyMsgEffect::ReloadProviderRuntime { app_type };
+                }
+                ManagedSessionOutcome::Failed(err) => {
                     app.push_toast(err, ToastKind::Error);
                 }
             }
@@ -1679,10 +1711,10 @@ pub(crate) fn handle_proxy_msg(
             result,
         } => {
             if !proxy_snapshot_refresh.finish_if_active(request_id) {
-                return Ok(CacheInvalidation::None);
+                return ProxyMsgEffect::None;
             }
             if app.app_type != app_type {
-                return Ok(CacheInvalidation::None);
+                return ProxyMsgEffect::None;
             }
 
             match result {
@@ -1700,7 +1732,7 @@ pub(crate) fn handle_proxy_msg(
         }
     }
 
-    Ok(invalidation)
+    ProxyMsgEffect::None
 }
 
 #[allow(dead_code)]
@@ -2164,12 +2196,14 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
         let target = quota_target();
+        let generation = data.quota.generation();
         data.quota.mark_loading(target.clone(), true);
 
         handle_quota_msg(
             &mut app,
             &mut data,
             QuotaMsg::Finished {
+                generation,
                 target: target.clone(),
                 result: Ok(ProviderUsageQuota::Subscription(quota_result())),
             },
@@ -2192,12 +2226,14 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut data = UiData::default();
         let target = quota_target();
+        let generation = data.quota.generation();
         data.quota.mark_loading(target.clone(), false);
 
         handle_quota_msg(
             &mut app,
             &mut data,
             QuotaMsg::Finished {
+                generation,
                 target,
                 result: Ok(ProviderUsageQuota::Subscription(quota_result())),
             },

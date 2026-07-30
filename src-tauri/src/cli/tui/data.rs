@@ -51,6 +51,18 @@ fn next_reload_token() -> UiDataReloadToken {
     UiDataReloadToken(NEXT_RELOAD_TOKEN.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Process-local version for asynchronous quota results. Rotating it invalidates
+/// replies that were started with credentials from an older provider snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QuotaSnapshotGeneration(u64);
+
+impl Default for QuotaSnapshotGeneration {
+    fn default() -> Self {
+        static NEXT_QUOTA_GENERATION: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_QUOTA_GENERATION.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// Content version of a [`UsageSnapshot`], so render-time projections over it
 /// can be memoized instead of rebuilt every frame.
 ///
@@ -100,10 +112,20 @@ pub(crate) struct ProviderQuotaState {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QuotaSnapshot {
+    generation: QuotaSnapshotGeneration,
     by_provider: HashMap<String, ProviderQuotaState>,
 }
 
 impl QuotaSnapshot {
+    pub(crate) fn generation(&self) -> QuotaSnapshotGeneration {
+        self.generation
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.generation = QuotaSnapshotGeneration::default();
+        self.by_provider.clear();
+    }
+
     pub(crate) fn mark_loading(&mut self, target: QuotaTarget, manual: bool) {
         let provider_id = target.provider_id.clone();
         match self.by_provider.get_mut(&provider_id) {
@@ -179,10 +201,16 @@ impl QuotaSnapshot {
             .is_some_and(|state| &state.target == target && state.loading && state.manual)
     }
 
-    pub(crate) fn target_is_current(&self, target: &QuotaTarget) -> bool {
-        self.by_provider
-            .get(&target.provider_id)
-            .is_some_and(|state| &state.target == target)
+    pub(crate) fn target_is_current(
+        &self,
+        generation: QuotaSnapshotGeneration,
+        target: &QuotaTarget,
+    ) -> bool {
+        self.generation == generation
+            && self
+                .by_provider
+                .get(&target.provider_id)
+                .is_some_and(|state| &state.target == target)
     }
 }
 
@@ -333,6 +361,23 @@ pub struct ProxySnapshot {
     pub last_error: Option<String>,
     pub current_app_target: Option<ProxyTargetSnapshot>,
     pub provider_health: Arc<HashMap<String, ProviderHealthSnapshot>>,
+}
+
+/// Minimal TUI projection affected by enabling or disabling a managed proxy
+/// session. Provider data is included because takeover setup may persist live
+/// credentials back to the selected provider before rewriting the live config.
+///
+/// Keep this process-local and opaque: provider snapshots can contain secrets.
+pub(crate) struct ProviderRuntimeSnapshot {
+    providers: ProvidersSnapshot,
+    proxy: ProxySnapshot,
+}
+
+impl ProviderRuntimeSnapshot {
+    #[cfg(test)]
+    pub(crate) fn new(providers: ProvidersSnapshot, proxy: ProxySnapshot) -> Self {
+        Self { providers, proxy }
+    }
 }
 
 impl ProxySnapshot {
@@ -1145,6 +1190,12 @@ pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {
 impl UiData {
     pub(crate) fn mark_current_app_data_changed(&mut self) {
         self.reload_token = next_reload_token();
+    }
+
+    pub(crate) fn apply_provider_runtime_snapshot(&mut self, snapshot: ProviderRuntimeSnapshot) {
+        self.providers = snapshot.providers;
+        self.proxy = snapshot.proxy;
+        self.mark_current_app_data_changed();
     }
 
     pub(crate) fn refresh_current_app_provider_data(
@@ -3550,6 +3601,20 @@ pub(crate) async fn load_proxy_snapshot_from_state_async(
         current_app_target,
         provider_health,
     })
+}
+
+pub(crate) async fn load_provider_runtime_snapshot_from_state_async(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<ProviderRuntimeSnapshot, AppError> {
+    // The managed proxy operation runs through the daemon, so the AppState
+    // created by the foreground worker predates any provider token persisted by
+    // takeover setup. Refresh its in-memory provider projection only after the
+    // daemon call has completed.
+    state.reload_config_snapshot_from_db()?;
+    let providers = load_providers_with_mode(state, app_type, ProviderLoadMode::SyncLive)?;
+    let proxy = load_proxy_snapshot_from_state_async(state, app_type).await?;
+    Ok(ProviderRuntimeSnapshot { providers, proxy })
 }
 
 fn proxy_target_snapshot_for_app(

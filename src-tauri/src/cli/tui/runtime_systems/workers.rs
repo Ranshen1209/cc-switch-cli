@@ -13,20 +13,21 @@ use crate::services::{S3SyncService, SkillService, StreamCheckService, WebDavSyn
 use crate::settings::{set_webdav_sync_settings, webdav_jianguoyun_preset};
 
 use super::super::data::{
-    load_proxy_snapshot_from_state_async, load_snapshot_state, load_state,
-    load_usage_pricing_data_from_state_for_range, UiData, UsageRangePreset,
+    load_provider_runtime_snapshot_from_state_async, load_proxy_snapshot_from_state_async,
+    load_snapshot_state, load_state, load_usage_pricing_data_from_state_for_range, UiData,
+    UsageRangePreset,
 };
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
     AppDataReq, AppDataSystem, CodexHistoryMsg, CodexHistoryReq, CodexHistorySystem,
     LoadedMessagePage, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg, ManagedAuthReq,
-    ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg, ProxyReq,
-    ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages, SessionMsg, SessionReq,
-    SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg,
-    SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq,
-    StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem, UsageLogLoadError,
-    UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem, WebDavDone,
-    WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    ManagedAuthSystem, ManagedSessionOutcome, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
+    ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, RefreshedMessagePages,
+    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
+    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 static SESSION_SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -188,12 +189,14 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                         request_id,
                         app_type,
                         enabled,
+                        base_reload_token,
                     } => {
                         let _ = tx.send(ProxyMsg::ManagedSessionFinished {
                             request_id,
                             app_type,
                             enabled,
-                            result: Err(err.clone()),
+                            base_reload_token,
+                            outcome: ManagedSessionOutcome::Failed(err.clone()),
                         });
                     }
                     ProxyReq::RefreshSnapshot {
@@ -218,20 +221,33 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                 request_id,
                 app_type,
                 enabled,
+                base_reload_token,
             } => {
-                let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
-                    rt.block_on(
+                let outcome = match load_state().map_err(|e| e.to_string()) {
+                    Err(error) => ManagedSessionOutcome::Failed(error),
+                    Ok(state) => match rt.block_on(
                         state
                             .proxy_service
                             .set_managed_session_for_app(app_type.as_str(), enabled),
-                    )
-                });
+                    ) {
+                        Err(error) => ManagedSessionOutcome::Failed(error),
+                        Ok(()) => ManagedSessionOutcome::Applied {
+                            snapshot: rt
+                                .block_on(load_provider_runtime_snapshot_from_state_async(
+                                    &state, &app_type,
+                                ))
+                                .map(Box::new)
+                                .map_err(|error| error.to_string()),
+                        },
+                    },
+                };
 
                 let _ = tx.send(ProxyMsg::ManagedSessionFinished {
                     request_id,
                     app_type,
                     enabled,
-                    result,
+                    base_reload_token,
+                    outcome,
                 });
             }
             ProxyReq::RefreshSnapshot {
@@ -2362,8 +2378,9 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
         Err(e) => {
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
-                let QuotaReq::Refresh { target } = req;
+                let QuotaReq::Refresh { generation, target } = req;
                 let _ = tx.send(QuotaMsg::Finished {
+                    generation,
                     target,
                     result: Err(err.clone()),
                 });
@@ -2373,10 +2390,14 @@ fn quota_worker_loop(rx: mpsc::Receiver<QuotaReq>, tx: mpsc::Sender<QuotaMsg>) {
     };
 
     while let Ok(req) = rx.recv() {
-        let QuotaReq::Refresh { target } = req;
+        let QuotaReq::Refresh { generation, target } = req;
         let result = rt.block_on(crate::cli::provider_quota::query_quota(&target));
 
-        let _ = tx.send(QuotaMsg::Finished { target, result });
+        let _ = tx.send(QuotaMsg::Finished {
+            generation,
+            target,
+            result,
+        });
     }
 }
 

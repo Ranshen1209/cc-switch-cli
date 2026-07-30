@@ -7,8 +7,9 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::cli::tui::data::ProxySnapshot;
-use crate::cli::tui::data::QuotaTarget;
+use crate::cli::tui::data::{
+    ProviderRuntimeSnapshot, ProxySnapshot, QuotaSnapshotGeneration, QuotaTarget, UiDataReloadToken,
+};
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
 
@@ -288,11 +289,15 @@ pub(crate) enum SessionMsg {
 }
 
 pub(crate) enum QuotaReq {
-    Refresh { target: QuotaTarget },
+    Refresh {
+        generation: QuotaSnapshotGeneration,
+        target: QuotaTarget,
+    },
 }
 
 pub(crate) enum QuotaMsg {
     Finished {
+        generation: QuotaSnapshotGeneration,
         target: QuotaTarget,
         result: Result<crate::cli::tui::data::ProviderUsageQuota, String>,
     },
@@ -664,10 +669,18 @@ pub(crate) enum ProxyReq {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
+        base_reload_token: UiDataReloadToken,
     },
     RefreshSnapshot {
         request_id: u64,
         app_type: AppType,
+    },
+}
+
+pub(crate) enum ManagedSessionOutcome {
+    Failed(String),
+    Applied {
+        snapshot: Result<Box<ProviderRuntimeSnapshot>, String>,
     },
 }
 
@@ -676,7 +689,8 @@ pub(crate) enum ProxyMsg {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
-        result: Result<(), String>,
+        base_reload_token: UiDataReloadToken,
+        outcome: ManagedSessionOutcome,
     },
     SnapshotRefreshed {
         request_id: u64,

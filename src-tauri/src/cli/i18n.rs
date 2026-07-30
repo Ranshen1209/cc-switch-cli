@@ -8854,6 +8854,28 @@ pub mod texts {
         }
     }
 
+    pub fn tui_toast_proxy_managed_updated_refresh_failed(
+        app: &str,
+        enabled: bool,
+        err: &str,
+    ) -> String {
+        if is_chinese() {
+            if enabled {
+                format!("{app} 已走 cc-switch 代理，但状态刷新失败：{err}")
+            } else {
+                format!("{app} 已恢复 live 配置，但状态刷新失败：{err}")
+            }
+        } else if enabled {
+            format!(
+                "{app} now routes through cc-switch, but its status could not be refreshed: {err}"
+            )
+        } else {
+            format!(
+                "{app} restored to its live config, but its status could not be refreshed: {err}"
+            )
+        }
+    }
+
     pub fn tui_toast_proxy_worker_unavailable(err: &str) -> String {
         if is_chinese() {
             format!("代理任务不可用：{err}")

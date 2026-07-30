@@ -55,8 +55,8 @@ use runtime_systems::{
     start_session_system, start_session_usage_sync_system, start_skills_system,
     start_speedtest_system, start_stream_check_system, start_update_system,
     start_usage_pricing_system, start_webdav_system, AppDataLoadKind, AppDataMsg, AppDataReq,
-    CodexHistoryReq, LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, QuotaReq,
-    RequestTracker, SessionReq, SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq,
+    CodexHistoryReq, LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyMsgEffect, ProxyReq,
+    QuotaReq, RequestTracker, SessionReq, SessionUsageSyncMsg, SessionUsageSyncReq, SkillsReq,
     StreamCheckReq, UpdateReq, UsageLogLoadError, UsagePricingLoadError, UsagePricingMsg,
     UsagePricingReq, WebDavReq,
 };
@@ -253,8 +253,10 @@ fn queue_quota_refresh(
         return;
     };
 
+    let generation = data.quota.generation();
     data.quota.mark_loading(target.clone(), manual);
     if let Err(error) = tx.send(QuotaReq::Refresh {
+        generation,
         target: target.clone(),
     }) {
         data.quota.finish_error(target, error.to_string());
@@ -300,6 +302,17 @@ fn queue_current_quota_refresh_if_due(
         app.quota_last_auto_tick = Some(app.tick);
         queue_quota_refresh(app, data, quota_req_tx, target, false);
     }
+}
+
+fn refresh_quota_after_provider_runtime_change(
+    app: &mut App,
+    data: &mut data::UiData,
+    quota_req_tx: Option<&mpsc::Sender<QuotaReq>>,
+) {
+    data.quota.invalidate();
+    app.quota_auto_target_key = None;
+    app.quota_last_auto_tick = None;
+    queue_current_quota_refresh_if_due(app, data, quota_req_tx);
 }
 
 fn queue_provider_quota_refresh(
@@ -356,6 +369,70 @@ fn queue_proxy_snapshot_refresh_after_app_switch(
 
     tracker.cancel();
     queue_proxy_snapshot_refresh(tracker, proxy_req_tx, app_type);
+}
+
+#[derive(Clone, Copy)]
+struct ProxyEffectWorkers<'a> {
+    app_data: Option<&'a mpsc::Sender<AppDataReq>>,
+    proxy: Option<&'a mpsc::Sender<ProxyReq>>,
+    quota: Option<&'a mpsc::Sender<QuotaReq>>,
+}
+
+fn apply_proxy_msg_effect(
+    app: &mut App,
+    data: &mut data::UiData,
+    data_cache: &mut UiDataByAppCache,
+    workers: ProxyEffectWorkers<'_>,
+    proxy_snapshot_refresh: &mut RequestTracker,
+    effect: ProxyMsgEffect,
+) {
+    match effect {
+        ProxyMsgEffect::None => {}
+        ProxyMsgEffect::ApplyProviderRuntime {
+            app_type,
+            base_reload_token,
+            snapshot,
+        } => {
+            let applied = data_cache.apply_provider_runtime_snapshot(
+                app,
+                data,
+                &app_type,
+                base_reload_token,
+                snapshot,
+            );
+
+            proxy_snapshot_refresh.cancel();
+            if applied.current_app && applied.snapshot_applied {
+                app.reset_proxy_activity(
+                    data.proxy.estimated_input_tokens_total,
+                    data.proxy.estimated_output_tokens_total,
+                );
+            } else {
+                // The managed operation changed process-global runtime state
+                // while another app was visible, or its result was older than
+                // a completed foreground update. Refresh the visible app rather
+                // than applying an app-scoped stale snapshot to it.
+                queue_proxy_snapshot_refresh(proxy_snapshot_refresh, workers.proxy, &app.app_type);
+            }
+
+            refresh_quota_after_provider_runtime_change(app, data, workers.quota);
+
+            if applied.needs_base_reload {
+                let _ = data_cache.queue_app_data_load(app, workers.app_data, &app_type);
+            }
+        }
+        ProxyMsgEffect::ReloadProviderRuntime { app_type } => {
+            // The backend mutation succeeded, but its targeted projection could
+            // not be built. Keep the visible stale-while-revalidate data and
+            // recover through the existing background app-data system.
+            data_cache.remove_app_snapshot(&app_type);
+            let _ = data_cache.queue_app_data_load(app, workers.app_data, &app_type);
+
+            refresh_quota_after_provider_runtime_change(app, data, workers.quota);
+            proxy_snapshot_refresh.cancel();
+            queue_proxy_snapshot_refresh(proxy_snapshot_refresh, workers.proxy, &app.app_type);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -505,6 +582,13 @@ enum AppDataLoadFinish {
     Ignored,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProviderRuntimeApply {
+    current_app: bool,
+    snapshot_applied: bool,
+    needs_base_reload: bool,
+}
+
 impl UiDataByAppCache {
     fn remember_current(&mut self, app_type: &AppType, data: &data::UiData) {
         if self.pending_by_app.contains_key(app_type) || self.incomplete_by_app.contains(app_type) {
@@ -599,6 +683,51 @@ impl UiDataByAppCache {
         self.by_app.remove(app_type);
         self.pending_by_app.remove(app_type);
         self.incomplete_by_app.remove(app_type);
+    }
+
+    fn apply_provider_runtime_snapshot(
+        &mut self,
+        app: &mut App,
+        data: &mut data::UiData,
+        app_type: &AppType,
+        base_reload_token: data::UiDataReloadToken,
+        snapshot: Box<data::ProviderRuntimeSnapshot>,
+    ) -> ProviderRuntimeApply {
+        // A base-data request that started before the managed proxy mutation may
+        // otherwise land afterward and overwrite this newer provider/proxy
+        // projection. Retire its token; the caller queues one fresh successor.
+        let superseded_pending = self.pending_by_app.remove(app_type).is_some();
+        let was_incomplete = self.incomplete_by_app.remove(app_type);
+
+        let current_app = &app.app_type == app_type;
+        let applied = if current_app {
+            if data.reload_token == base_reload_token {
+                // `switch_to` remembers the visible snapshot before leaving
+                // this app, so retaining an older duplicate here only creates
+                // another stale source.
+                self.by_app.remove(app_type);
+                data.apply_provider_runtime_snapshot(*snapshot);
+                app.clamp_selections(data);
+                true
+            } else {
+                false
+            }
+        } else if let Some(cached) = self.by_app.get_mut(app_type) {
+            if cached.reload_token == base_reload_token {
+                cached.apply_provider_runtime_snapshot(*snapshot);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        ProviderRuntimeApply {
+            current_app,
+            snapshot_applied: applied,
+            needs_base_reload: superseded_pending || was_incomplete || !applied,
+        }
     }
 
     fn remove_usage_pricing_for_app(&mut self, app_type: &AppType) {
@@ -3241,28 +3370,25 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(proxy) = proxy_system.as_ref() {
             while let Ok(msg) = proxy.result_rx.try_recv() {
                 frame_scheduler.mark_dirty();
-                match handle_proxy_msg(
+                let effect = handle_proxy_msg(
                     &mut app,
                     &mut data,
                     &mut proxy_loading,
                     &mut proxy_snapshot_refresh,
                     msg,
-                ) {
-                    Ok(invalidation) => {
-                        if let Err(err) = apply_cache_invalidation(
-                            &mut app,
-                            &mut data,
-                            &mut data_cache,
-                            quota.as_ref().map(|s| &s.req_tx),
-                            app_data.as_ref().map(|s| &s.req_tx),
-                            usage_pricing.as_ref().map(|s| &s.req_tx),
-                            invalidation,
-                        ) {
-                            app.push_toast(err.to_string(), ToastKind::Error);
-                        }
-                    }
-                    Err(err) => app.push_toast(err.to_string(), ToastKind::Error),
-                }
+                );
+                apply_proxy_msg_effect(
+                    &mut app,
+                    &mut data,
+                    &mut data_cache,
+                    ProxyEffectWorkers {
+                        app_data: app_data.as_ref().map(|system| &system.req_tx),
+                        proxy: Some(&proxy.req_tx),
+                        quota: quota.as_ref().map(|system| &system.req_tx),
+                    },
+                    &mut proxy_snapshot_refresh,
+                    effect,
+                );
             }
         }
 

@@ -1026,6 +1026,7 @@ pub(crate) fn handle_action(
             ctx.proxy_loading,
             app_type,
             enabled,
+            ctx.data.reload_token,
         ),
         Action::SetLanguage(lang) => {
             set_language(lang)?;

@@ -18,7 +18,7 @@ use crate::test_support::{
     lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
 };
 use crate::{AppError, AppType};
-use runtime_systems::ProxyMsg;
+use runtime_systems::{ManagedSessionOutcome, ProxyMsg};
 
 #[test]
 fn codex_history_action_is_forwarded_to_the_dedicated_worker() {
@@ -3610,8 +3610,15 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
     let mut loading = RequestTracker::default();
     let (tx, rx) = mpsc::channel();
 
-    queue_managed_proxy_action(&mut app, Some(&tx), &mut loading, AppType::Claude, true)
-        .expect("queue proxy action should succeed");
+    queue_managed_proxy_action(
+        &mut app,
+        Some(&tx),
+        &mut loading,
+        AppType::Claude,
+        true,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("queue proxy action should succeed");
 
     let req = rx.recv().expect("proxy request should be queued");
     assert!(matches!(
@@ -3620,6 +3627,7 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
             request_id: 1,
             app_type: AppType::Claude,
             enabled: true,
+            base_reload_token: _,
         }
     ));
     assert_eq!(loading.active, Some(1));
@@ -3630,6 +3638,626 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
             ..
         }
     ));
+}
+
+#[test]
+fn managed_proxy_actions_queue_serially_and_latest_owns_loading_state() {
+    let mut app = App::new(Some(AppType::Codex));
+    let mut loading = RequestTracker::default();
+    let (tx, rx) = mpsc::channel();
+
+    queue_managed_proxy_action(
+        &mut app,
+        Some(&tx),
+        &mut loading,
+        AppType::Claude,
+        true,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("first proxy action should be queued");
+    queue_managed_proxy_action(
+        &mut app,
+        Some(&tx),
+        &mut loading,
+        AppType::Codex,
+        false,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("second proxy action should be queued");
+
+    assert!(matches!(
+        rx.recv().expect("first proxy request"),
+        ProxyReq::SetManagedSessionForCurrentApp {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token: _,
+        }
+    ));
+    assert!(matches!(
+        rx.recv().expect("second proxy request"),
+        ProxyReq::SetManagedSessionForCurrentApp {
+            request_id: 2,
+            app_type: AppType::Codex,
+            enabled: false,
+            base_reload_token: _,
+        }
+    ));
+    assert_eq!(loading.active, Some(2));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::Proxy,
+            ..
+        }
+    ));
+}
+
+fn provider_runtime_snapshot(
+    current_provider: &str,
+    running: bool,
+) -> data::ProviderRuntimeSnapshot {
+    data::ProviderRuntimeSnapshot::new(
+        data::ProvidersSnapshot {
+            current_id: current_provider.to_string(),
+            ..data::ProvidersSnapshot::default()
+        },
+        data::ProxySnapshot {
+            running,
+            estimated_input_tokens_total: 12,
+            estimated_output_tokens_total: 34,
+            ..data::ProxySnapshot::default()
+        },
+    )
+}
+
+fn official_claude_providers() -> data::ProvidersSnapshot {
+    let mut provider = crate::provider::Provider::with_id(
+        "official".to_string(),
+        "Claude Official".to_string(),
+        json!({"env": {}}),
+        None,
+    );
+    provider.category = Some("official".to_string());
+    data::ProvidersSnapshot {
+        current_id: "official".to_string(),
+        rows: vec![data::ProviderRow {
+            id: "official".to_string(),
+            provider,
+            api_url: None,
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }],
+        ..data::ProvidersSnapshot::default()
+    }
+}
+
+#[test]
+fn managed_proxy_result_applies_only_provider_runtime_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Proxy,
+        title: "Starting".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.providers.current_id = "old-provider".to_string();
+    data.usage.summary_30d.total_requests = 77;
+    data.pricing.rows.push(data::ModelPricingRow {
+        model_id: "sentinel-model".to_string(),
+        ..data::ModelPricingRow::default()
+    });
+    let old_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, data.clone());
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 4,
+        active: Some(4),
+    };
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token: old_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert!(data.proxy.running);
+    assert_eq!(data.usage.summary_30d.total_requests, 77);
+    assert_eq!(data.pricing.rows[0].model_id, "sentinel-model");
+    assert_ne!(data.reload_token, old_reload_token);
+    assert_eq!(proxy_loading.active, None);
+    assert_eq!(proxy_snapshot_refresh.active, None);
+    assert!(matches!(app.overlay, Overlay::None));
+    let expected_toast = texts::tui_toast_proxy_managed_current_app_updated("Claude", true);
+    assert_eq!(
+        app.toast
+            .as_ref()
+            .map(|toast| (toast.kind, toast.message.as_str())),
+        Some((ToastKind::Success, expected_toast.as_str()))
+    );
+    assert!(app_data_rx.try_recv().is_err());
+    assert!(proxy_rx.try_recv().is_err());
+}
+
+#[test]
+fn superseded_managed_proxy_result_updates_origin_cache_after_app_change() {
+    let mut app = App::new(Some(AppType::Codex));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Proxy,
+        title: "Starting newer request".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.providers.current_id = "visible-codex".to_string();
+    let mut cached_claude = UiData::default();
+    cached_claude.providers.current_id = "old-claude".to_string();
+    let base_reload_token = cached_claude.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, cached_claude);
+    let mut proxy_loading = RequestTracker {
+        seq: 2,
+        active: Some(2),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker {
+        seq: 3,
+        active: Some(3),
+    };
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-claude", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "visible-codex");
+    let cached = cache
+        .by_app
+        .get(&AppType::Claude)
+        .expect("origin app should remain cached");
+    assert_eq!(cached.providers.current_id, "fresh-claude");
+    assert!(cached.proxy.running);
+    assert_eq!(proxy_loading.active, Some(2));
+    assert!(matches!(
+        app.overlay,
+        Overlay::Loading {
+            kind: LoadingKind::Proxy,
+            ..
+        }
+    ));
+    assert!(matches!(
+        proxy_rx.recv().expect("visible app proxy refresh"),
+        ProxyReq::RefreshSnapshot {
+            request_id: 4,
+            app_type: AppType::Codex,
+        }
+    ));
+    assert!(app_data_rx.try_recv().is_err());
+}
+
+#[test]
+fn managed_proxy_result_supersedes_older_app_data_request() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "old-provider".to_string();
+    let base_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache {
+        next_app_data_request_id: 7,
+        ..UiDataByAppCache::default()
+    };
+    cache
+        .pending_by_app
+        .insert(AppType::Claude, pending_snapshot_app_data(7));
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert!(matches!(
+        app_data_rx.recv().expect("fresh successor app-data load"),
+        AppDataReq::Load {
+            request_id: 8,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(proxy_rx.try_recv().is_err());
+
+    let mut stale = UiData::default();
+    stale.providers.current_id = "stale-provider".to_string();
+    handle_app_data_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        None,
+        Some(&app_data_tx),
+        None,
+        AppDataMsg::Loaded {
+            kind: AppDataLoadKind::Snapshot,
+            request_id: 7,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            result: Ok(stale),
+        },
+    );
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert_eq!(
+        cache
+            .pending_by_app
+            .get(&AppType::Claude)
+            .map(|pending| pending.request_id),
+        Some(8)
+    );
+}
+
+#[test]
+fn managed_proxy_result_reloads_previously_incomplete_app_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "old-provider".to_string();
+    let base_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.incomplete_by_app.insert(AppType::Claude);
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("fresh-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: None,
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "fresh-provider");
+    assert!(matches!(
+        app_data_rx.recv().expect("incomplete app successor load"),
+        AppDataReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(cache.incomplete_by_app.contains(&AppType::Claude));
+}
+
+#[test]
+fn managed_proxy_result_does_not_overwrite_newer_ui_data() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "before-request".to_string();
+    let base_reload_token = data.reload_token;
+    data.providers.current_id = "newer-provider".to_string();
+    data.mark_current_app_data_changed();
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, data.clone());
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(provider_runtime_snapshot("stale-provider", true))),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "newer-provider");
+    assert!(matches!(
+        app_data_rx.recv().expect("version mismatch successor load"),
+        AppDataReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(matches!(
+        proxy_rx.recv().expect("fresh visible proxy snapshot"),
+        ProxyReq::RefreshSnapshot {
+            request_id: 1,
+            app_type: AppType::Claude,
+        }
+    ));
+}
+
+#[test]
+fn managed_proxy_result_invalidates_quota_generation_and_refreshes_same_provider() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData {
+        providers: official_claude_providers(),
+        ..UiData::default()
+    };
+    let target =
+        data::quota_target_for_current_provider(&AppType::Claude, &data).expect("quota target");
+    let stale_generation = data.quota.generation();
+    data.quota.mark_loading(target.clone(), false);
+    let base_reload_token = data.reload_token;
+    let snapshot = data::ProviderRuntimeSnapshot::new(
+        official_claude_providers(),
+        data::ProxySnapshot {
+            running: true,
+            ..data::ProxySnapshot::default()
+        },
+    );
+    let mut cache = UiDataByAppCache::default();
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (quota_tx, quota_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Ok(Box::new(snapshot)),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: None,
+            proxy: None,
+            quota: Some(&quota_tx),
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    let QuotaReq::Refresh {
+        generation: fresh_generation,
+        target: refreshed_target,
+    } = quota_rx
+        .recv()
+        .expect("quota refresh after credential change");
+    assert_ne!(fresh_generation, stale_generation);
+    assert_eq!(refreshed_target, target);
+
+    handle_quota_msg(
+        &mut app,
+        &mut data,
+        runtime_systems::QuotaMsg::Finished {
+            generation: stale_generation,
+            target: target.clone(),
+            result: Ok(data::ProviderUsageQuota::Script(
+                crate::provider::UsageResult {
+                    success: true,
+                    data: None,
+                    error: None,
+                },
+            )),
+        },
+    );
+    let state = data
+        .quota
+        .state_for(&target.provider_id)
+        .expect("fresh quota request remains active");
+    assert!(state.loading);
+    assert!(state.quota.is_none());
+}
+
+#[test]
+fn managed_proxy_snapshot_failure_recovers_in_background_without_false_failure() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Proxy,
+        title: "Starting".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.providers.current_id = "still-visible".to_string();
+    let base_reload_token = data.reload_token;
+    let mut cache = UiDataByAppCache::default();
+    cache.by_app.insert(AppType::Claude, data.clone());
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let (app_data_tx, app_data_rx) = mpsc::channel();
+    let (proxy_tx, proxy_rx) = mpsc::channel();
+
+    let effect = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            base_reload_token,
+            outcome: ManagedSessionOutcome::Applied {
+                snapshot: Err("snapshot boom".to_string()),
+            },
+        },
+    );
+    apply_proxy_msg_effect(
+        &mut app,
+        &mut data,
+        &mut cache,
+        ProxyEffectWorkers {
+            app_data: Some(&app_data_tx),
+            proxy: Some(&proxy_tx),
+            quota: None,
+        },
+        &mut proxy_snapshot_refresh,
+        effect,
+    );
+
+    assert_eq!(data.providers.current_id, "still-visible");
+    assert!(matches!(
+        app_data_rx.recv().expect("background app-data recovery"),
+        AppDataReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            ..
+        }
+    ));
+    assert!(matches!(
+        proxy_rx.recv().expect("background proxy recovery"),
+        ProxyReq::RefreshSnapshot {
+            request_id: 1,
+            app_type: AppType::Claude,
+        }
+    ));
+    let toast = app.toast.as_ref().expect("refresh warning");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert_eq!(
+        toast.message,
+        texts::tui_toast_proxy_managed_updated_refresh_failed("Claude", true, "snapshot boom")
+    );
+    assert!(matches!(app.overlay, Overlay::None));
 }
 
 #[test]
@@ -3752,7 +4380,7 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
     };
     app.reset_proxy_activity(0, 0);
 
-    let invalidation = handle_proxy_msg(
+    let effect = handle_proxy_msg(
         &mut app,
         &mut data,
         &mut proxy_loading,
@@ -3762,10 +4390,9 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
             app_type: AppType::Claude,
             result: Ok(proxy),
         },
-    )
-    .expect("snapshot result should be handled");
+    );
 
-    assert_eq!(invalidation, CacheInvalidation::None);
+    assert!(matches!(effect, ProxyMsgEffect::None));
     assert!(data.proxy.running);
     assert_eq!(data.proxy.estimated_input_tokens_total, 12);
     assert_eq!(data.proxy.estimated_output_tokens_total, 34);
@@ -3797,8 +4424,7 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
                 ..data::ProxySnapshot::default()
             }),
         },
-    )
-    .expect("stale snapshot result should be ignored");
+    );
     assert!(!data.proxy.running);
     assert_eq!(proxy_snapshot_refresh.active, Some(2));
 
@@ -3815,8 +4441,7 @@ fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
                 ..data::ProxySnapshot::default()
             }),
         },
-    )
-    .expect("wrong-app snapshot result should be ignored");
+    );
     assert!(!data.proxy.running);
     assert_eq!(proxy_snapshot_refresh.active, None);
 }
@@ -3852,8 +4477,15 @@ fn managed_proxy_action_warns_when_worker_is_unavailable() {
     let mut app = App::new(Some(AppType::Claude));
     let mut loading = RequestTracker::default();
 
-    queue_managed_proxy_action(&mut app, None, &mut loading, AppType::Claude, true)
-        .expect("missing worker should not crash");
+    queue_managed_proxy_action(
+        &mut app,
+        None,
+        &mut loading,
+        AppType::Claude,
+        true,
+        data::UiDataReloadToken::default(),
+    )
+    .expect("missing worker should not crash");
 
     let toast = app.toast.as_ref().expect("warning toast should be shown");
     assert_eq!(toast.kind, ToastKind::Warning);
