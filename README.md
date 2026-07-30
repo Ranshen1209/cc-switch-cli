@@ -1,10 +1,10 @@
+![CC-Switch CLI — one switchboard for every AI CLI](assets/screenshots/hero.png)
+
 <div align="center">
 
-# CC-Switch CLI
+## CC-Switch CLI
 
 **Manage Claude Code, Codex, Gemini, OpenCode, Hermes, and OpenClaw from one interactive TUI or scriptable CLI.**
-
-![CC-Switch CLI — one switchboard for every AI CLI](assets/screenshots/hero.png)
 
 [![Version](https://img.shields.io/badge/version-5.9.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)

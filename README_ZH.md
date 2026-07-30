@@ -1,10 +1,10 @@
+![CC-Switch CLI，一个面向所有 AI CLI 的统一控制台](assets/screenshots/hero.png)
+
 <div align="center">
 
-# CC-Switch CLI
+## CC-Switch CLI
 
 **通过交互式 TUI 或脚本化 CLI，统一管理 Claude Code、Codex、Gemini、OpenCode、Hermes 和 OpenClaw。**
-
-![CC-Switch CLI，一个面向所有 AI CLI 的统一控制台](assets/screenshots/hero.png)
 
 [![Version](https://img.shields.io/badge/version-5.9.3-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
