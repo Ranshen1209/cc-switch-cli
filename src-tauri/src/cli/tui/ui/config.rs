@@ -978,7 +978,6 @@ fn render_openclaw_env_route(
         theme,
         &[
             ("Enter", texts::tui_key_edit()),
-            ("e", texts::tui_key_edit()),
             ("Esc", texts::tui_key_close()),
         ],
         app.focus == Focus::Content,
@@ -1453,7 +1452,6 @@ fn render_openclaw_tools_route(
     } else {
         vec![
             ("Enter", texts::tui_key_edit()),
-            ("e", texts::tui_key_edit()),
             ("Del/Backspace", texts::tui_key_delete()),
             ("Esc", texts::tui_key_close()),
         ]
@@ -3689,15 +3687,13 @@ fn managed_account_key_items(app: &App) -> Vec<(&'static str, &'static str)> {
         return items;
     }
 
-    match app.managed_auth_status.as_ref() {
-        None => items.push(("Enter", texts::tui_key_refresh())),
-        Some(status) if status.accounts.is_empty() => {
-            items.push(("Enter", texts::tui_key_add_account()));
-        }
-        Some(_) => {
-            items.push(("Space", texts::tui_key_switch()));
-            items.push(("Enter", texts::tui_key_open()));
-        }
+    if app
+        .managed_auth_status
+        .as_ref()
+        .is_some_and(|status| !status.accounts.is_empty())
+    {
+        items.push(("Space", texts::tui_key_switch()));
+        items.push(("Enter", texts::tui_key_open()));
     }
 
     items

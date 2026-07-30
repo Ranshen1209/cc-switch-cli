@@ -8691,7 +8691,6 @@ fn openclaw_tools_route_shows_edit_and_delete_shortcuts_for_structured_rows() {
     let all = all_text(&render(&app, &minimal_data(&app.app_type)));
 
     assert!(all.contains("Enter"), "{all}");
-    assert!(all.contains("e"), "{all}");
     assert!(all.contains("Del/Backspace"), "{all}");
     assert!(all.contains(texts::tui_key_edit()), "{all}");
     assert!(all.contains(texts::tui_key_delete()), "{all}");

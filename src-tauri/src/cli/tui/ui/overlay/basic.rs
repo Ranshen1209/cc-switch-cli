@@ -53,7 +53,6 @@ pub(super) fn render_confirm_overlay(
         ConfirmAction::ProviderApiFormatProxyNotice => &[("Enter", texts::tui_key_close())],
         ConfirmAction::VisibleAppsAutoDetection => &[
             ("Enter", texts::tui_key_use_auto()),
-            ("N", texts::tui_key_keep_current()),
             ("Esc", texts::tui_key_keep_current()),
         ],
         ConfirmAction::VisibleAppsSwitchToManual { .. } => &[
@@ -303,7 +302,6 @@ pub(super) fn render_common_snippet_picker_overlay(
         &[
             ("↑↓", texts::tui_key_select()),
             ("Enter", texts::tui_key_edit()),
-            ("e", texts::tui_key_edit()),
             ("Esc", texts::tui_key_close()),
         ],
         OverlaySize::FitRows {
