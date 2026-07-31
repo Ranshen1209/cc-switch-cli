@@ -514,7 +514,7 @@ fn mcp_preview_shows_environment_values_in_plaintext() {
 }
 
 #[test]
-fn mcp_preview_masks_custom_header_values() {
+fn mcp_preview_shows_custom_header_values_in_plaintext() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -551,15 +551,15 @@ fn mcp_preview_masks_custom_header_values() {
         160,
         40,
     ));
-    assert!(!all.contains(secret), "{all}");
-    assert!(!all.contains("safe-but-hidden-too"), "{all}");
+    assert!(all.contains(secret), "{all}");
+    assert!(all.contains("safe-but-hidden-too"), "{all}");
     assert!(all.contains("X-Custom-Auth"), "{all}");
     assert!(all.contains("User-Agent"), "{all}");
-    assert!(all.contains("********"), "{all}");
+    assert!(!all.contains("********"), "{all}");
 }
 
 #[test]
-fn mcp_preview_masks_legacy_codex_http_header_values() {
+fn mcp_preview_shows_legacy_codex_http_header_values_in_plaintext() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -596,8 +596,8 @@ fn mcp_preview_masks_legacy_codex_http_header_values() {
         40,
     ));
     assert!(all.contains("Authorization"), "{all}");
-    assert!(all.contains("********"), "{all}");
-    assert!(!all.contains(secret), "{all}");
+    assert!(!all.contains("********"), "{all}");
+    assert!(all.contains(secret), "{all}");
     assert!(!all.contains("http_headers"), "{all}");
 }
 
@@ -725,7 +725,6 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
     app.overlay = Overlay::McpKeyValuePicker {
         kind: McpKeyValueKind::Env,
         selected: 0,
-        reveal_values: false,
     };
 
     let all = all_text(&render_with_size(
@@ -740,7 +739,7 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
 }
 
 #[test]
-fn mcp_headers_picker_masks_values_until_explicitly_revealed() {
+fn mcp_headers_picker_shows_values_in_plaintext() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -759,36 +758,22 @@ fn mcp_headers_picker_masks_values_until_explicitly_revealed() {
     app.overlay = Overlay::McpKeyValuePicker {
         kind: McpKeyValueKind::Headers,
         selected: 0,
-        reveal_values: false,
     };
 
-    let masked = all_text(&render_with_size(
+    let rendered = all_text(&render_with_size(
         &app,
         &minimal_data(&app.app_type),
         100,
         35,
     ));
-    assert!(masked.contains("Authorization"), "{masked}");
-    assert!(masked.contains("********"), "{masked}");
-    assert!(!masked.contains(secret), "{masked}");
-    assert!(masked.contains("v show"), "{masked}");
-
-    app.overlay = Overlay::McpKeyValuePicker {
-        kind: McpKeyValueKind::Headers,
-        selected: 0,
-        reveal_values: true,
-    };
-    let revealed = all_text(&render_with_size(
-        &app,
-        &minimal_data(&app.app_type),
-        100,
-        35,
-    ));
-    assert!(revealed.contains(secret), "{revealed}");
+    assert!(rendered.contains("Authorization"), "{rendered}");
+    assert!(rendered.contains(secret), "{rendered}");
+    assert!(!rendered.contains("********"), "{rendered}");
+    assert!(!rendered.contains("v show"), "{rendered}");
 }
 
 #[test]
-fn mcp_remote_json_preview_masks_header_values_without_mutating_payload() {
+fn mcp_remote_json_preview_shows_header_values_without_mutating_payload() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -820,8 +805,8 @@ fn mcp_remote_json_preview_masks_header_values_without_mutating_payload() {
         40,
     ));
     assert!(preview.contains("Authorization"), "{preview}");
-    assert!(preview.contains("********"), "{preview}");
-    assert!(!preview.contains(secret), "{preview}");
+    assert!(!preview.contains("********"), "{preview}");
+    assert!(preview.contains(secret), "{preview}");
 }
 
 #[test]
@@ -847,7 +832,6 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     app.overlay = Overlay::McpKeyValuePicker {
         kind: McpKeyValueKind::Env,
         selected,
-        reveal_values: false,
     };
 
     let all = all_text(&render_with_size(
@@ -880,7 +864,6 @@ fn mcp_env_value_editor_shows_the_active_value_in_plaintext() {
             kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            return_reveal_values: false,
             field: crate::cli::tui::app::McpKeyValueEditorField::Value,
             key: TextInput::new("CUSTOM_VALUE"),
             value: TextInput::new(secret),

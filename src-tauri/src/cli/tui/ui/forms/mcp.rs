@@ -129,7 +129,6 @@ fn mcp_preview_value(mcp: &super::form::McpAddFormState) -> Value {
     const MAX_ENV_KEYS: usize = 128;
     const MAX_HEADER_KEYS: usize = 128;
     const MAX_TAGS: usize = 128;
-    const MASKED_HEADER_VALUE: &str = "********";
 
     let source = mcp.source_server();
     let mut root = serde_json::Map::new();
@@ -209,7 +208,10 @@ fn mcp_preview_value(mcp: &super::form::McpAddFormState) -> Value {
             let mut headers = serde_json::Map::new();
             for row in mcp.header_rows.iter().take(MAX_HEADER_KEYS) {
                 let key = row.key.chars().take(128).collect::<String>();
-                headers.insert(key, Value::String(MASKED_HEADER_VALUE.to_string()));
+                headers.insert(
+                    key,
+                    Value::String(bounded_trimmed_text_for_display(&row.value)),
+                );
             }
             let hidden = mcp.header_rows.len().saturating_sub(MAX_HEADER_KEYS);
             if hidden > 0 {

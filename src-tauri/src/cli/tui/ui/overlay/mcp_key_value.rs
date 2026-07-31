@@ -3,8 +3,6 @@ use super::super::*;
 use super::frame::{overlay_frame, OverlaySize};
 use crate::cli::tui::form::McpKeyValueKind;
 
-const MCP_HEADER_VALUE_MASK: &str = "********";
-
 pub(super) fn render_mcp_key_value_picker_overlay(
     frame: &mut Frame<'_>,
     app: &App,
@@ -12,25 +10,14 @@ pub(super) fn render_mcp_key_value_picker_overlay(
     theme: &theme::Theme,
     kind: McpKeyValueKind,
     selected: usize,
-    reveal_values: bool,
 ) {
-    let mut keys = vec![
+    let keys = [
         ("↑↓", texts::tui_key_select()),
         ("a", texts::tui_key_add()),
         ("Enter", texts::tui_key_edit()),
+        ("Del/Backspace", texts::tui_key_delete()),
+        ("Esc", texts::tui_key_close()),
     ];
-    if matches!(kind, McpKeyValueKind::Headers) {
-        keys.push((
-            "v",
-            if reveal_values {
-                texts::tui_key_hide()
-            } else {
-                texts::tui_key_show()
-            },
-        ));
-    }
-    keys.push(("Del/Backspace", texts::tui_key_delete()));
-    keys.push(("Esc", texts::tui_key_close()));
 
     let title = match kind {
         McpKeyValueKind::Env => texts::tui_mcp_env_title(),
@@ -68,11 +55,7 @@ pub(super) fn render_mcp_key_value_picker_overlay(
     let visible_start = visible.start;
     let items = rows[visible.clone()].iter().map(|row| {
         let key = bounded_trimmed_text_for_display(&row.key);
-        let value = if matches!(kind, McpKeyValueKind::Headers) && !reveal_values {
-            MCP_HEADER_VALUE_MASK.to_string()
-        } else {
-            bounded_trimmed_text_for_display(&row.value)
-        };
+        let value = bounded_trimmed_text_for_display(&row.value);
         ListItem::new(Line::raw(format!("{key} = {value}")))
     });
 

@@ -193,11 +193,7 @@ impl App {
                             } else {
                                 McpKeyValueKind::Env
                             };
-                            self.overlay = Overlay::McpKeyValuePicker {
-                                kind,
-                                selected: 0,
-                                reveal_values: false,
-                            };
+                            self.overlay = Overlay::McpKeyValuePicker { kind, selected: 0 };
                         }
                     }
                     McpAddField::AppClaude => mcp.apps.claude = !mcp.apps.claude,

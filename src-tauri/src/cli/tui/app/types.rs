@@ -4501,7 +4501,6 @@ pub struct McpKeyValueEntryEditorState {
     pub kind: crate::cli::tui::form::McpKeyValueKind,
     pub row: Option<usize>,
     pub return_selected: usize,
-    pub return_reveal_values: bool,
     pub field: McpKeyValueEditorField,
     pub key: crate::cli::tui::form::TextInput,
     pub value: crate::cli::tui::form::TextInput,
@@ -4641,7 +4640,6 @@ pub enum Overlay {
     McpKeyValuePicker {
         kind: crate::cli::tui::form::McpKeyValueKind,
         selected: usize,
-        reveal_values: bool,
     },
     McpTypePicker {
         selected: usize,

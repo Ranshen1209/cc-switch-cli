@@ -121,6 +121,78 @@ impl Provider {
         }
     }
 
+    /// Return the API key accepted by this provider's runtime configuration.
+    ///
+    /// Claude can persist either Anthropic credential field; its metadata is
+    /// authoritative when both are present. Codex keeps its current canonical
+    /// key under `auth`, while retaining the compatibility shapes accepted by
+    /// its runtime adapter.
+    pub(crate) fn configured_api_key(&self, app_type: &AppType) -> Option<String> {
+        let value = match app_type {
+            AppType::Claude => {
+                let env = self.settings_config.get("env")?;
+                let field = ClaudeApiKeyField::from_meta_and_settings(
+                    self.meta.as_ref(),
+                    &self.settings_config,
+                );
+                env.get(field.as_env_key())
+                    .or_else(|| env.get(field.alternate_env_key()))
+            }
+            AppType::Codex => return self.configured_codex_api_key(),
+            AppType::Gemini => self.settings_config.pointer("/env/GEMINI_API_KEY"),
+            AppType::OpenCode => self.settings_config.pointer("/options/apiKey"),
+            AppType::Hermes => self
+                .settings_config
+                .get("apiKey")
+                .or_else(|| self.settings_config.get("api_key")),
+            AppType::OpenClaw => self.settings_config.get("apiKey"),
+        };
+
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    fn configured_codex_api_key(&self) -> Option<String> {
+        let non_empty = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+
+        non_empty(self.settings_config.pointer("/env/OPENAI_API_KEY"))
+            .or_else(|| {
+                self.settings_config
+                    .get("auth")
+                    .and_then(crate::codex_config::extract_codex_auth_api_key)
+            })
+            .or_else(|| {
+                non_empty(
+                    self.settings_config
+                        .get("apiKey")
+                        .or_else(|| self.settings_config.get("api_key")),
+                )
+            })
+            .or_else(|| {
+                self.settings_config
+                    .get("config")
+                    .filter(|config| config.is_object())
+                    .and_then(|config| {
+                        non_empty(config.get("api_key").or_else(|| config.get("apiKey")))
+                    })
+            })
+            .or_else(|| {
+                self.settings_config
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
+            })
+    }
+
     pub fn is_codex_oauth(&self) -> bool {
         self.provider_type() == Some("codex_oauth")
     }
@@ -680,7 +752,104 @@ mod tests {
         parse_custom_user_agent, AuthBinding, AuthBindingSource, LocalProxyRequestOverrides,
         OpenCodeProviderConfig, Provider, ProviderMeta,
     };
+    use crate::app_config::AppType;
     use std::collections::HashMap;
+
+    #[test]
+    fn configured_api_key_uses_each_apps_canonical_field() {
+        let mut provider = Provider::with_id(
+            "all-apps".to_string(),
+            "All Apps".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_AUTH_TOKEN": "stale-claude-token",
+                    "ANTHROPIC_API_KEY": "claude-api-key",
+                    "GEMINI_API_KEY": "gemini-api-key"
+                },
+                "auth": {
+                    "OPENAI_API_KEY": "codex-api-key"
+                },
+                "options": {
+                    "apiKey": "opencode-api-key"
+                },
+                "apiKey": "shared-top-level-key",
+                "api_key": "hermes-legacy-key"
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            provider.configured_api_key(&AppType::Claude).as_deref(),
+            Some("claude-api-key")
+        );
+        assert_eq!(
+            provider.configured_api_key(&AppType::Codex).as_deref(),
+            Some("codex-api-key")
+        );
+        assert_eq!(
+            provider.configured_api_key(&AppType::Gemini).as_deref(),
+            Some("gemini-api-key")
+        );
+        assert_eq!(
+            provider.configured_api_key(&AppType::OpenCode).as_deref(),
+            Some("opencode-api-key")
+        );
+        assert_eq!(
+            provider.configured_api_key(&AppType::Hermes).as_deref(),
+            Some("shared-top-level-key")
+        );
+        assert_eq!(
+            provider.configured_api_key(&AppType::OpenClaw).as_deref(),
+            Some("shared-top-level-key")
+        );
+    }
+
+    #[test]
+    fn configured_codex_api_key_matches_runtime_compatibility_sources() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "env": {"OPENAI_API_KEY": "env-key"},
+                    "auth": {"OPENAI_API_KEY": "auth-key"}
+                }),
+                "env-key",
+            ),
+            (
+                serde_json::json!({"auth": {"OPENAI_API_KEY": "auth-key"}}),
+                "auth-key",
+            ),
+            (
+                serde_json::json!({"apiKey": "top-level-key"}),
+                "top-level-key",
+            ),
+            (
+                serde_json::json!({"config": {"api_key": "object-key"}}),
+                "object-key",
+            ),
+            (
+                serde_json::json!({
+                    "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+experimental_bearer_token = "toml-key"
+"#
+                }),
+                "toml-key",
+            ),
+        ];
+
+        for (settings, expected) in cases {
+            let provider = Provider::with_id("codex".into(), "Codex".into(), settings, None);
+            assert_eq!(
+                provider.configured_api_key(&AppType::Codex).as_deref(),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {

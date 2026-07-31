@@ -16,12 +16,7 @@ impl App {
     }
 
     fn handle_mcp_key_value_picker_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::McpKeyValuePicker {
-            kind,
-            selected,
-            reveal_values,
-        } = &mut self.overlay
-        else {
+        let Overlay::McpKeyValuePicker { kind, selected } = &mut self.overlay else {
             return None;
         };
         let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
@@ -45,16 +40,11 @@ impl App {
                 }
                 Action::None
             }
-            KeyCode::Char('v') if matches!(*kind, McpKeyValueKind::Headers) => {
-                *reveal_values = !*reveal_values;
-                Action::None
-            }
             KeyCode::Char('a') => {
                 self.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
                     kind: *kind,
                     row: None,
                     return_selected: *selected,
-                    return_reveal_values: *reveal_values,
                     field: McpKeyValueEditorField::Key,
                     key: TextInput::new(""),
                     value: TextInput::new(""),
@@ -69,7 +59,6 @@ impl App {
                     kind: *kind,
                     row: Some(*selected),
                     return_selected: *selected,
-                    return_reveal_values: *reveal_values,
                     field: McpKeyValueEditorField::Key,
                     key: TextInput::new(row.key),
                     value: TextInput::new(row.value),
@@ -98,21 +87,16 @@ impl App {
                     return Some(Action::None);
                 };
 
-                let (kind, selected, reveal_values) = match &self.overlay {
+                let (kind, selected) = match &self.overlay {
                     Overlay::McpKeyValueEntryEditor(editor) => (
                         editor.kind,
                         editor
                             .return_selected
                             .min(mcp.key_value_rows(editor.kind).len().saturating_sub(1)),
-                        editor.return_reveal_values,
                     ),
-                    _ => (McpKeyValueKind::Env, 0, false),
+                    _ => (McpKeyValueKind::Env, 0),
                 };
-                self.overlay = Overlay::McpKeyValuePicker {
-                    kind,
-                    selected,
-                    reveal_values,
-                };
+                self.overlay = Overlay::McpKeyValuePicker { kind, selected };
                 Some(Action::None)
             }
             KeyCode::Tab => {
@@ -125,11 +109,10 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Enter => {
-                let (kind, row, reveal_values, key_text, value) = match &self.overlay {
+                let (kind, row, key_text, value) = match &self.overlay {
                     Overlay::McpKeyValueEntryEditor(editor) => (
                         editor.kind,
                         editor.row,
-                        editor.return_reveal_values,
                         editor.key.value.trim().to_string(),
                         editor.value.value.clone(),
                     ),
@@ -202,11 +185,7 @@ impl App {
                         McpKeyValueKind::Headers => entry.key.eq_ignore_ascii_case(&key_text),
                     })
                     .unwrap_or_else(|| mcp.key_value_rows(kind).len().saturating_sub(1));
-                self.overlay = Overlay::McpKeyValuePicker {
-                    kind,
-                    selected,
-                    reveal_values,
-                };
+                self.overlay = Overlay::McpKeyValuePicker { kind, selected };
                 Some(Action::None)
             }
             _ => {

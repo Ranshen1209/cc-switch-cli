@@ -193,7 +193,6 @@ mod tests {
                 kind: McpKeyValueKind::Env,
                 row: None,
                 return_selected: 0,
-                return_reveal_values: false,
                 field: McpKeyValueEditorField::Key,
                 key: TextInput::new(""),
                 value: TextInput::new(""),
@@ -1969,7 +1968,6 @@ mod tests {
             kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            return_reveal_values: false,
             field: McpKeyValueEditorField::Key,
             key: TextInput::new("alpha beta"),
             value: TextInput::new(""),
@@ -3986,7 +3984,6 @@ mod tests {
         app.overlay = Overlay::McpKeyValuePicker {
             kind: McpKeyValueKind::Env,
             selected: 0,
-            reveal_values: false,
         };
 
         app.on_key(key(KeyCode::Enter), &UiData::default());
@@ -4024,7 +4021,6 @@ mod tests {
         app.overlay = Overlay::McpKeyValuePicker {
             kind: McpKeyValueKind::Env,
             selected: 1,
-            reveal_values: false,
         };
 
         app.on_key(key(KeyCode::Backspace), &UiData::default());
@@ -4061,7 +4057,6 @@ mod tests {
         app.overlay = Overlay::McpKeyValuePicker {
             kind: McpKeyValueKind::Env,
             selected: 0,
-            reveal_values: false,
         };
 
         app.on_key(key(KeyCode::Char('a')), &UiData::default());
@@ -4107,7 +4102,6 @@ mod tests {
             kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            return_reveal_values: false,
             field: McpKeyValueEditorField::Key,
             key: TextInput::new(""),
             value: TextInput::new(""),
@@ -4139,7 +4133,6 @@ mod tests {
             kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            return_reveal_values: false,
             field: McpKeyValueEditorField::Key,
             key: TextInput::new("KEY"),
             value: TextInput::new("new"),
@@ -4172,7 +4165,6 @@ mod tests {
         app.overlay = Overlay::McpKeyValuePicker {
             kind: McpKeyValueKind::Env,
             selected: 1,
-            reveal_values: false,
         };
 
         app.on_key(key(KeyCode::Enter), &UiData::default());
@@ -4214,7 +4206,6 @@ mod tests {
         app.overlay = Overlay::McpKeyValuePicker {
             kind: McpKeyValueKind::Env,
             selected: 1,
-            reveal_values: false,
         };
 
         app.on_key(key(KeyCode::Char('a')), &UiData::default());
@@ -4239,7 +4230,6 @@ mod tests {
             kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            return_reveal_values: false,
             field: McpKeyValueEditorField::Key,
             key: TextInput::new("K"),
             value: TextInput::new("V"),
@@ -4271,43 +4261,6 @@ mod tests {
             Overlay::McpKeyValuePicker {
                 kind: McpKeyValueKind::Headers,
                 selected: 0,
-                reveal_values: false,
-            }
-        ));
-    }
-
-    #[test]
-    fn mcp_headers_picker_toggles_value_visibility() {
-        let mut app = App::new(Some(AppType::Claude));
-        let mut form = McpAddFormState::new();
-        form.header_rows.push(McpKeyValueRow {
-            key: "Authorization".to_string(),
-            value: "Bearer secret".to_string(),
-        });
-        app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpKeyValuePicker {
-            kind: McpKeyValueKind::Headers,
-            selected: 0,
-            reveal_values: false,
-        };
-
-        app.on_key(key(KeyCode::Char('v')), &UiData::default());
-        assert!(matches!(
-            app.overlay,
-            Overlay::McpKeyValuePicker {
-                kind: McpKeyValueKind::Headers,
-                reveal_values: true,
-                ..
-            }
-        ));
-
-        app.on_key(key(KeyCode::Char('v')), &UiData::default());
-        assert!(matches!(
-            app.overlay,
-            Overlay::McpKeyValuePicker {
-                kind: McpKeyValueKind::Headers,
-                reveal_values: false,
-                ..
             }
         ));
     }
@@ -4325,7 +4278,6 @@ mod tests {
             kind: McpKeyValueKind::Headers,
             row: None,
             return_selected: 0,
-            return_reveal_values: false,
             field: McpKeyValueEditorField::Key,
             key: TextInput::new("authorization"),
             value: TextInput::new("Bearer duplicate"),
@@ -15436,7 +15388,7 @@ mod tests {
     }
 
     #[test]
-    fn context_help_mcp_headers_explains_mapping_and_masking() {
+    fn context_help_mcp_headers_explains_mapping() {
         let _lang = use_test_language(Language::English);
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
@@ -15453,10 +15405,7 @@ mod tests {
 
         let text = help_text(&app);
         assert!(text.contains("Authorization: Bearer <token>"), "{text}");
-        assert!(
-            text.contains("hidden in the list and JSON preview"),
-            "{text}"
-        );
+        assert!(!text.contains("hidden in the list"), "{text}");
         assert!(text.contains("Codex uses `http_headers`"), "{text}");
     }
 
