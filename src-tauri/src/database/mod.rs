@@ -27,6 +27,7 @@ mod backup;
 mod dao;
 mod migration;
 mod schema;
+pub(crate) mod usage_prune_watermark;
 
 #[cfg(test)]
 mod tests;
@@ -609,7 +610,8 @@ impl Database {
         // 顺序很重要——`journal_mode=WAL` 会写入 page 1，之后再设 `auto_vacuum`
         // 对空库将静默失效（模式仍为 NONE，需整库 VACUUM 才能切换）。
         // unix 下文件已被预创建为空，因此以「是否已存在用户表」判断是否为全新库。
-        if !Self::has_user_tables(&conn)? {
+        let is_new_database = !Self::has_user_tables(&conn)?;
+        if is_new_database {
             conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
@@ -673,6 +675,10 @@ impl Database {
 
         db.create_tables()?;
         db.apply_schema_migrations()?;
+        {
+            let conn = lock_conn!(db.conn);
+            usage_prune_watermark::initialize_usage_prune_high_watermark(&conn, is_new_database)?;
+        }
         // 存量库若仍是 auto_vacuum=NONE（老版本从未启用增量回收），在此切换到
         // INCREMENTAL 并整库 VACUUM 一次，回收历史累积的空闲页（issue #327：
         // proxy_request_logs 等本地表被 prune 删除后文件从不收缩，导致 WebDAV
@@ -736,6 +742,16 @@ impl Database {
     ///
     /// 用于 TUI 后台热刷新等只读路径；不会创建目录、建表、迁移、seed 或执行启动维护。
     pub fn open_readonly_current_schema() -> Result<Self, AppError> {
+        Self::open_readonly_current_schema_with_busy_timeout(Duration::from_secs(5))
+    }
+
+    /// Open the same read-only snapshot with a caller-owned lock budget.
+    ///
+    /// Latency-sensitive overlays use this variant so even the schema-version
+    /// probe cannot inherit the general five-second database timeout.
+    pub(crate) fn open_readonly_current_schema_with_busy_timeout(
+        busy_timeout: Duration,
+    ) -> Result<Self, AppError> {
         let db_path = database_path()?;
         if !db_path.exists() {
             return Err(AppError::Database(format!(
@@ -749,6 +765,8 @@ impl Database {
         let conn = Connection::open_with_flags(&db_path, readonly_database_open_flags())
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::configure_connection(&conn)?;
+        conn.busy_timeout(busy_timeout)
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
         let version = Self::get_user_version(&conn)?;
         if version > SCHEMA_VERSION {
@@ -787,6 +805,10 @@ impl Database {
             db_path: None,
         };
         db.create_tables()?;
+        {
+            let conn = lock_conn!(db.conn);
+            usage_prune_watermark::initialize_usage_prune_high_watermark(&conn, true)?;
+        }
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)

@@ -11,7 +11,7 @@ use crate::hermes_config::get_hermes_dir;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    truncate_string_utf8, SearchSnippet, SessionMessage, SessionMessageBatch,
+    truncate_string_utf8, SearchSnippet, SessionCreatedAtKind, SessionMessage, SessionMessageBatch,
     SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
     SESSION_MESSAGE_PREVIEW_MAX_MESSAGES, SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES,
     SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES,
@@ -389,9 +389,12 @@ impl HermesStreamPlan {
             summary: None,
             project_dir: cwd,
             created_at: started_at,
+            source_mtime_ns: None,
+            created_at_kind: started_at.map(|_| SessionCreatedAtKind::ProviderTimestamp),
             last_active_at: ended_at.or(started_at),
             source_path: Some(format!("{db_source}#{session_id}")),
             resume_command: None,
+            usage: None,
         })
     }
 
@@ -985,6 +988,13 @@ fn parse_jsonl_session_lines(path: &Path, head: &[String], tail: &[String]) -> O
 
     let source_path = path.to_string_lossy().to_string();
     let fallback_time = file_modified_ms(path);
+    let created_at_kind = if first_ts.is_some() {
+        Some(SessionCreatedAtKind::ProviderTimestamp)
+    } else if fallback_time.is_some() {
+        Some(SessionCreatedAtKind::FileMtimeFallback)
+    } else {
+        None
+    };
     let fallback_title = path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -997,9 +1007,12 @@ fn parse_jsonl_session_lines(path: &Path, head: &[String], tail: &[String]) -> O
         summary: first_user_msg,
         project_dir: cwd,
         created_at: first_ts.or(fallback_time),
+        source_mtime_ns: None,
+        created_at_kind,
         last_active_at: last_ts.or(first_ts).or(fallback_time),
         source_path: Some(source_path),
         resume_command: None,
+        usage: None,
     })
 }
 

@@ -428,6 +428,7 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             request_id,
             scope_epoch,
             scope,
+            complete,
             result,
         } => {
             if app.sessions.scan_active != Some(request_id)
@@ -435,12 +436,18 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             {
                 return;
             }
+            let mut opened = false;
+            let mut cost_page_ready = false;
             match result {
                 Ok(Some((reader, page))) => {
                     if app.sessions.scope_cache_is_invalidated(&scope) {
                         super::super::app::retire_session_rows(page.rows);
+                        if complete {
+                            app.sessions.reject_invalidated_cached_open(request_id);
+                        }
                         return;
                     }
+                    opened = true;
                     let base_changed = app.sessions.base_manifest.as_ref().is_none_or(|base| {
                         base.scope_epoch != scope_epoch
                             || base.scope != scope
@@ -465,7 +472,7 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                             app.pending_deep_search = Some(desired.query);
                         }
                     } else {
-                        app.sessions.apply_opened_manifest(
+                        cost_page_ready = app.sessions.apply_opened_manifest(
                             scope_epoch,
                             &scope,
                             page.generation,
@@ -481,7 +488,16 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                     app.sessions.last_error = Some(error);
                 }
             }
-            if app.sessions.deep_search_active.is_none() && app.sessions.base_manifest.is_some() {
+            if complete && opened {
+                app.sessions.finish_cached_open(request_id);
+            }
+            if complete && cost_page_ready {
+                request_session_cost_if_visible(app);
+            }
+            if complete
+                && app.sessions.deep_search_active.is_none()
+                && app.sessions.base_manifest.is_some()
+            {
                 queue_current_session_view(app);
             }
         }
@@ -506,6 +522,10 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                 {
                     super::super::app::retire_session_rows(published.first_page.rows);
                     return;
+                }
+                if app.sessions.take_manual_refresh_publication(request_id) {
+                    request_session_cost_if_visible(app);
+                    app.sessions.request_manual_usage_sync();
                 }
                 let safe_tombstones = app
                     .sessions
@@ -543,24 +563,23 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                         reader,
                     );
                     if applied {
+                        request_session_cost_if_visible(app);
                         app.sessions
                             .clear_safe_manifest_tombstones(&scope, safe_tombstones);
                     }
                     app.sessions.scan_active = None;
                     app.sessions.loading = false;
-                } else {
-                    if app.sessions.stage_manifest(
-                        request_id,
-                        scope_epoch,
-                        &scope,
-                        published.generation,
-                        published.total_rows,
-                        published.first_page.rows,
-                        reader,
-                    ) {
-                        app.sessions
-                            .attach_pending_manifest_tombstones(safe_tombstones);
-                    }
+                } else if app.sessions.stage_manifest(
+                    request_id,
+                    scope_epoch,
+                    &scope,
+                    published.generation,
+                    published.total_rows,
+                    published.first_page.rows,
+                    reader,
+                ) {
+                    app.sessions
+                        .attach_pending_manifest_tombstones(safe_tombstones);
                 }
                 if !desired_view.is_base_view() {
                     app.sessions.deep_search_active = None;
@@ -571,13 +590,35 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                 if app.sessions.scan_active != Some(request_id) {
                     return;
                 }
+                let manual_refresh = app.sessions.take_manual_refresh_publication(request_id);
                 app.sessions.fail_scan(request_id, error.clone());
+                if manual_refresh {
+                    request_session_cost_if_visible(app);
+                    app.sessions.request_manual_usage_sync();
+                }
                 app.push_toast(
                     texts::tui_sessions_toast_refresh_failed(&error),
                     ToastKind::Warning,
                 );
             }
         },
+        SessionMsg::CostOverlayReady {
+            cost_seq,
+            page_token,
+            page_index,
+            identities,
+            overlays,
+        } => {
+            if session_cost_overlay_is_visible(&app.route) {
+                app.sessions.apply_cost_overlay(
+                    cost_seq,
+                    &page_token,
+                    page_index,
+                    &identities,
+                    &overlays,
+                );
+            }
+        }
         SessionMsg::PageLoaded {
             request_id,
             token,
@@ -589,8 +630,12 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                     super::super::app::retire_session_rows(loaded.rows);
                     return;
                 }
-                app.sessions
-                    .finish_page_request(request_id, &token, page, loaded.rows);
+                let accepted =
+                    app.sessions
+                        .finish_page_request(request_id, &token, page, loaded.rows);
+                if accepted && app.sessions.remote.current_page() == page {
+                    request_session_cost_if_visible(app);
+                }
             }
             Err(error) => {
                 app.sessions
@@ -604,7 +649,7 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             result,
         } => match result {
             Ok((reader, page, selected_local)) => {
-                app.sessions.finish_manifest_reconcile(
+                if app.sessions.finish_manifest_reconcile(
                     request_id,
                     scope_epoch,
                     &generation,
@@ -612,7 +657,9 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                     page.rows,
                     selected_local,
                     reader,
-                );
+                ) {
+                    request_session_cost_if_visible(app);
+                }
             }
             Err(error) => {
                 app.sessions
@@ -855,7 +902,7 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
             app.sessions.clear_deep_search_results();
             match result {
                 Ok((published, reader)) => {
-                    app.sessions.apply_query_manifest(
+                    if app.sessions.apply_query_manifest(
                         scope_epoch,
                         &scope,
                         &base_generation,
@@ -865,7 +912,9 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                         published.first_page.page_index,
                         published.first_page.rows,
                         reader,
-                    );
+                    ) {
+                        request_session_cost_if_visible(app);
+                    }
                 }
                 Err(error) => {
                     app.sessions.mark_materialization_failed(
@@ -951,6 +1000,16 @@ pub(crate) fn handle_session_msg(app: &mut App, msg: SessionMsg) {
                 }
             }
         }
+    }
+}
+
+fn session_cost_overlay_is_visible(route: &super::super::route::Route) -> bool {
+    matches!(route, super::super::route::Route::Sessions)
+}
+
+fn request_session_cost_if_visible(app: &mut App) {
+    if session_cost_overlay_is_visible(&app.route) {
+        app.sessions.request_cost_overlay();
     }
 }
 
@@ -1862,10 +1921,49 @@ mod tests {
     use crate::app_config::AppType;
     use crate::cli::tui::data::{ProviderUsageQuota, QuotaTarget, QuotaTargetKind};
     use crate::cli::tui::form::ProviderAddField;
+    use crate::cli::tui::route::Route;
     use crate::cli::tui::text_edit::TextInput;
     use crate::services::local_env_check::{LocalTool, ToolCheckResult, ToolCheckStatus};
     use crate::services::{CredentialStatus, SubscriptionQuota};
     use crate::session_manager::SessionMeta;
+
+    #[test]
+    fn session_cost_overlay_is_applied_only_while_sessions_route_is_visible() {
+        assert!(session_cost_overlay_is_visible(&Route::Sessions));
+        assert!(!session_cost_overlay_is_visible(&Route::Main));
+    }
+
+    #[test]
+    fn hidden_manual_manifest_publication_does_not_restart_cost_projection() {
+        let mut app = App::new(Some(AppType::Gemini));
+        app.route = Route::Main;
+        let request_id = app.sessions.start_scan("gemini".to_string());
+        app.sessions.mark_manual_refresh(request_id);
+        let scope_epoch = app.sessions.scope_epoch;
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ManifestPublished {
+                request_id,
+                scope_epoch,
+                scope: "gemini".to_string(),
+                result: Ok(published(
+                    "hidden-manual",
+                    1,
+                    vec![session("gemini", "hidden-session", 2)],
+                )),
+            },
+        );
+
+        assert!(
+            !app.sessions.take_cost_overlay_request(),
+            "a late publication must not restart SQL after the user leaves Sessions"
+        );
+        assert!(
+            app.sessions.take_manual_usage_sync_request(),
+            "leaving Sessions must not cancel the already-requested manual usage sync"
+        );
+    }
 
     #[test]
     fn codex_history_save_result_finishes_only_the_matching_request() {
@@ -2269,6 +2367,155 @@ mod tests {
         assert_eq!(app.sessions.pagination.len(), 1);
         assert_eq!(app.sessions.pagination.selected_index(), Some(0));
         assert!(app.sessions.pagination.is_row_focused());
+    }
+
+    #[test]
+    fn cached_session_manifest_open_completes_without_a_followup_scan() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Sessions;
+        let request_id = app.sessions.start_scan("claude".to_string());
+        let scope_epoch = app.sessions.scope_epoch;
+        let (published, reader) =
+            published("cached", 1, vec![session("claude", "cached-session", 2)]);
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ScopeOpened {
+                request_id,
+                scope_epoch,
+                scope: "claude".to_string(),
+                complete: true,
+                result: Ok(Some((reader, published.first_page))),
+            },
+        );
+
+        assert!(app.sessions.loaded_once);
+        assert!(!app.sessions.loading);
+        assert!(app.sessions.scan_active.is_none());
+        assert!(app.sessions.loaded_for_provider("claude"));
+        assert_eq!(app.sessions.rows[0].session_id, "cached-session");
+        assert!(
+            app.sessions.take_cost_overlay_request(),
+            "an accepted cached page must request its asynchronous overlay"
+        );
+    }
+
+    #[test]
+    fn speculative_session_page_load_does_not_requery_the_visible_page() {
+        let mut app = App::new(Some(AppType::Claude));
+        let _request_id = app.sessions.start_scan("claude".to_string());
+        let scope_epoch = app.sessions.scope_epoch;
+        let rows = (0..101)
+            .map(|index| session("claude", &format!("session-{index:03}"), 101 - index))
+            .collect::<Vec<_>>();
+        let (published, reader) = published("prefetch", rows.len(), rows);
+        assert!(app.sessions.apply_opened_manifest(
+            scope_epoch,
+            "claude",
+            published.generation,
+            published.total_rows,
+            published.first_page.page_index,
+            published.first_page.rows,
+            reader,
+        ));
+        let (page_request, token, page_reader) =
+            app.sessions.next_page_request(1).expect("prefetch request");
+        let page = page_reader.load_page(1).expect("prefetched page");
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::PageLoaded {
+                request_id: page_request,
+                token,
+                page: 1,
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(app.sessions.remote.current_page(), 0);
+        assert!(app.sessions.remote.has_page(1));
+        assert!(
+            !app.sessions.take_cost_overlay_request(),
+            "a cached-only prefetch must not cancel or duplicate the visible-page query"
+        );
+    }
+
+    #[test]
+    fn manual_manifest_publication_requests_immediate_cost_and_one_usage_sync() {
+        let mut app = App::new(Some(AppType::Gemini));
+        app.route = Route::Sessions;
+        let request_id = app.sessions.start_scan("gemini".to_string());
+        app.sessions.mark_manual_refresh(request_id);
+        let scope_epoch = app.sessions.scope_epoch;
+        let (published, reader) =
+            published("manual", 1, vec![session("gemini", "manual-session", 2)]);
+
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ManifestPublished {
+                request_id,
+                scope_epoch,
+                scope: "gemini".to_string(),
+                result: Ok((published, reader)),
+            },
+        );
+
+        assert!(app.sessions.take_cost_overlay_request());
+        assert!(app.sessions.take_manual_usage_sync_request());
+        assert!(
+            !app.sessions.take_manual_usage_sync_request(),
+            "the publication signal must be consumed once"
+        );
+    }
+
+    #[test]
+    fn manual_manifest_publication_with_visible_page_requests_cost_before_reconcile() {
+        let mut app = App::new(Some(AppType::Gemini));
+        app.route = Route::Sessions;
+        let initial_request = app.sessions.start_scan("gemini".to_string());
+        let scope_epoch = app.sessions.scope_epoch;
+        let (initial, initial_reader) =
+            published("initial", 1, vec![session("gemini", "initial-session", 1)]);
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ManifestPublished {
+                request_id: initial_request,
+                scope_epoch,
+                scope: "gemini".to_string(),
+                result: Ok((initial, initial_reader)),
+            },
+        );
+        assert!(
+            app.sessions.take_cost_overlay_request(),
+            "initial page requests its overlay"
+        );
+
+        let refresh_request = app.sessions.start_scan("gemini".to_string());
+        app.sessions.mark_manual_refresh(refresh_request);
+        let (refreshed, refreshed_reader) = published(
+            "refreshed",
+            1,
+            vec![session("gemini", "refreshed-session", 2)],
+        );
+        handle_session_msg(
+            &mut app,
+            SessionMsg::ManifestPublished {
+                request_id: refresh_request,
+                scope_epoch,
+                scope: "gemini".to_string(),
+                result: Ok((refreshed, refreshed_reader)),
+            },
+        );
+
+        assert!(
+            app.sessions.pending_manifest.is_some(),
+            "the replacement still reconciles selection off the UI thread"
+        );
+        assert!(
+            app.sessions.take_cost_overlay_request(),
+            "manual publication must not wait for manifest locate before requesting cost"
+        );
+        assert!(app.sessions.take_manual_usage_sync_request());
     }
 
     #[test]
@@ -2875,8 +3122,11 @@ mod tests {
                 summary: None,
                 project_dir: None,
                 created_at: None,
+                source_mtime_ns: None,
+                created_at_kind: None,
                 last_active_at: None,
                 source_path: Some("/tmp/alpha.jsonl".to_string()),
+                usage: None,
                 resume_command: None,
             },
             crate::session_manager::SessionMeta {
@@ -2886,8 +3136,11 @@ mod tests {
                 summary: None,
                 project_dir: None,
                 created_at: None,
+                source_mtime_ns: None,
+                created_at_kind: None,
                 last_active_at: None,
                 source_path: Some("/tmp/beta.jsonl".to_string()),
+                usage: None,
                 resume_command: None,
             },
         ];
@@ -2985,7 +3238,6 @@ mod tests {
         );
         assert_eq!(app.pending_deep_search.as_deref(), Some("needle"));
         assert!(app.sessions.scan_tombstones.contains(&deleted_key));
-
         let rebuilt_base_generation = app
             .sessions
             .base_manifest

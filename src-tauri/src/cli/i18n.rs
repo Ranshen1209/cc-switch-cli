@@ -3070,7 +3070,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_entry_count(count: usize) -> String {
+    pub fn tui_label_headers() -> &'static str {
+        "Headers"
+    }
+
+    pub fn tui_mcp_key_value_entry_count(count: usize) -> String {
         if is_chinese() {
             format!("{count} 项")
         } else if count == 1 {
@@ -3112,7 +3116,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_key_label() -> &'static str {
+    pub fn tui_mcp_key_label() -> &'static str {
         if is_chinese() {
             "键"
         } else {
@@ -3120,7 +3124,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_value_label() -> &'static str {
+    pub fn tui_mcp_value_label() -> &'static str {
         if is_chinese() {
             "值"
         } else {
@@ -3632,11 +3636,27 @@ pub mod texts {
         }
     }
 
+    pub fn tui_claude_default_fable_model_label() -> &'static str {
+        if is_chinese() {
+            "默认 Fable 模型"
+        } else {
+            "Default Fable Model"
+        }
+    }
+
+    pub fn tui_claude_subagent_model_label() -> &'static str {
+        if is_chinese() {
+            "Subagent 模型"
+        } else {
+            "Subagent Model"
+        }
+    }
+
     pub fn tui_claude_model_config_summary(configured_count: usize) -> String {
         if is_chinese() {
-            format!("已配置 {configured_count}/3")
+            format!("已配置 {configured_count}/5")
         } else {
-            format!("Configured {configured_count}/3")
+            format!("Configured {configured_count}/5")
         }
     }
 
@@ -3669,6 +3689,8 @@ pub mod texts {
             0 => tui_claude_default_haiku_model_label(),
             1 => tui_claude_default_sonnet_model_label(),
             2 => tui_claude_default_opus_model_label(),
+            3 => tui_claude_default_fable_model_label(),
+            4 => tui_claude_subagent_model_label(),
             _ => "",
         }
     }
@@ -7432,9 +7454,37 @@ pub mod texts {
 
     pub fn tui_mcp_env_empty_state() -> &'static str {
         if is_chinese() {
-            "暂无环境变量，按 a 新增。"
+            "暂无环境变量。"
         } else {
-            "No env entries yet. Press a to add one."
+            "No env entries yet."
+        }
+    }
+
+    pub fn tui_mcp_headers_title() -> &'static str {
+        "MCP Headers"
+    }
+
+    pub fn tui_mcp_headers_add_entry_title() -> &'static str {
+        if is_chinese() {
+            "新增 Header"
+        } else {
+            "Add Header"
+        }
+    }
+
+    pub fn tui_mcp_headers_edit_entry_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Header"
+        } else {
+            "Edit Header"
+        }
+    }
+
+    pub fn tui_mcp_headers_empty_state() -> &'static str {
+        if is_chinese() {
+            "暂无 Headers。"
+        } else {
+            "No headers yet."
         }
     }
 
@@ -7805,6 +7855,22 @@ pub mod texts {
             format!("环境变量 Key '{}' 已存在。", key)
         } else {
             format!("Env key '{key}' already exists.")
+        }
+    }
+
+    pub fn tui_toast_mcp_header_key_empty() -> &'static str {
+        if is_chinese() {
+            "Header 名称不能为空。"
+        } else {
+            "Header name cannot be empty."
+        }
+    }
+
+    pub fn tui_toast_mcp_header_duplicate_key(key: &str) -> String {
+        if is_chinese() {
+            format!("Header '{}' 已存在。", key)
+        } else {
+            format!("Header '{key}' already exists.")
         }
     }
 
@@ -9348,6 +9414,14 @@ pub mod texts {
         }
     }
 
+    pub fn tui_sessions_overview_tokens_label() -> &'static str {
+        if is_chinese() {
+            "Token"
+        } else {
+            "Tokens"
+        }
+    }
+
     pub fn tui_sessions_messages_title() -> &'static str {
         if is_chinese() {
             "消息"
@@ -9378,9 +9452,9 @@ pub mod texts {
 
     pub fn tui_sessions_empty_subtitle() -> &'static str {
         if is_chinese() {
-            "进入此页会从本机会话文件扫描，不需要数据库。"
+            "会话元数据来自本地会话文件；可用的费用和 token 小计会从本地用量数据库异步加载。"
         } else {
-            "This page scans local session files without using the database."
+            "Session metadata comes from local session files; available Cost and token subtotals load asynchronously from local usage databases."
         }
     }
 
@@ -9634,6 +9708,14 @@ pub mod texts {
             "时间"
         } else {
             "Time"
+        }
+    }
+
+    pub fn tui_sessions_header_cost() -> &'static str {
+        if is_chinese() {
+            "费用"
+        } else {
+            "Cost"
         }
     }
 
@@ -10700,6 +10782,38 @@ pub mod texts {
             "如 claude-3-opus-20240229"
         } else {
             "e.g., claude-3-opus-20240229"
+        }
+    }
+
+    pub fn model_fable_label() -> &'static str {
+        if is_chinese() {
+            "Fable 模型："
+        } else {
+            "Fable Model:"
+        }
+    }
+
+    pub fn model_fable_placeholder() -> &'static str {
+        if is_chinese() {
+            "如 claude-fable-5"
+        } else {
+            "e.g., claude-fable-5"
+        }
+    }
+
+    pub fn model_subagent_label() -> &'static str {
+        if is_chinese() {
+            "Subagent 模型："
+        } else {
+            "Subagent Model:"
+        }
+    }
+
+    pub fn model_subagent_placeholder() -> &'static str {
+        if is_chinese() {
+            "如 claude-haiku-4-5-20251001"
+        } else {
+            "e.g., claude-haiku-4-5-20251001"
         }
     }
 
@@ -12975,6 +13089,14 @@ pub mod texts {
             "隐藏"
         } else {
             "hide"
+        }
+    }
+
+    pub fn tui_key_show() -> &'static str {
+        if is_chinese() {
+            "显示"
+        } else {
+            "show"
         }
     }
 

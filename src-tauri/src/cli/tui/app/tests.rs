@@ -7,7 +7,8 @@ use super::*;
 )]
 mod tests {
     use super::types::{
-        McpEnvEditorField, McpEnvEntryEditorState, UsageLogPager, MODEL_FETCH_FILTER_MAX_MATCHES,
+        McpKeyValueEditorField, McpKeyValueEntryEditorState, UsageLogPager,
+        MODEL_FETCH_FILTER_MAX_MATCHES,
     };
     use super::*;
     use crossterm::event::{KeyEvent, KeyModifiers};
@@ -20,9 +21,9 @@ mod tests {
     use crate::cli::i18n::{texts, use_test_language, Language};
     use crate::cli::tui::data::ProviderRow;
     use crate::cli::tui::form::{
-        CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpEnvVarRow,
-        McpTransport, PromptCacheRoutingMode, ProviderAddFormState, TextInput, UsageQueryField,
-        UsageQueryTemplate,
+        CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, McpKeyValueKind,
+        McpKeyValueRow, McpTransport, PromptCacheRoutingMode, ProviderAddFormState, TextInput,
+        UsageQueryField, UsageQueryTemplate,
     };
     use crate::cli::tui::runtime_actions::{
         handle_action, run_external_editor_for_prompt_form_content,
@@ -187,14 +188,17 @@ mod tests {
             selection_active: false,
         }
         .is_editing());
-        assert!(Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
-            row: None,
-            return_selected: 0,
-            field: McpEnvEditorField::Key,
-            key: TextInput::new(""),
-            value: TextInput::new(""),
-        })
-        .is_editing());
+        assert!(
+            Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+                kind: McpKeyValueKind::Env,
+                row: None,
+                return_selected: 0,
+                field: McpKeyValueEditorField::Key,
+                key: TextInput::new(""),
+                value: TextInput::new(""),
+            })
+            .is_editing()
+        );
     }
 
     fn select_provider_common_snippet_row(app: &mut App) {
@@ -1960,10 +1964,11 @@ mod tests {
     fn mcp_env_entry_editor_supports_readline_shortcuts() {
         let mut app = App::new(Some(AppType::Claude));
         app.form = Some(FormState::McpAdd(McpAddFormState::new()));
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new("alpha beta"),
             value: TextInput::new(""),
         });
@@ -1975,7 +1980,7 @@ mod tests {
 
         assert!(matches!(
             app.overlay,
-            Overlay::McpEnvEntryEditor(McpEnvEntryEditorState { key, .. })
+            Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState { key, .. })
                 if key.value == ">alpha " && key.cursor == ">alpha ".chars().count()
         ));
     }
@@ -3956,7 +3961,14 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
 
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 0 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3964,12 +3976,15 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
         form.focus = FormFocus::Fields;
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "API_KEY".to_string(),
             value: "old".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 0 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 0,
+        };
 
         app.on_key(key(KeyCode::Enter), &UiData::default());
         app.on_key(key(KeyCode::Tab), &UiData::default());
@@ -3994,20 +4009,30 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
         form.focus = FormFocus::Fields;
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "FIRST".to_string(),
             value: "one".to_string(),
         });
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "SECOND".to_string(),
             value: "two".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 1 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 1,
+        };
 
         app.on_key(key(KeyCode::Backspace), &UiData::default());
 
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 0 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 0,
+                ..
+            }
+        ));
         let FormState::McpAdd(form) = app.form.expect("mcp form should remain open") else {
             panic!("expected MCP form");
         };
@@ -4024,12 +4049,15 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
         form.focus = FormFocus::Fields;
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "A_KEY".to_string(),
             value: "a".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 0 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 0,
+        };
 
         app.on_key(key(KeyCode::Char('a')), &UiData::default());
         for c in ['B', '_', 'K', 'E', 'Y'] {
@@ -4042,7 +4070,11 @@ mod tests {
         app.on_key(key(KeyCode::Enter), &UiData::default());
 
         let selected = match &app.overlay {
-            Overlay::McpEnvPicker { selected } => *selected,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected,
+                ..
+            } => *selected,
             other => panic!("expected MCP env picker, got {other:?}"),
         };
         let form = match app.form.as_ref() {
@@ -4061,52 +4093,54 @@ mod tests {
     fn mcp_env_editor_rejects_blank_and_duplicate_keys() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "API_KEY".to_string(),
             value: "secret".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new(""),
             value: TextInput::new(""),
         });
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
 
-        if let Overlay::McpEnvEntryEditor(editor) = &mut app.overlay {
+        if let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay {
             editor.key.set("API_KEY");
         }
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
     }
 
     #[test]
     fn mcp_env_editor_rejects_duplicate_key_when_existing_has_whitespace() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: " KEY".to_string(),
             value: "secret".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new("KEY"),
             value: TextInput::new("new"),
         });
 
         let action = app.on_key(key(KeyCode::Enter), &UiData::default());
         assert!(matches!(action, Action::None));
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
 
         let form = match app.form.as_ref() {
             Some(FormState::McpAdd(form)) => form,
@@ -4119,24 +4153,34 @@ mod tests {
     fn mcp_env_picker_edit_reorder_keeps_selection_on_edited_row() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "A_KEY".to_string(),
             value: "a".to_string(),
         });
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "Z_KEY".to_string(),
             value: "z".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 1 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 1,
+        };
 
         app.on_key(key(KeyCode::Enter), &UiData::default());
-        if let Overlay::McpEnvEntryEditor(editor) = &mut app.overlay {
+        if let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay {
             editor.key.set("0_KEY");
         }
         app.on_key(key(KeyCode::Enter), &UiData::default());
 
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 0 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 0,
+                ..
+            }
+        ));
 
         app.on_key(key(KeyCode::Delete), &UiData::default());
         let FormState::McpAdd(form) = app.form.expect("mcp form should remain open") else {
@@ -4150,32 +4194,43 @@ mod tests {
     fn mcp_env_editor_esc_restores_previous_picker_selection() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "A_KEY".to_string(),
             value: "a".to_string(),
         });
-        form.env_rows.push(McpEnvVarRow {
+        form.env_rows.push(McpKeyValueRow {
             key: "B_KEY".to_string(),
             value: "b".to_string(),
         });
         app.form = Some(FormState::McpAdd(form));
-        app.overlay = Overlay::McpEnvPicker { selected: 1 };
+        app.overlay = Overlay::McpKeyValuePicker {
+            kind: McpKeyValueKind::Env,
+            selected: 1,
+        };
 
         app.on_key(key(KeyCode::Char('a')), &UiData::default());
-        assert!(matches!(app.overlay, Overlay::McpEnvEntryEditor(_)));
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
 
         app.on_key(key(KeyCode::Esc), &UiData::default());
-        assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 1 }));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Env,
+                selected: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn mcp_env_editor_esc_without_form_closes_overlay() {
         let mut app = App::new(Some(AppType::Claude));
         app.form = None;
-        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
             row: None,
             return_selected: 0,
-            field: McpEnvEditorField::Key,
+            field: McpKeyValueEditorField::Key,
             key: TextInput::new("K"),
             value: TextInput::new("V"),
         });
@@ -4183,6 +4238,89 @@ mod tests {
         let action = app.on_key(key(KeyCode::Esc), &UiData::default());
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn mcp_headers_picker_enter_from_remote_form() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.server_type = McpTransport::Http;
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == McpAddField::Headers)
+            .expect("Headers field should exist");
+        app.form = Some(FormState::McpAdd(form));
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Headers,
+                selected: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn mcp_header_editor_validates_http_rules_and_case_insensitive_duplicates() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.header_rows.push(McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer existing".to_string(),
+        });
+        app.form = Some(FormState::McpAdd(form));
+        app.overlay = Overlay::McpKeyValueEntryEditor(McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Headers,
+            row: None,
+            return_selected: 0,
+            field: McpKeyValueEditorField::Key,
+            key: TextInput::new("authorization"),
+            value: TextInput::new("Bearer duplicate"),
+        });
+
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
+
+        let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay else {
+            panic!("header editor should remain open");
+        };
+        editor.key.set("bad name");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
+
+        let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay else {
+            panic!("header editor should remain open");
+        };
+        editor.key.set("X-Test");
+        editor.value.set("line\nbreak");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(app.overlay, Overlay::McpKeyValueEntryEditor(_)));
+
+        let Overlay::McpKeyValueEntryEditor(editor) = &mut app.overlay else {
+            panic!("header editor should remain open");
+        };
+        editor.value.set("valid");
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            app.overlay,
+            Overlay::McpKeyValuePicker {
+                kind: McpKeyValueKind::Headers,
+                ..
+            }
+        ));
+        let Some(FormState::McpAdd(form)) = app.form.as_ref() else {
+            panic!("MCP form should remain open");
+        };
+        assert!(form
+            .header_rows
+            .iter()
+            .any(|row| row.key == "X-Test" && row.value == "valid"));
     }
 
     #[test]
@@ -13910,6 +14048,23 @@ mod tests {
                 editing: false,
             }
         ));
+
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 2,
+            column: ClaudeModelPickerColumn::Model,
+            editing: false,
+        };
+        app.on_key(key(KeyCode::Down), &data());
+        app.on_key(key(KeyCode::Down), &data());
+        app.on_key(key(KeyCode::Right), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 4,
+                column: ClaudeModelPickerColumn::OneM,
+                editing: false,
+            }
+        ));
     }
 
     #[test]
@@ -15233,6 +15388,48 @@ mod tests {
     }
 
     #[test]
+    fn context_help_mcp_headers_explains_mapping() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.server_type = McpTransport::Http;
+        form.focus = FormFocus::Fields;
+        form.field_idx = form
+            .fields()
+            .iter()
+            .position(|field| *field == McpAddField::Headers)
+            .expect("Headers field");
+        app.form = Some(FormState::McpAdd(form));
+
+        app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+        let text = help_text(&app);
+        assert!(text.contains("Authorization: Bearer <token>"), "{text}");
+        assert!(!text.contains("hidden in the list"), "{text}");
+        assert!(text.contains("Codex uses `http_headers`"), "{text}");
+    }
+
+    #[test]
+    fn context_help_mcp_without_specialized_field_keeps_global_help() {
+        let _lang = use_test_language(Language::English);
+
+        for focus in [FormFocus::Fields, FormFocus::JsonPreview] {
+            let mut app = App::new(Some(AppType::Claude));
+            let mut form = McpAddFormState::new();
+            form.focus = focus;
+            form.field_idx = 0;
+            app.form = Some(FormState::McpAdd(form));
+
+            app.on_key(key(KeyCode::Char('?')), &UiData::default());
+
+            let text = help_text(&app);
+            assert!(text.contains("Help follows the focused item"), "{text}");
+            assert!(text.contains("↑↓ or h/j/k/l  move"), "{text}");
+            assert!(!text.contains("No help here"), "{text}");
+        }
+    }
+
+    #[test]
     fn context_help_provider_field_tracks_focused_codex_base_url() {
         let _lang = use_test_language(Language::English);
         let mut app = App::new(Some(AppType::Codex));
@@ -16324,8 +16521,11 @@ mod tests {
             summary: Some("Review routing".to_string()),
             project_dir: Some(project_dir.to_string()),
             created_at: Some(1_735_689_600_000),
+            source_mtime_ns: None,
+            created_at_kind: None,
             last_active_at: Some(1_735_732_800_000),
             source_path: Some(source_path.to_string()),
+            usage: None,
             resume_command: Some(resume_command.to_string()),
         }
     }

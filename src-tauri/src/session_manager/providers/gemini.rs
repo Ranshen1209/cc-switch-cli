@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
-    SessionSearchHit,
+    SearchSnippet, SessionCreatedAtKind, SessionMessage, SessionMessageBatch,
+    SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
 };
 
 use super::utils::{
@@ -369,11 +369,25 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let created_at =
+    let provider_created_at =
         extract_json_value(prefix, "startTime").and_then(|value| parse_timestamp_to_ms(&value));
-    let last_active_at = extract_json_value(prefix, "lastUpdated")
-        .and_then(|value| parse_timestamp_to_ms(&value))
-        .or_else(|| file_modified_ms(path));
+    let provider_last_active_at =
+        extract_json_value(prefix, "lastUpdated").and_then(|value| parse_timestamp_to_ms(&value));
+    let fallback_time = file_modified_ms(path);
+    let last_active_at = provider_last_active_at.or(fallback_time);
+    let created_at = provider_created_at
+        .or(provider_last_active_at)
+        .or(fallback_time);
+    let created_at_kind = if provider_created_at.is_some() {
+        Some(SessionCreatedAtKind::ProviderTimestamp)
+    } else if provider_last_active_at.is_some() || fallback_time.is_some() {
+        // `lastUpdated` is useful recency fallback for an oversized file, but
+        // it cannot prove when the session began. The two-value wire enum uses
+        // the conservative fallback variant for every non-creation timestamp.
+        Some(SessionCreatedAtKind::FileMtimeFallback)
+    } else {
+        None
+    };
     let title = extract_json_value(prefix, "content")
         .and_then(|value| value.as_str().map(|text| truncate_summary(text, 160)))
         .or_else(|| {
@@ -387,10 +401,13 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
         title: title.clone(),
         summary: title,
         project_dir: None,
-        created_at: created_at.or(last_active_at),
+        created_at,
+        source_mtime_ns: None,
+        created_at_kind,
         last_active_at,
         source_path: Some(path.to_string_lossy().into_owned()),
         resume_command: Some(format!("gemini --resume {session_id}")),
+        usage: None,
     }
 }
 
@@ -638,9 +655,12 @@ fn parse_session_data(path: &Path, data: &str) -> Option<SessionMeta> {
         summary: title,
         project_dir: None, // (optionally) populated later
         created_at,
+        source_mtime_ns: None,
+        created_at_kind: created_at.map(|_| SessionCreatedAtKind::ProviderTimestamp),
         last_active_at: last_active_at.or(created_at),
         source_path: Some(source_path),
         resume_command: Some(format!("gemini --resume {session_id}")),
+        usage: None,
     })
 }
 
@@ -724,6 +744,28 @@ mod tests {
 
         let error = load_messages(&path).expect_err("oversized detail must stay bounded");
         assert!(error.contains("4 MiB bounded preview limit"));
+    }
+
+    #[test]
+    fn lightweight_last_updated_is_not_trusted_as_session_creation_time() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("session.json");
+        std::fs::write(&path, "{}").expect("write session");
+
+        let meta = parse_session_lightweight(
+            &path,
+            r#"{
+                "sessionId": "legacy-but-recently-updated",
+                "lastUpdated": "2026-07-30T12:00:00.000Z"
+            }"#,
+        );
+
+        assert_eq!(meta.created_at, meta.last_active_at);
+        assert_eq!(
+            meta.created_at_kind,
+            Some(SessionCreatedAtKind::FileMtimeFallback),
+            "a recency timestamp cannot prove that retained usage covers session creation"
+        );
     }
 
     #[test]

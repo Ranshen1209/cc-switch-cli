@@ -402,6 +402,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_settings_codex_auth_preservation_subcommands() {
+        let show = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-auth-preservation",
+            "show",
+            "--json",
+        ]);
+        assert!(matches!(
+            show.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Show { json: true },
+                ),
+            ))
+        ));
+
+        let enable =
+            Cli::parse_from(["cc-switch", "settings", "codex-auth-preservation", "enable"]);
+        assert!(matches!(
+            enable.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Enable,
+                ),
+            ))
+        ));
+
+        let disable = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-auth-preservation",
+            "disable",
+        ]);
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Disable,
+                ),
+            ))
+        ));
+    }
+
+    #[test]
     fn parses_settings_codex_history_disable_restore_subcommand() {
         let cli = Cli::parse_from([
             "cc-switch",
@@ -966,6 +1011,37 @@ mod tests {
                 );
             }
             _ => panic!("expected provider add command with template"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_add_claude_role_model_options() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "add",
+            "--name",
+            "roles",
+            "--base-url",
+            "https://api.example.com",
+            "--api-key",
+            "sk-test",
+            "--fable-model",
+            "fable[1M]",
+            "--subagent-model",
+            "subagent[1M]",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
+                fable_model,
+                subagent_model,
+                ..
+            })) => {
+                assert_eq!(fable_model.as_deref(), Some("fable[1M]"));
+                assert_eq!(subagent_model.as_deref(), Some("subagent[1M]"));
+            }
+            _ => panic!("expected provider add command with Claude role models"),
         }
     }
 

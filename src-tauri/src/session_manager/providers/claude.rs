@@ -7,8 +7,8 @@ use crate::config::get_claude_config_dir;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
-    SessionSearchHit,
+    SearchSnippet, SessionCreatedAtKind, SessionMessage, SessionMessageBatch,
+    SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
 };
 
 use super::utils::{
@@ -438,6 +438,13 @@ fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
     let fallback_time = file_modified_ms(path);
+    let created_at_kind = if created_at.is_some() {
+        Some(SessionCreatedAtKind::ProviderTimestamp)
+    } else if fallback_time.is_some() {
+        Some(SessionCreatedAtKind::FileMtimeFallback)
+    } else {
+        None
+    };
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
@@ -446,9 +453,12 @@ fn parse_session_lines(path: &Path, head: &[String], tail: &[String]) -> Option<
         summary,
         project_dir,
         created_at: created_at.or(fallback_time),
+        source_mtime_ns: None,
+        created_at_kind,
         last_active_at: last_active_at.or(fallback_time).or(created_at),
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
+        usage: None,
     })
 }
 

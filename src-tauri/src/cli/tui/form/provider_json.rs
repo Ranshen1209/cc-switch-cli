@@ -1,5 +1,9 @@
 use crate::app_config::AppType;
+use crate::claude_model_config::{
+    set_claude_role_model, CLAUDE_DEFAULT_MODEL_ENV_KEY, CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY,
+};
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
+use crate::provider_preset_models::CODEX_DEFAULT_MODEL;
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -7,7 +11,7 @@ use std::collections::HashSet;
 use super::codex_config::{build_codex_third_party_config_toml, update_codex_config_snippet};
 use super::{
     normalize_local_proxy_header_overrides, parse_codex_model_catalog_context_window,
-    ClaudeApiFormat, GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState,
+    ClaudeApiFormat, ClaudeModelRole, GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState,
     UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
 
@@ -27,7 +31,7 @@ impl ProviderAddFormState {
         }
 
         let fallback_model = if self.codex_model.is_blank() {
-            "gpt-5.4"
+            CODEX_DEFAULT_MODEL
         } else {
             self.codex_model.value.trim()
         };
@@ -54,9 +58,11 @@ impl ProviderAddFormState {
             Vec::new()
         };
         let model = if !model_catalog.is_empty() {
-            model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
+            model_catalog[0]["model"]
+                .as_str()
+                .unwrap_or(CODEX_DEFAULT_MODEL)
         } else if self.codex_model.is_blank() {
-            "gpt-5.4"
+            CODEX_DEFAULT_MODEL
         } else {
             self.codex_model.value.trim()
         };
@@ -170,18 +176,21 @@ impl ProviderAddFormState {
                         &self.claude_base_url.value,
                     );
                 }
-                if self.claude_model_config_touched {
-                    let sonnet_model = self.claude_model_value_for_config(1);
-                    let opus_model = self.claude_model_value_for_config(2);
-                    set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
+                if self.claude_fallback_model_touched {
                     set_or_remove_trimmed(
                         env_obj,
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                        &self.claude_haiku_model.value,
+                        CLAUDE_DEFAULT_MODEL_ENV_KEY,
+                        &self.claude_model.value,
                     );
-                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_SONNET_MODEL", &sonnet_model);
-                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_OPUS_MODEL", &opus_model);
-                    env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
+                }
+                for role in ClaudeModelRole::ALL {
+                    if self.claude_model_role_was_touched(role.index()) {
+                        let model = self.claude_model_value_for_config(role.index());
+                        set_claude_role_model(env_obj, role, &model);
+                    }
+                }
+                if self.claude_fallback_model_touched || self.any_claude_model_role_was_touched() {
+                    env_obj.remove(CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY);
                 }
                 if self.claude_teammates_touched {
                     if self.claude_teammates {
@@ -347,8 +356,8 @@ impl ProviderAddFormState {
                 }
 
                 if let Some(model_id) = current_model_id {
-                    let mut model_obj = match models_obj.remove(&model_id) {
-                        Some(Value::Object(map)) => map,
+                    let mut model_obj = match models_obj.get(&model_id) {
+                        Some(Value::Object(map)) => map.clone(),
                         _ => serde_json::Map::new(),
                     };
                     let model_name = self.opencode_model_name.value.trim().to_string();

@@ -206,9 +206,9 @@ fn show(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
             .auto_query_interval
             .unwrap_or(DEFAULT_USAGE_AUTO_QUERY_INTERVAL)
     );
-    print_optional_masked("API Key", script.api_key.as_deref());
+    print_optional("API Key", script.api_key.as_deref());
     print_optional("Base URL", script.base_url.as_deref());
-    print_optional_masked("Access Token", script.access_token.as_deref());
+    print_optional("Access Token", script.access_token.as_deref());
     print_optional("User ID", script.user_id.as_deref());
     print_optional(
         "Coding Plan Provider",
@@ -592,24 +592,6 @@ fn print_optional(label: &str, value: Option<&str>) {
             println!("  {label}: {value}");
         }
     }
-}
-
-fn print_optional_masked(label: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        if !value.is_empty() {
-            println!("  {label}: {}", mask_secret(value));
-        }
-    }
-}
-
-fn mask_secret(value: &str) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= 8 {
-        return "***".to_string();
-    }
-    let prefix: String = chars.iter().take(4).collect();
-    let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("{prefix}...{suffix}")
 }
 
 fn detect_balance_provider(base_url: &str) -> bool {
@@ -1320,13 +1302,6 @@ base_url = "https://api.deepseek.com"
         );
 
         assert_eq!(script.code, "return { remaining: 42 };");
-    }
-
-    #[test]
-    fn masks_usage_query_secrets_for_text_output() {
-        assert_eq!(mask_secret("sk-1234567890"), "sk-1...7890");
-        assert_eq!(mask_secret("密钥一二三四五六七八九"), "密钥一二...六七八九");
-        assert_eq!(mask_secret("short"), "***");
     }
 
     #[test]

@@ -29,6 +29,9 @@ pub const SCAN_CACHE_VERSION: i64 = 1;
 #[derive(Debug, Clone)]
 pub struct FileScanTarget {
     pub path: PathBuf,
+    /// Raw mtime of the source itself. Unlike `mtime_ns`, sibling fingerprint
+    /// decoration must never alter this coverage evidence.
+    pub source_mtime_ns: i64,
     pub mtime_ns: i64,
     pub size: i64,
 }
@@ -152,9 +155,16 @@ pub(crate) fn stat_target_strict(path: &Path) -> std::io::Result<Option<FileScan
         .unwrap_or(0);
     Ok(Some(FileScanTarget {
         path: path.to_path_buf(),
+        source_mtime_ns: mtime_ns,
         mtime_ns,
         size: meta.len() as i64,
     }))
+}
+
+fn stable_source_mtime_ns(before: &FileScanTarget, after: Option<&FileScanTarget>) -> Option<i64> {
+    after
+        .filter(|after| same_fingerprint(before, after))
+        .map(|_| before.source_mtime_ns)
 }
 
 /// Mix a sibling dependency's `(mtime, size)` into a target's fingerprint.
@@ -606,7 +616,7 @@ where
             return None;
         }
         let key = target.path.to_string_lossy().to_string();
-        let Some(meta) = meta else {
+        let Some(mut meta) = meta else {
             continue; // not a session file; leave it out of `keep` so any stale row is deleted
         };
         // 不可缓存行：进返回列表但不落缓存、不进 keep（若缓存里有同 key 旧行
@@ -616,9 +626,6 @@ where
             sessions.push(meta);
             continue;
         }
-        let Ok(meta_json) = serde_json::to_string(&meta) else {
-            continue;
-        };
         // fix 3：upsert 前对该文件再 stat 一次，关闭 parse 期间的删除/改写竞态。
         // 仅当文件仍在、且 (mtime_ns, size) 与 parse 前完全一致时才写缓存；否则
         // 跳过 upsert 且不进 keep（其旧缓存行由末尾 filter 纳入 deletes），下轮
@@ -626,7 +633,12 @@ where
         // sidecar，避免重启后 stale 首屏快照复活已删会话。仍把已解析的 meta 放入
         // 返回列表（本轮 UI 由内存 tombstone 过滤已删会话；此处只管缓存不被污染）。
         match restat(&target.path) {
-            Some(fresh) if fresh.mtime_ns == target.mtime_ns && fresh.size == target.size => {
+            Some(fresh) if same_fingerprint(&fresh, &target) => {
+                meta.source_mtime_ns = stable_source_mtime_ns(&target, Some(&fresh));
+                let Ok(meta_json) = serde_json::to_string(&meta) else {
+                    sessions.push(meta);
+                    continue;
+                };
                 keep.insert(key.clone());
                 upserts.push(SessionScanCacheEntry {
                     file_path: key,
@@ -1133,6 +1145,10 @@ where
             })
             .and_then(|row| serde_json::from_str::<SessionMeta>(&row.meta_json).ok())
             .filter(|meta| cacheable(meta))
+            .filter(|meta| {
+                meta.source_mtime_ns
+                    .is_none_or(|mtime| mtime == target.source_mtime_ns)
+            })
             .filter(|_| {
                 observed
                     .as_ref()
@@ -1159,8 +1175,12 @@ where
             .as_ref()
             .is_some_and(|fresh| same_fingerprint(fresh, target));
 
-        let (settled_target, settled_meta) = if stable {
-            (target.clone(), parsed)
+        let (settled_target, settled_meta, settled_source_mtime_ns) = if stable {
+            (
+                target.clone(),
+                parsed,
+                stable_source_mtime_ns(target, observed.as_ref()),
+            )
         } else {
             let Some(fresh) = observed else {
                 // The target existed at discovery but disappeared during parse.
@@ -1195,10 +1215,11 @@ where
             {
                 return Err(StreamScanStop::Incomplete);
             }
-            (fresh, retry)
+            let source_mtime_ns = stable_source_mtime_ns(&fresh, after_retry.as_ref());
+            (fresh, retry, source_mtime_ns)
         };
 
-        let Some(meta) = settled_meta else {
+        let Some(mut meta) = settled_meta else {
             // A stable parse-to-None means this file is authoritatively not a
             // session. Only this case may remove an older cache row.
             if cached.contains_key(&key) {
@@ -1206,6 +1227,7 @@ where
             }
             return Ok(());
         };
+        meta.source_mtime_ns = settled_source_mtime_ns;
 
         if cacheable(&meta) {
             match serde_json::to_string(&meta) {
@@ -1249,7 +1271,9 @@ where
 }
 
 fn same_fingerprint(left: &FileScanTarget, right: &FileScanTarget) -> bool {
-    left.mtime_ns == right.mtime_ns && left.size == right.size
+    left.source_mtime_ns == right.source_mtime_ns
+        && left.mtime_ns == right.mtime_ns
+        && left.size == right.size
 }
 
 fn authoritative_restat<R>(
@@ -1289,7 +1313,10 @@ where
         return None;
     }
     let meta = serde_json::from_str::<SessionMeta>(&row.meta_json).ok()?;
-    cacheable(&meta).then_some(meta)
+    cacheable(&meta).then_some(meta).filter(|meta| {
+        meta.source_mtime_ns
+            .is_none_or(|mtime| mtime == target.source_mtime_ns)
+    })
 }
 
 /// Parse a fixed batch on a bounded worker pool and deliver results in actual
@@ -1523,6 +1550,7 @@ mod tests {
         let targets: Vec<_> = (0..1_000)
             .map(|index| FileScanTarget {
                 path: PathBuf::from(format!("/virtual/session-{index}.jsonl")),
+                source_mtime_ns: 1,
                 mtime_ns: 1,
                 size: 1,
             })
@@ -1786,6 +1814,7 @@ mod tests {
                 } else {
                     format!("fast-{index}.jsonl")
                 }),
+                source_mtime_ns: 1,
                 mtime_ns: 1,
                 size: 1,
             })
@@ -1955,8 +1984,11 @@ mod tests {
             summary: Some("summary".to_string()),
             project_dir: Some("/tmp/project".to_string()),
             created_at: Some(1_000),
+            source_mtime_ns: None,
+            created_at_kind: None,
             last_active_at: Some(2_000),
             source_path: Some(format!("/tmp/{session_id}.jsonl")),
+            usage: None,
             resume_command: Some(format!("claude --resume {session_id}")),
         }
     }
@@ -2001,14 +2033,99 @@ mod tests {
     }
 
     #[test]
+    fn sibling_fingerprint_decoration_preserves_the_source_file_mtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("session.json");
+        let sibling = temp.path().join(".project_root");
+        std::fs::write(&source, "{}").expect("write source");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&sibling, "/tmp/project").expect("write sibling");
+
+        let mut target = stat_target(&source).expect("source target");
+        let source_mtime_ns = target.source_mtime_ns;
+        mix_sibling_into_fingerprint(&mut target, &sibling);
+
+        assert_eq!(target.source_mtime_ns, source_mtime_ns);
+        assert!(
+            target.mtime_ns >= target.source_mtime_ns,
+            "the decorated fingerprint may advance without changing source evidence"
+        );
+    }
+
+    #[test]
+    fn source_snapshot_is_only_recorded_when_pre_and_post_parse_stats_match() {
+        let before = FileScanTarget {
+            path: PathBuf::from("/session.jsonl"),
+            mtime_ns: 10,
+            source_mtime_ns: 7,
+            size: 100,
+        };
+        assert_eq!(stable_source_mtime_ns(&before, Some(&before)), Some(7));
+
+        let changed = FileScanTarget {
+            mtime_ns: 11,
+            source_mtime_ns: 8,
+            ..before.clone()
+        };
+        assert_eq!(stable_source_mtime_ns(&before, Some(&changed)), None);
+        assert_eq!(stable_source_mtime_ns(&before, None), None);
+    }
+
+    #[test]
+    fn cache_fallback_rejects_stale_source_mtime_when_sibling_dominates_fingerprint() {
+        let key = "/session.json".to_string();
+        let current = FileScanTarget {
+            path: PathBuf::from(&key),
+            source_mtime_ns: 200,
+            // A newer sibling can keep this composite value unchanged while
+            // the source itself changes.
+            mtime_ns: 500,
+            size: 42,
+        };
+        let mut stale_meta = sample_meta("stale");
+        stale_meta.source_mtime_ns = Some(100);
+        let mut cached = HashMap::new();
+        cached.insert(
+            key.clone(),
+            CachedScanRow {
+                mtime_ns: current.mtime_ns,
+                size: current.size,
+                meta_json: serde_json::to_string(&stale_meta).expect("cache json"),
+                cache_version: SCAN_CACHE_VERSION,
+            },
+        );
+
+        assert!(
+            cached_meta_for_target(&cached, &key, &current, &|_| true).is_none(),
+            "a composite fingerprint match must not resurrect older source freshness evidence"
+        );
+    }
+
+    #[test]
+    fn legacy_persisted_usage_is_ignored_because_usage_is_runtime_only() {
+        let meta: SessionMeta = serde_json::from_str(
+            r#"{
+                "providerId":"codex",
+                "sessionId":"abc",
+                "usage":{"totalTokens":42,"totalCostUsd":0.125}
+            }"#,
+        )
+        .expect("parse legacy usage summary");
+
+        assert_eq!(meta.usage, None);
+    }
+
+    #[test]
     fn revalidate_reuses_unchanged_and_reparses_changed() {
         let unchanged = FileScanTarget {
             path: PathBuf::from("/tmp/a.jsonl"),
+            source_mtime_ns: 100,
             mtime_ns: 100,
             size: 10,
         };
         let changed = FileScanTarget {
             path: PathBuf::from("/tmp/b.jsonl"),
+            source_mtime_ns: 200,
             mtime_ns: 200,
             size: 20,
         };
@@ -2054,11 +2171,13 @@ mod tests {
     fn progressive_callback_fires_before_file_provider_scan_completes() {
         let fast = FileScanTarget {
             path: PathBuf::from("/tmp/fast.jsonl"),
+            source_mtime_ns: 1,
             mtime_ns: 1,
             size: 1,
         };
         let slow = FileScanTarget {
             path: PathBuf::from("/tmp/slow.jsonl"),
+            source_mtime_ns: 2,
             mtime_ns: 2,
             size: 1,
         };
@@ -2103,6 +2222,7 @@ mod tests {
     fn revalidate_deletes_vanished_files() {
         let present = FileScanTarget {
             path: PathBuf::from("/tmp/a.jsonl"),
+            source_mtime_ns: 100,
             mtime_ns: 100,
             size: 10,
         };
@@ -2136,6 +2256,7 @@ mod tests {
     fn revalidate_reparses_when_cache_version_mismatches() {
         let target = FileScanTarget {
             path: PathBuf::from("/tmp/a.jsonl"),
+            source_mtime_ns: 100,
             mtime_ns: 100,
             size: 10,
         };
@@ -2172,6 +2293,7 @@ mod tests {
     fn revalidate_force_reparses_everything() {
         let target = FileScanTarget {
             path: PathBuf::from("/tmp/a.jsonl"),
+            source_mtime_ns: 100,
             mtime_ns: 100,
             size: 10,
         };
@@ -2259,6 +2381,7 @@ mod tests {
     fn revalidate_deletes_stale_row_when_now_uncacheable() {
         let target = FileScanTarget {
             path: PathBuf::from("/tmp/a.jsonl"),
+            source_mtime_ns: 100,
             mtime_ns: 100,
             size: 10,
         };
@@ -2307,6 +2430,7 @@ mod tests {
     fn revalidate_reparse_then_deleted_skips_upsert_and_deletes_old_row() {
         let target = FileScanTarget {
             path: PathBuf::from("/tmp/gone-mid-parse.jsonl"),
+            source_mtime_ns: 100,
             mtime_ns: 100,
             size: 10,
         };

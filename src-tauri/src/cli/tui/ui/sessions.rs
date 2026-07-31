@@ -47,8 +47,8 @@ pub(super) fn render_sessions(
             None => texts::tui_sessions_project_filtering().to_string(),
         }
     } else {
-        // Stale-while-revalidate keeps the count on screen while the background
-        // rescan runs; the trailing spinner is what says "still working".
+        // Manual refresh keeps the previous immutable page visible while its
+        // replacement is built; the trailing spinner says "still working".
         texts::tui_sessions_summary(app.sessions.logical_total_rows(), visible.len())
     };
     let provider = crate::cli::tui::runtime_actions::app_display_name(&app.app_type);
@@ -94,7 +94,7 @@ pub(super) fn render_sessions(
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(frame_body);
 
     render_session_list(frame, app, &visible, body[0], theme);
@@ -204,11 +204,21 @@ fn render_session_list(
         return;
     }
 
-    let header = Row::new(vec![
-        Cell::from(texts::tui_sessions_header_title()),
-        Cell::from(Text::from(texts::tui_sessions_header_time()).alignment(Alignment::Right)),
-    ])
-    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+    // The enlarged pane leaves just enough room for all three columns on a
+    // standard 80-column terminal. Only sacrifice Time below that boundary;
+    // Title remains the flexible column and Cost keeps a stable right edge.
+    let show_time = inner.width >= 27;
+    let mut header_cells = vec![Cell::from(texts::tui_sessions_header_title())];
+    if show_time {
+        header_cells.push(Cell::from(
+            Text::from(texts::tui_sessions_header_time()).alignment(Alignment::Right),
+        ));
+    }
+    header_cells.push(Cell::from(
+        Text::from(texts::tui_sessions_header_cost()).alignment(Alignment::Right),
+    ));
+    let header =
+        Row::new(header_cells).style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     // Only build Row objects for the rows actually on screen. Without this the
     // table allocates a title/time/Line/Span for every filtered session each
@@ -251,13 +261,33 @@ fn render_session_list(
                 ]),
                 None => Line::raw(title),
             };
-            Row::new(vec![
-                Cell::from(title_line),
-                Cell::from(Text::from(time).alignment(Alignment::Right)),
-            ])
+            let mut cells = vec![Cell::from(title_line)];
+            if show_time {
+                cells.push(Cell::from(Text::from(time).alignment(Alignment::Right)));
+            }
+            cells.push(Cell::from(
+                Text::from(
+                    session
+                        .usage
+                        .as_ref()
+                        .map(format_session_cost)
+                        .unwrap_or_else(|| "-".to_string()),
+                )
+                .alignment(Alignment::Right),
+            ));
+            Row::new(cells)
         });
 
-    let table = Table::new(rows, [Constraint::Min(0), Constraint::Length(12)])
+    let widths = if show_time {
+        vec![
+            Constraint::Min(0),
+            Constraint::Length(10),
+            Constraint::Length(8),
+        ]
+    } else {
+        vec![Constraint::Min(0), Constraint::Length(8)]
+    };
+    let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::NONE))
         .row_highlight_style(selection_style(theme))
@@ -286,7 +316,7 @@ fn render_session_detail(
     let selected = selected_session(app, visible);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
         .split(area);
 
     render_session_overview(frame, selected, chunks[0], theme);
@@ -328,6 +358,16 @@ fn render_session_overview(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(texts::tui_na());
+    let (tokens, cost) = session
+        .usage
+        .as_ref()
+        .map(|usage| (format_session_tokens(usage), format_session_cost(usage)))
+        .unwrap_or_else(|| {
+            (
+                format!("{}: -", texts::tui_sessions_overview_tokens_label()),
+                "-".to_string(),
+            )
+        });
 
     let lines = vec![
         overview_field_line(
@@ -348,6 +388,7 @@ fn render_session_overview(
             value_width,
             theme,
         ),
+        overview_usage_line(&tokens, &cost, inner.width, theme),
         overview_field_line(
             texts::tui_sessions_resume_command(),
             resume_command,
@@ -357,6 +398,73 @@ fn render_session_overview(
     ];
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn session_usage_marker(usage: &crate::session_manager::SessionUsageSummary) -> &'static str {
+    if usage.cost_kind == crate::session_manager::SessionCostKind::Estimated {
+        "~"
+    } else if usage.coverage == crate::session_manager::SessionCostCoverage::Complete {
+        ""
+    } else {
+        "≥"
+    }
+}
+
+fn format_session_cost(usage: &crate::session_manager::SessionUsageSummary) -> String {
+    usage
+        .cost
+        .map(|cost| {
+            format!(
+                "{}{}",
+                session_usage_marker(usage),
+                super::usage::format_money(cost)
+            )
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_session_tokens(usage: &crate::session_manager::SessionUsageSummary) -> String {
+    format!(
+        "{}{}",
+        session_usage_marker(usage),
+        super::usage::format_token_breakdown_compact(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+        )
+    )
+}
+
+fn overview_usage_line(
+    tokens: &str,
+    cost: &str,
+    width: u16,
+    theme: &super::theme::Theme,
+) -> Line<'static> {
+    let separator = super::usage::token_breakdown_separator();
+    let suffix_width =
+        UnicodeWidthStr::width(separator).saturating_add(UnicodeWidthStr::width(cost));
+    let full_width = UnicodeWidthStr::width(tokens).saturating_add(suffix_width);
+
+    if full_width <= usize::from(width) {
+        Line::from(vec![
+            Span::raw(tokens.to_string()),
+            Span::styled(separator, Style::default().fg(theme.dim)),
+            Span::raw(cost.to_string()),
+        ])
+    } else if suffix_width < usize::from(width) {
+        // Keep Cost visible at narrow widths and spend the remaining columns
+        // on the beginning of the four-bucket token breakdown.
+        let token_width = usize::from(width).saturating_sub(suffix_width) as u16;
+        Line::from(vec![
+            Span::raw(truncate_to_display_width(tokens, token_width)),
+            Span::styled(separator, Style::default().fg(theme.dim)),
+            Span::raw(cost.to_string()),
+        ])
+    } else {
+        Line::raw(truncate_to_display_width(cost, width))
+    }
 }
 
 fn overview_field_line<'a>(
@@ -748,8 +856,11 @@ mod tests {
             summary: None,
             project_dir: Some("/tmp/project".to_string()),
             created_at: None,
+            source_mtime_ns: None,
+            created_at_kind: None,
             last_active_at: None,
             source_path: None,
+            usage: None,
             resume_command: None,
         };
         assert_eq!(session_title(&titled), "Refactor");
@@ -800,5 +911,61 @@ mod tests {
             format_relative_time(now - 7 * 86_400_000, now),
             format_date(now - 7 * 86_400_000)
         );
+    }
+
+    #[test]
+    fn session_cost_and_tokens_render_coverage_and_estimate_markers() {
+        use crate::session_manager::{SessionCostCoverage, SessionCostKind, SessionUsageSummary};
+
+        let complete = SessionUsageSummary {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_creation_tokens: 40,
+            cost: Some(1.25),
+            cost_kind: SessionCostKind::Recorded,
+            coverage: SessionCostCoverage::Complete,
+        };
+        assert_eq!(format_session_cost(&complete), "$1.250");
+        assert!(!format_session_tokens(&complete).starts_with('≥'));
+
+        let partial = SessionUsageSummary {
+            coverage: SessionCostCoverage::Partial,
+            ..complete
+        };
+        assert_eq!(format_session_cost(&partial), "≥$1.250");
+        assert!(format_session_tokens(&partial).starts_with('≥'));
+
+        let unknown = SessionUsageSummary {
+            coverage: SessionCostCoverage::Unknown,
+            ..complete
+        };
+        assert_eq!(format_session_cost(&unknown), "≥$1.250");
+        assert!(format_session_tokens(&unknown).starts_with('≥'));
+
+        let estimated = SessionUsageSummary {
+            cost_kind: SessionCostKind::Estimated,
+            coverage: SessionCostCoverage::Unknown,
+            ..complete
+        };
+        assert_eq!(format_session_cost(&estimated), "~$1.250");
+        assert!(format_session_tokens(&estimated).starts_with('~'));
+    }
+
+    #[test]
+    fn unavailable_cost_does_not_hide_available_covered_tokens() {
+        let usage = crate::session_manager::SessionUsageSummary {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            cost: None,
+            cost_kind: crate::session_manager::SessionCostKind::Recorded,
+            coverage: crate::session_manager::SessionCostCoverage::Partial,
+        };
+
+        assert_eq!(format_session_cost(&usage), "-");
+        assert!(format_session_tokens(&usage).contains("In: 10"));
+        assert!(format_session_tokens(&usage).starts_with('≥'));
     }
 }

@@ -31,8 +31,8 @@ use crate::{
             UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
         },
         form::{
-            ClaudeModelPickerColumn, FormFocus, FormState, PromptMetaFormState, ProviderAddField,
-            TextInput, UsageQueryField,
+            ClaudeModelPickerColumn, FormFocus, FormState, McpKeyValueKind, PromptMetaFormState,
+            ProviderAddField, TextInput, UsageQueryField,
         },
         route::{NavItem, Route},
         theme::theme_for,
@@ -304,6 +304,8 @@ fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     form.claude_haiku_model.set("haiku-model");
     form.set_claude_model_from_config(1, "sonnet-model[1M]");
     form.set_claude_model_from_config(2, "opus-model");
+    form.set_claude_model_from_config(3, "fable-model[1M]");
+    form.set_claude_model_from_config(4, "subagent-model");
     app.form = Some(FormState::ProviderAdd(form));
     app.overlay = Overlay::ClaudeModelPicker {
         selected: 1,
@@ -326,6 +328,8 @@ fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     assert!(one_m.contains("Default Haiku Model"), "{one_m}");
     assert!(one_m.contains("Default Sonnet Model"), "{one_m}");
     assert!(one_m.contains("Default Opus Model"), "{one_m}");
+    assert!(one_m.contains("Default Fable Model"), "{one_m}");
+    assert!(one_m.contains("Subagent Model"), "{one_m}");
     assert!(!one_m.contains("Reasoning Model"), "{one_m}");
     assert!(one_m.contains("switch column"), "{one_m}");
     assert!(one_m.contains("toggle"), "{one_m}");
@@ -492,7 +496,7 @@ fn mcp_preview_shows_environment_values_in_plaintext() {
     form.id.set("server");
     form.name.set("Server");
     form.command.set("node");
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: secret.to_string(),
     });
@@ -550,7 +554,51 @@ fn mcp_preview_shows_custom_header_values_in_plaintext() {
     assert!(all.contains(secret), "{all}");
     assert!(all.contains("safe-but-hidden-too"), "{all}");
     assert!(all.contains("X-Custom-Auth"), "{all}");
-    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.contains("User-Agent"), "{all}");
+    assert!(!all.contains("********"), "{all}");
+}
+
+#[test]
+fn mcp_preview_shows_legacy_codex_http_header_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "legacy-http-header-super-secret";
+    let server = crate::app_config::McpServer {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://example.test/mcp",
+            "http_headers": {
+                "Authorization": secret
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    let mut form = crate::cli::tui::form::McpAddFormState::from_server(&server);
+    form.focus = FormFocus::JsonPreview;
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("Authorization"), "{all}");
+    assert!(!all.contains("********"), "{all}");
+    assert!(all.contains(secret), "{all}");
+    assert!(!all.contains("http_headers"), "{all}");
 }
 
 #[test]
@@ -638,7 +686,7 @@ fn mcp_plaintext_preview_never_mutates_the_serialized_form_payload() {
         "--api-key".to_string(),
         "persistence-secret".to_string(),
     ]);
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: "environment-secret".to_string(),
     });
@@ -669,12 +717,15 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
     app.route = Route::Mcp;
     app.focus = Focus::Content;
     let mut form = crate::cli::tui::form::McpAddFormState::new();
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: secret.to_string(),
     });
     app.form = Some(FormState::McpAdd(form));
-    app.overlay = Overlay::McpEnvPicker { selected: 0 };
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Env,
+        selected: 0,
+    };
 
     let all = all_text(&render_with_size(
         &app,
@@ -688,6 +739,77 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
 }
 
 #[test]
+fn mcp_headers_picker_shows_values_in_plaintext() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "Bearer picker-super-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.header_rows
+        .push(crate::cli::tui::form::McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: secret.to_string(),
+        });
+    app.form = Some(FormState::McpAdd(form));
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Headers,
+        selected: 0,
+    };
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(rendered.contains("Authorization"), "{rendered}");
+    assert!(rendered.contains(secret), "{rendered}");
+    assert!(!rendered.contains("********"), "{rendered}");
+    assert!(!rendered.contains("v show"), "{rendered}");
+}
+
+#[test]
+fn mcp_remote_json_preview_shows_header_values_without_mutating_payload() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "Bearer preview-super-secret";
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.focus = FormFocus::JsonPreview;
+    form.server_type = crate::cli::tui::form::McpTransport::Http;
+    form.url.set("https://example.com/mcp");
+    form.header_rows
+        .push(crate::cli::tui::form::McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: secret.to_string(),
+        });
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["headers"]["Authorization"],
+        secret
+    );
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let preview = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(preview.contains("Authorization"), "{preview}");
+    assert!(!preview.contains("********"), "{preview}");
+    assert!(preview.contains(secret), "{preview}");
+}
+
+#[test]
 fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
@@ -696,7 +818,7 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     let selected = 9_999usize;
     let mut form = crate::cli::tui::form::McpAddFormState::new();
     form.env_rows = (0..10_000)
-        .map(|index| crate::cli::tui::form::McpEnvVarRow {
+        .map(|index| crate::cli::tui::form::McpKeyValueRow {
             key: format!("ENV-{index:05}"),
             value: format!("secret-{index}"),
         })
@@ -707,7 +829,10 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     app.route = Route::Mcp;
     app.focus = Focus::Content;
     app.form = Some(FormState::McpAdd(form));
-    app.overlay = Overlay::McpEnvPicker { selected };
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Env,
+        selected,
+    };
 
     let all = all_text(&render_with_size(
         &app,
@@ -734,13 +859,15 @@ fn mcp_env_value_editor_shows_the_active_value_in_plaintext() {
     app.form = Some(FormState::McpAdd(
         crate::cli::tui::form::McpAddFormState::new(),
     ));
-    app.overlay = Overlay::McpEnvEntryEditor(crate::cli::tui::app::McpEnvEntryEditorState {
-        row: None,
-        return_selected: 0,
-        field: crate::cli::tui::app::McpEnvEditorField::Value,
-        key: TextInput::new("CUSTOM_VALUE"),
-        value: TextInput::new(secret),
-    });
+    app.overlay =
+        Overlay::McpKeyValueEntryEditor(crate::cli::tui::app::McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
+            row: None,
+            return_selected: 0,
+            field: crate::cli::tui::app::McpKeyValueEditorField::Value,
+            key: TextInput::new("CUSTOM_VALUE"),
+            value: TextInput::new(secret),
+        });
 
     let all = all_text(&render_with_size(
         &app,
@@ -906,7 +1033,9 @@ fn tui_sessions_empty_state_is_localized_and_mentions_runtime_scan() {
 
     assert!(all.contains("No local sessions found"), "{all}");
     assert!(all.contains("local session files"), "{all}");
-    assert!(all.contains("database"), "{all}");
+    assert!(all.contains("usage database"), "{all}");
+    assert!(all.contains("Cost"), "{all}");
+    assert!(!all.contains("without using the database"), "{all}");
     assert!(all.contains("switch panel"), "{all}");
     assert!(all.contains("PgUp/PgDn"), "{all}");
     assert!(all.contains(texts::tui_key_page()), "{all}");
@@ -1612,8 +1741,19 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
         summary: Some("Tighten worker routing".to_string()),
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: Some(crate::session_manager::SessionUsageSummary {
+            input_tokens: 4_800,
+            output_tokens: 1_900_000,
+            cache_read_tokens: 347_700_000,
+            cache_creation_tokens: 12_200_000,
+            cost: Some(0.42),
+            cost_kind: crate::session_manager::SessionCostKind::Recorded,
+            coverage: crate::session_manager::SessionCostCoverage::Complete,
+        }),
         resume_command: Some("codex resume abcdef123456".to_string()),
     });
     app.sessions
@@ -1639,6 +1779,15 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
     assert!(all.contains("Time"), "{all}");
     assert!(all.contains("Work Dir"), "{all}");
     assert!(all.contains("Title"), "{all}");
+    let usage_line = line_with(&all, "In: 4.8k");
+    for value in ["Out: 1.9M", "CR: 347.7M", "CW: 12.2M", "$0.420"] {
+        assert!(
+            usage_line.contains(value),
+            "{value} missing in {usage_line}"
+        );
+    }
+    assert!(all.contains("Cost"), "{all}");
+    assert!(all.contains("$0.420"), "{all}");
     assert!(all.contains("Resume Command"), "{all}");
     assert!(all.contains("Refactor proxy routing"), "{all}");
     assert!(!all.contains("Tighten worker routing"), "{all}");
@@ -1774,8 +1923,11 @@ fn tui_sessions_seamless_page_cross_uses_loading_footer() {
                 summary: None,
                 project_dir: Some("/tmp/project".to_string()),
                 created_at: Some(1_735_689_600_000 - index),
+                source_mtime_ns: None,
+                created_at_kind: None,
                 last_active_at: Some(1_735_689_900_000 - index),
                 source_path: Some(format!("/tmp/session-{index}.jsonl")),
+                usage: None,
                 resume_command: Some(format!("claude --resume session-{index}")),
             })
             .expect("manifest fixture row");
@@ -1977,8 +2129,11 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_600_000),
         source_path: Some("/tmp/recent.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions.rows.push(crate::session_manager::SessionMeta {
@@ -1988,25 +2143,32 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_084_800_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_084_800_000),
         source_path: Some("/tmp/old.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume old-session".to_string()),
     });
 
-    let content = content_text(
+    let content = all_text(&render_with_size(
         &app,
-        &render_with_size(&app, &minimal_data(&app.app_type), 160, 40),
-    );
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
     let header_row = line_with(&content, "Title");
     assert!(
-        header_row.contains("│ Title") && header_row.contains("Time │"),
-        "session columns should have matching left and right padding: {header_row}"
+        header_row.contains("│ Title")
+            && header_row.contains("Time")
+            && header_row.contains("Cost │"),
+        "session table should render Title, Time, and Cost columns:\n{content}"
     );
     let recent_row = line_with(&content, "Recent session");
     assert!(recent_row.contains("5 min ago"), "{recent_row}");
     assert!(
-        recent_row.contains("5 min ago │"),
-        "relative time should keep the same right padding as the left side: {recent_row}"
+        recent_row.contains(" - │"),
+        "a session without metrics should render an empty Cost marker: {recent_row}"
     );
 
     let old_row = line_with(&content, "Old session");
@@ -2020,6 +2182,51 @@ fn tui_sessions_list_time_column_uses_relative_time_before_date() {
     assert!(
         !old_row.contains(&expected.format("%Y/%m/%d %H:%M").to_string()),
         "{old_row}"
+    );
+}
+
+#[test]
+fn tui_sessions_cost_column_keeps_the_title_visible_at_eighty_columns() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Codex));
+    app.route = Route::Sessions;
+    app.focus = Focus::Content;
+    app.sessions.loaded_once = true;
+    app.sessions.rows.push(crate::session_manager::SessionMeta {
+        provider_id: "codex".to_string(),
+        session_id: "session-1".to_string(),
+        title: Some("Fix routing".to_string()),
+        usage: Some(crate::session_manager::SessionUsageSummary {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cost: Some(1.25),
+            coverage: crate::session_manager::SessionCostCoverage::Complete,
+            ..crate::session_manager::SessionUsageSummary::default()
+        }),
+        ..crate::session_manager::SessionMeta::default()
+    });
+
+    let rendered = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        80,
+        24,
+    ));
+    let session_row = line_with(&rendered, "Fix r");
+    assert!(
+        session_row.contains("Fix r") && session_row.contains("$1.250"),
+        "the 80-column session row should retain a recognizable Title and Cost: {session_row}"
+    );
+    let header_row = line_with(&rendered, "Title");
+    assert!(
+        header_row.contains("Time") && header_row.contains("Cost"),
+        "the standard 80-column layout should retain every session column: {header_row}"
+    );
+    let overview_usage = line_with(&rendered, "In:");
+    assert!(
+        overview_usage.contains("In:") && overview_usage.contains("$1.250"),
+        "the narrow Overview row must keep the token breakdown and Cost together: {overview_usage}"
     );
 }
 
@@ -2038,8 +2245,11 @@ fn tui_sessions_filters_rows_by_current_app() {
         summary: None,
         project_dir: Some("/tmp/claude-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/claude.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume claude-session".to_string()),
     });
     app.sessions.rows.push(crate::session_manager::SessionMeta {
@@ -2049,8 +2259,11 @@ fn tui_sessions_filters_rows_by_current_app() {
         summary: None,
         project_dir: Some("/tmp/codex-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/codex.jsonl".to_string()),
+        usage: None,
         resume_command: Some("codex resume codex-session".to_string()),
     });
 
@@ -2079,8 +2292,11 @@ fn tui_sessions_slash_search_filters_user_role_messages() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions
@@ -2140,8 +2356,11 @@ fn tui_sessions_search_filters_loaded_message_content() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions
@@ -2186,8 +2405,11 @@ fn tui_sessions_search_matches_localized_user_role_label() {
         summary: None,
         project_dir: Some("/tmp/demo-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/session.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume abcdef123456".to_string()),
     });
     app.sessions
@@ -2232,8 +2454,11 @@ fn tui_sessions_session_and_message_filters_are_independent() {
         summary: None,
         project_dir: Some("/tmp/ai-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_900_000),
         source_path: Some("/tmp/ai.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume ai-session".to_string()),
     });
     app.sessions.rows.push(crate::session_manager::SessionMeta {
@@ -2243,8 +2468,11 @@ fn tui_sessions_session_and_message_filters_are_independent() {
         summary: None,
         project_dir: Some("/tmp/billing-project".to_string()),
         created_at: Some(1_735_689_600_000),
+        source_mtime_ns: None,
+        created_at_kind: None,
         last_active_at: Some(1_735_689_800_000),
         source_path: Some("/tmp/billing.jsonl".to_string()),
+        usage: None,
         resume_command: Some("claude --resume billing-session".to_string()),
     });
     app.sessions
@@ -2894,6 +3122,7 @@ fn codex_provider_form_renders_toml_values_in_plaintext() {
             )
         }
     });
+    form.codex_model.set("gpt-5.4");
     app.form = Some(FormState::ProviderAdd(form));
 
     let all = all_text(&render_with_size(

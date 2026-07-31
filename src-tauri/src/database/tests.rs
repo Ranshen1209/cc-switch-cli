@@ -561,6 +561,51 @@ fn readonly_snapshot_opens_current_schema_without_allowing_writes() {
 }
 
 #[test]
+#[serial_test::serial]
+fn usage_prune_watermark_initialization_distinguishes_fresh_and_existing_databases() {
+    let _lock = crate::test_support::lock_test_home_and_settings();
+
+    let fresh = tempfile::tempdir().expect("fresh config");
+    let fresh_config = fresh.path().join("config");
+    {
+        let _guard = ConfigDirEnvGuard::set(&fresh_config);
+        let db = Database::init().expect("initialize fresh database");
+        let watermark = db
+            .get_setting("usage_prune_high_watermark")
+            .expect("read fresh watermark")
+            .expect("fresh watermark exists");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&watermark).expect("fresh watermark json")
+                ["history_complete"],
+            true
+        );
+    }
+
+    let existing = tempfile::tempdir().expect("existing config");
+    let existing_config = existing.path().join("config");
+    create_secure_dir_all(&existing_config).expect("create secure existing config");
+    {
+        let _guard = ConfigDirEnvGuard::set(&existing_config);
+        let db_path = existing_config.join("cc-switch.db");
+        let conn = Connection::open(&db_path).expect("create existing database");
+        Database::create_tables_on_conn(&conn).expect("seed current tables");
+        Database::set_user_version(&conn, SCHEMA_VERSION).expect("set current version");
+        drop(conn);
+
+        let db = Database::init().expect("initialize existing database");
+        let watermark = db
+            .get_setting("usage_prune_high_watermark")
+            .expect("read existing watermark")
+            .expect("existing watermark exists");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&watermark).expect("existing watermark json")
+                ["history_complete"],
+            false
+        );
+    }
+}
+
+#[test]
 fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 

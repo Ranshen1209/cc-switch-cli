@@ -8,8 +8,8 @@ use serde_json::Value;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    append_utf8_bounded, truncate_string_utf8, SearchSnippet, SessionMessage, SessionMessageBatch,
-    SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
+    append_utf8_bounded, truncate_string_utf8, SearchSnippet, SessionCreatedAtKind, SessionMessage,
+    SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
     SESSION_MESSAGE_PREVIEW_MAX_MESSAGES, SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES,
     SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES,
 };
@@ -289,8 +289,8 @@ fn sqlite_stream_decodable_contains(
     session_id: &str,
 ) -> Result<bool, ()> {
     let sql = format!(
-        "SELECT {} FROM session WHERE id = ?1 LIMIT 1",
-        sqlite_metadata_select_list()
+        "SELECT {} FROM session s WHERE s.id = ?1 LIMIT 1",
+        sqlite_metadata_select_list("s", "s.time_updated")
     );
     conn.query_row(&sql, [session_id], |row| {
         decode_sqlite_meta(row, db_display)
@@ -302,15 +302,32 @@ fn sqlite_stream_decodable_contains(
     })
 }
 
-fn sqlite_metadata_select_list() -> String {
+fn sqlite_metadata_select_list(session_alias: &str, updated_expression: &str) -> String {
     let limit = MAX_METADATA_LINE_BYTES;
     format!(
-        "CASE WHEN length(CAST(id AS BLOB)) <= {limit}
-              THEN id ELSE printf('oversized-rowid-%lld', rowid) END,
-         CASE WHEN length(CAST(title AS BLOB)) <= {limit} THEN title ELSE '' END,
-         CASE WHEN length(CAST(directory AS BLOB)) <= {limit} THEN directory ELSE '' END,
-         time_created, time_updated"
+        "CASE WHEN length(CAST({session_alias}.id AS BLOB)) <= {limit}
+              THEN {session_alias}.id
+              ELSE printf('oversized-rowid-%lld', {session_alias}.rowid) END,
+         CASE WHEN length(CAST({session_alias}.title AS BLOB)) <= {limit}
+              THEN {session_alias}.title ELSE '' END,
+         CASE WHEN length(CAST({session_alias}.directory AS BLOB)) <= {limit}
+              THEN {session_alias}.directory ELSE '' END,
+         {session_alias}.time_created, {updated_expression}"
     )
+}
+
+fn sqlite_session_metadata_query(_conn: &Connection, ordered: bool) -> rusqlite::Result<String> {
+    // Phase A must stay proportional to session metadata. The usage importer
+    // owns the exact session/message MAX(time_updated) scan; repeating it here
+    // would block ManifestPublished on the entire message history. The session
+    // timestamp remains same-domain freshness evidence, and OpenCode is
+    // deliberately capped at Partial because this evidence is not a composite
+    // version (§4.2 of the v3 plan).
+    let order_clause = if ordered { " ORDER BY 5 DESC" } else { "" };
+    Ok(format!(
+        "SELECT {} FROM session s{order_clause}",
+        sqlite_metadata_select_list("s", "s.time_updated")
+    ))
 }
 
 fn emit_json_with_sqlite_precedence(
@@ -350,9 +367,12 @@ fn decode_sqlite_meta(row: &rusqlite::Row<'_>, db_display: &str) -> rusqlite::Re
         summary: display_title,
         project_dir: (!directory.is_empty()).then_some(directory),
         created_at: Some(created),
+        source_mtime_ns: Some(updated),
+        created_at_kind: Some(SessionCreatedAtKind::ProviderTimestamp),
         last_active_at: Some(updated),
         source_path: Some(format!("sqlite:{db_display}:{session_id}")),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        usage: None,
     })
 }
 
@@ -365,10 +385,12 @@ fn stream_sqlite_sessions(
     if is_cancelled() {
         return Err(cache::StreamScanStop::Cancelled);
     }
-    // The page-manifest builder supplies the final total ordering, so omitting
-    // ORDER BY here lets SQLite step rows immediately instead of materializing
-    // a provider-wide sort before the first callback.
-    let sql = format!("SELECT {} FROM session", sqlite_metadata_select_list());
+    // The page-manifest builder supplies the final total ordering, so omit an
+    // additional outer ORDER BY.
+    let sql = sqlite_session_metadata_query(conn, false).map_err(|error| {
+        log::warn!("authoritative OpenCode schema inspection failed: {error}");
+        cache::StreamScanStop::Incomplete
+    })?;
     let mut stmt = conn.prepare(&sql).map_err(|error| {
         log::warn!("authoritative OpenCode session query prepare failed: {error}");
         cache::StreamScanStop::Incomplete
@@ -574,15 +596,9 @@ fn scan_sessions_sqlite_impl(
         Err(_) => return Some(Vec::new()),
     };
 
-    let query = if ordered {
-        format!(
-            "SELECT {} FROM session ORDER BY time_updated DESC",
-            sqlite_metadata_select_list()
-        )
-    } else {
-        // Search does not depend on metadata order. Omitting ORDER BY lets row
-        // stepping observe cancellation without first sorting the whole table.
-        format!("SELECT {} FROM session", sqlite_metadata_select_list())
+    let query = match sqlite_session_metadata_query(&conn, ordered) {
+        Ok(query) => query,
+        Err(_) => return Some(Vec::new()),
     };
     let mut stmt = match conn.prepare(&query) {
         Ok(s) => s,
@@ -1599,6 +1615,8 @@ fn parse_session_cancellable(
         summary,
         project_dir: directory,
         created_at,
+        source_mtime_ns: None,
+        created_at_kind: created_at.map(|_| SessionCreatedAtKind::ProviderTimestamp),
         last_active_at: updated_at.or(created_at),
         source_path: Some(
             storage
@@ -1608,6 +1626,7 @@ fn parse_session_cancellable(
                 .into_owned(),
         ),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        usage: None,
     }))
 }
 
@@ -1630,11 +1649,22 @@ fn parse_session_lightweight(
         .filter(|value| !value.is_empty());
     let directory =
         extract_json_value(prefix, "directory").and_then(|value| value.as_str().map(str::to_owned));
-    let created_at =
+    let provider_created_at =
         extract_json_value(prefix, "created").and_then(|value| parse_timestamp_to_ms(&value));
-    let updated_at = extract_json_value(prefix, "updated")
-        .and_then(|value| parse_timestamp_to_ms(&value))
-        .or_else(|| file_modified_ms(path));
+    let provider_updated_at =
+        extract_json_value(prefix, "updated").and_then(|value| parse_timestamp_to_ms(&value));
+    let fallback_time = file_modified_ms(path);
+    let updated_at = provider_updated_at.or(fallback_time);
+    let created_at = provider_created_at
+        .or(provider_updated_at)
+        .or(fallback_time);
+    let created_at_kind = if provider_created_at.is_some() || provider_updated_at.is_some() {
+        Some(SessionCreatedAtKind::ProviderTimestamp)
+    } else if fallback_time.is_some() {
+        Some(SessionCreatedAtKind::FileMtimeFallback)
+    } else {
+        None
+    };
     let display_title = explicit_title
         .clone()
         .or_else(|| directory.as_deref().and_then(path_basename))
@@ -1655,7 +1685,9 @@ fn parse_session_lightweight(
         title: display_title,
         summary,
         project_dir: directory,
-        created_at: created_at.or(updated_at),
+        created_at,
+        source_mtime_ns: None,
+        created_at_kind,
         last_active_at: updated_at.or(created_at),
         source_path: Some(
             storage
@@ -1665,6 +1697,7 @@ fn parse_session_lightweight(
                 .into_owned(),
         ),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        usage: None,
     }
 }
 
@@ -1974,6 +2007,7 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL DEFAULT 0,
                 data TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE
             );
@@ -2111,6 +2145,60 @@ mod tests {
         assert_eq!(result, Err(cache::StreamScanStop::Cancelled));
         assert_eq!(ids.len(), 1);
         assert_eq!(stats.emitted, 1);
+    }
+
+    #[test]
+    fn sqlite_manifest_metadata_stays_bounded_to_the_session_table() {
+        let conn = Connection::open_in_memory().expect("database");
+        create_sqlite_schema(&conn);
+        conn.execute(
+            "INSERT INTO session (id, title, directory, time_created, time_updated)
+             VALUES ('ses_watermark', 'Session', '/tmp/project', 1, 100)",
+            [],
+        )
+        .expect("session");
+        conn.execute(
+            "INSERT INTO message (
+                 id, session_id, time_created, time_updated, data
+             ) VALUES (
+                 'msg_watermark', 'ses_watermark', 60, 200, '{}'
+             )",
+            [],
+        )
+        .expect("message");
+
+        let mut rows = Vec::new();
+        let mut stats = cache::StreamScanStats::default();
+        stream_sqlite_sessions(
+            &conn,
+            &mut |meta| {
+                rows.push(meta);
+                ControlFlow::Continue(())
+            },
+            &|| false,
+            &mut stats,
+        )
+        .expect("stream");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].source_mtime_ns,
+            Some(100),
+            "Phase A must reuse the session row instead of aggregating the full message table"
+        );
+
+        let sql = sqlite_session_metadata_query(&conn, false).expect("metadata query");
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan statement")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decode plan");
+        assert!(
+            plan.iter().all(|step| !step.contains("message")),
+            "Phase A query plan must not scan or materialize message: {plan:?}"
+        );
     }
 
     #[test]

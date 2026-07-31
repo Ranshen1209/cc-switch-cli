@@ -2420,7 +2420,7 @@ fn local_end_of_day_timestamp(date: NaiveDate) -> i64 {
         .unwrap_or(0)
 }
 
-fn load_usage_summary(
+pub(crate) fn load_usage_summary(
     conn: &rusqlite::Connection,
     app_key: &str,
     start: i64,

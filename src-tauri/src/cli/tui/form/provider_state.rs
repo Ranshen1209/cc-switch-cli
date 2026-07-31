@@ -1,6 +1,8 @@
 use crate::app_config::AppType;
+use crate::claude_model_config::split_claude_one_m_marker;
 use crate::cli::i18n::texts;
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig, Provider};
+use crate::provider_preset_models::{CODEX_DEFAULT_MODEL, GEMINI_DEFAULT_MODEL};
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 
@@ -13,11 +15,11 @@ use super::provider_json::{
 };
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
-    ClaudeApiFormat, CodexLocalRoutingField, CodexModelCatalogField, CodexModelCatalogRow,
-    CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType, HermesModelField,
-    InlineFieldError, LocalProxySettingsField, PromptCacheRoutingMode, ProviderAddField,
-    ProviderAddFormState, ProviderFormPage, ProviderTextField, TextEditSession, TextInput,
-    UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
+    ClaudeApiFormat, ClaudeModelRole, CodexLocalRoutingField, CodexModelCatalogField,
+    CodexModelCatalogRow, CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType,
+    HermesModelField, InlineFieldError, LocalProxySettingsField, PromptCacheRoutingMode,
+    ProviderAddField, ProviderAddFormState, ProviderFormPage, ProviderTextField, TextEditSession,
+    TextInput, UsageQueryField, UsageQueryTemplate, HERMES_API_MODES, HERMES_DEFAULT_API_MODE,
     OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
@@ -35,28 +37,6 @@ fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
         }
         counter += 1;
     }
-}
-
-fn split_claude_one_m_marker(value: &str) -> (String, bool) {
-    const MARKER: &str = "[1M]";
-
-    let trimmed_end = value.trim_end();
-    let marker_start = trimmed_end.len().saturating_sub(MARKER.len());
-    let has_marker = trimmed_end
-        .get(marker_start..)
-        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(MARKER));
-    if !has_marker {
-        return (value.to_string(), false);
-    }
-
-    (
-        trimmed_end
-            .get(..marker_start)
-            .unwrap_or_default()
-            .trim_end()
-            .to_string(),
-        true,
-    )
 }
 
 impl ProviderAddFormState {
@@ -128,13 +108,14 @@ impl ProviderAddFormState {
         let include_common_config =
             Self::snippet_has_effective_common_config(&app_type, common_snippet);
         let is_codex = matches!(app_type, AppType::Codex);
+        let is_gemini = matches!(app_type, AppType::Gemini);
         let openclaw_api_default = match app_type {
             AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
             _ => "@ai-sdk/openai-compatible",
         };
 
         let codex_defaults = if is_codex {
-            ("", "gpt-5.4", CodexWireApi::Responses, true)
+            ("", CODEX_DEFAULT_MODEL, CodexWireApi::Responses, true)
         } else {
             ("", "", CodexWireApi::Responses, true)
         };
@@ -168,7 +149,8 @@ impl ProviderAddFormState {
             codex_preview_section: CodexPreviewSection::Auth,
             codex_auth_scroll: 0,
             codex_config_scroll: 0,
-            claude_model_config_touched: false,
+            claude_fallback_model_touched: false,
+            claude_model_role_touched: [false; ClaudeModelRole::COUNT],
             claude_api_key: TextInput::new(""),
             claude_api_key_field: ClaudeApiKeyField::AuthToken,
             claude_base_url: TextInput::new(""),
@@ -181,8 +163,12 @@ impl ProviderAddFormState {
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
+            claude_fable_model: TextInput::new(""),
+            claude_subagent_model: TextInput::new(""),
             claude_sonnet_one_m: false,
             claude_opus_one_m: false,
+            claude_fable_one_m: false,
+            claude_subagent_one_m: false,
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
             claude_teammates: false,
@@ -218,7 +204,7 @@ impl ProviderAddFormState {
             gemini_auth_type: GeminiAuthType::ApiKey,
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
-            gemini_model: TextInput::new(""),
+            gemini_model: TextInput::new(if is_gemini { GEMINI_DEFAULT_MODEL } else { "" }),
             openclaw_user_agent: false,
             openclaw_models: Vec::new(),
             usage_query_enabled: false,
@@ -1863,82 +1849,75 @@ impl ProviderAddFormState {
         None
     }
 
-    // The model-mapping sub-page exposes only the three role models; the main
+    // The model-mapping sub-page exposes role models; the main
     // model (ANTHROPIC_MODEL) is edited via the top-level ClaudeFallbackModel row.
     pub fn claude_model_input(&self, index: usize) -> Option<&TextInput> {
-        match index {
-            0 => Some(&self.claude_haiku_model),
-            1 => Some(&self.claude_sonnet_model),
-            2 => Some(&self.claude_opus_model),
-            _ => None,
+        match ClaudeModelRole::from_index(index)? {
+            ClaudeModelRole::Haiku => Some(&self.claude_haiku_model),
+            ClaudeModelRole::Sonnet => Some(&self.claude_sonnet_model),
+            ClaudeModelRole::Opus => Some(&self.claude_opus_model),
+            ClaudeModelRole::Fable => Some(&self.claude_fable_model),
+            ClaudeModelRole::Subagent => Some(&self.claude_subagent_model),
         }
     }
 
     pub fn claude_model_input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
-        match index {
-            0 => Some(&mut self.claude_haiku_model),
-            1 => Some(&mut self.claude_sonnet_model),
-            2 => Some(&mut self.claude_opus_model),
-            _ => None,
+        match ClaudeModelRole::from_index(index)? {
+            ClaudeModelRole::Haiku => Some(&mut self.claude_haiku_model),
+            ClaudeModelRole::Sonnet => Some(&mut self.claude_sonnet_model),
+            ClaudeModelRole::Opus => Some(&mut self.claude_opus_model),
+            ClaudeModelRole::Fable => Some(&mut self.claude_fable_model),
+            ClaudeModelRole::Subagent => Some(&mut self.claude_subagent_model),
         }
     }
 
     pub fn claude_model_supports_one_m(index: usize) -> bool {
-        matches!(index, 1 | 2)
+        ClaudeModelRole::from_index(index).is_some_and(ClaudeModelRole::supports_one_m)
     }
 
     pub fn claude_model_one_m_enabled(&self, index: usize) -> bool {
-        match index {
-            1 => self.claude_sonnet_one_m,
-            2 => self.claude_opus_one_m,
+        match ClaudeModelRole::from_index(index) {
+            Some(ClaudeModelRole::Sonnet) => self.claude_sonnet_one_m,
+            Some(ClaudeModelRole::Opus) => self.claude_opus_one_m,
+            Some(ClaudeModelRole::Fable) => self.claude_fable_one_m,
+            Some(ClaudeModelRole::Subagent) => self.claude_subagent_one_m,
             _ => false,
         }
     }
 
     fn set_claude_model_one_m_enabled(&mut self, index: usize, enabled: bool) {
-        match index {
-            1 => self.claude_sonnet_one_m = enabled,
-            2 => self.claude_opus_one_m = enabled,
+        match ClaudeModelRole::from_index(index) {
+            Some(ClaudeModelRole::Sonnet) => self.claude_sonnet_one_m = enabled,
+            Some(ClaudeModelRole::Opus) => self.claude_opus_one_m = enabled,
+            Some(ClaudeModelRole::Fable) => self.claude_fable_one_m = enabled,
+            Some(ClaudeModelRole::Subagent) => self.claude_subagent_one_m = enabled,
             _ => {}
         }
     }
 
     pub fn set_claude_model_from_config(&mut self, index: usize, value: &str) {
-        if !Self::claude_model_supports_one_m(index) {
-            if let Some(input) = self.claude_model_input_mut(index) {
-                input.set(value);
-            }
-            return;
-        }
-
         let (model, one_m) = split_claude_one_m_marker(value);
         if let Some(input) = self.claude_model_input_mut(index) {
             input.set(model);
         }
-        self.set_claude_model_one_m_enabled(index, one_m);
+        if Self::claude_model_supports_one_m(index) {
+            self.set_claude_model_one_m_enabled(index, one_m);
+        }
     }
 
     pub fn set_claude_model_from_picker(&mut self, index: usize, value: &str) {
         let preserve_one_m = self.claude_model_one_m_enabled(index);
         let (model, explicit_one_m) = split_claude_one_m_marker(value);
         if let Some(input) = self.claude_model_input_mut(index) {
-            input.set(if Self::claude_model_supports_one_m(index) {
-                model
-            } else {
-                value.trim().to_string()
-            });
+            input.set(model);
         }
         if Self::claude_model_supports_one_m(index) {
             self.set_claude_model_one_m_enabled(index, explicit_one_m || preserve_one_m);
         }
-        self.mark_claude_model_config_touched();
+        self.mark_claude_model_role_touched(index);
     }
 
     pub fn normalize_claude_model_input(&mut self, index: usize) -> bool {
-        if !Self::claude_model_supports_one_m(index) {
-            return false;
-        }
-
         let Some(raw) = self
             .claude_model_input(index)
             .map(|input| input.value.clone())
@@ -1946,17 +1925,19 @@ impl ProviderAddFormState {
             return false;
         };
         let (model, explicit_one_m) = split_claude_one_m_marker(&raw);
-        let enabled = if model.trim().is_empty() {
-            false
-        } else {
-            explicit_one_m || self.claude_model_one_m_enabled(index)
-        };
-        let changed = model != raw || enabled != self.claude_model_one_m_enabled(index);
+        let supports_one_m = Self::claude_model_supports_one_m(index);
+        let enabled = supports_one_m
+            && !model.trim().is_empty()
+            && (explicit_one_m || self.claude_model_one_m_enabled(index));
+        let changed =
+            model != raw || (supports_one_m && enabled != self.claude_model_one_m_enabled(index));
         if changed {
             if let Some(input) = self.claude_model_input_mut(index) {
                 input.set(model);
             }
-            self.set_claude_model_one_m_enabled(index, enabled);
+            if supports_one_m {
+                self.set_claude_model_one_m_enabled(index, enabled);
+            }
         }
         changed
     }
@@ -1976,7 +1957,7 @@ impl ProviderAddFormState {
 
         let enabled = !currently_enabled;
         self.set_claude_model_one_m_enabled(index, enabled);
-        self.mark_claude_model_config_touched();
+        self.mark_claude_model_role_touched(index);
         true
     }
 
@@ -1988,7 +1969,10 @@ impl ProviderAddFormState {
         if model.is_empty() {
             return String::new();
         }
-        if Self::claude_model_supports_one_m(index) && self.claude_model_one_m_enabled(index) {
+        if !Self::claude_model_supports_one_m(index) {
+            return split_claude_one_m_marker(model).0;
+        }
+        if self.claude_model_one_m_enabled(index) {
             format!("{model}[1M]")
         } else {
             model.to_string()
@@ -2006,7 +1990,8 @@ impl ProviderAddFormState {
         let (model, _) = split_claude_one_m_marker(&source.value);
         let one_m = Self::claude_model_supports_one_m(source_index)
             && self.claude_model_one_m_enabled(source_index);
-        for index in 0..3 {
+        for role in ClaudeModelRole::ALL {
+            let index = role.index();
             if let Some(input) = self.claude_model_input_mut(index) {
                 input.set(model.clone());
             }
@@ -2015,23 +2000,43 @@ impl ProviderAddFormState {
                 Self::claude_model_supports_one_m(index) && one_m,
             );
         }
-        self.mark_claude_model_config_touched();
+        self.mark_all_claude_model_roles_touched();
         true
     }
 
     pub fn claude_model_configured_count(&self) -> usize {
-        [
-            &self.claude_haiku_model,
-            &self.claude_sonnet_model,
-            &self.claude_opus_model,
-        ]
-        .into_iter()
-        .filter(|input| !input.is_blank_for_passive_display())
-        .count()
+        ClaudeModelRole::ALL
+            .into_iter()
+            .filter_map(|role| self.claude_model_input(role.index()))
+            .filter(|input| !input.is_blank_for_passive_display())
+            .count()
     }
 
-    pub fn mark_claude_model_config_touched(&mut self) {
-        self.claude_model_config_touched = true;
+    pub fn mark_claude_fallback_model_touched(&mut self) {
+        self.claude_fallback_model_touched = true;
+    }
+
+    pub fn mark_claude_model_role_touched(&mut self, index: usize) {
+        if let Some(touched) = self.claude_model_role_touched.get_mut(index) {
+            *touched = true;
+        }
+    }
+
+    pub fn mark_all_claude_model_roles_touched(&mut self) {
+        self.claude_model_role_touched.fill(true);
+    }
+
+    pub fn claude_model_role_was_touched(&self, index: usize) -> bool {
+        self.claude_model_role_touched
+            .get(index)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    pub fn any_claude_model_role_was_touched(&self) -> bool {
+        self.claude_model_role_touched
+            .iter()
+            .any(|touched| *touched)
     }
 
     pub fn toggle_claude_hide_attribution(&mut self) {

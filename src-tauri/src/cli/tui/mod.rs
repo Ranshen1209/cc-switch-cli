@@ -1,6 +1,6 @@
 mod app;
 mod clipboard;
-mod data;
+pub(crate) mod data;
 mod form;
 pub(crate) mod help;
 pub(crate) mod icons;
@@ -1455,6 +1455,58 @@ fn queue_background_session_usage_sync(
     }
 }
 
+fn queue_current_session_cost(
+    app: &mut App,
+    cost_req_tx: Option<&runtime_systems::session_cost::SessionCostRequestSender>,
+) -> bool {
+    let Some(tx) = cost_req_tx else {
+        app.sessions.fail_cost_overlay();
+        return false;
+    };
+    let Some(request) = app.sessions.start_cost_overlay() else {
+        let _ = queue_pending_session_cost_cancel(app, Some(tx));
+        return false;
+    };
+    if tx.submit(request).is_err() {
+        app.sessions.fail_cost_overlay();
+        log::debug!("queue session cost projection failed: worker unavailable");
+        false
+    } else {
+        true
+    }
+}
+
+fn queue_pending_session_cost_cancel(
+    app: &mut App,
+    cost_req_tx: Option<&runtime_systems::session_cost::SessionCostRequestSender>,
+) -> bool {
+    let Some(cost_seq) = app.sessions.take_cost_cancel_request() else {
+        return false;
+    };
+    let Some(tx) = cost_req_tx else {
+        app.sessions.fail_cost_overlay();
+        return false;
+    };
+    if tx.cancel(cost_seq).is_err() {
+        app.sessions.fail_cost_overlay();
+        log::debug!("cancel session cost projection failed: worker unavailable");
+        false
+    } else {
+        true
+    }
+}
+
+fn queue_pending_session_cost(
+    app: &mut App,
+    cost_req_tx: Option<&runtime_systems::session_cost::SessionCostRequestSender>,
+) -> bool {
+    let cancelled = queue_pending_session_cost_cancel(app, cost_req_tx);
+    if !app.sessions.take_cost_overlay_request() {
+        return cancelled;
+    }
+    queue_current_session_cost(app, cost_req_tx) || cancelled
+}
+
 fn queue_codex_usage_rebuild(
     app: &mut App,
     sync_req_tx: Option<&mpsc::Sender<SessionUsageSyncReq>>,
@@ -1809,6 +1861,58 @@ fn queue_usage_log_detail_refresh(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionUsageSyncTerminal {
+    Run,
+    CodexRebuild,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualSessionCostSyncAction {
+    None,
+    QueueRun,
+    RequeryVisiblePage,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ManualSessionCostSyncState {
+    #[default]
+    Idle,
+    /// Metadata was published while another sync was already running. Its
+    /// terminal cannot satisfy the post-publication import promise.
+    NeedsRunAfterCurrent,
+    /// The Run queued after the latest metadata publication is in flight.
+    AwaitingManualRun,
+}
+
+fn manual_session_cost_sync_action(
+    state: &mut ManualSessionCostSyncState,
+    terminal: Option<SessionUsageSyncTerminal>,
+    sessions_visible: bool,
+) -> ManualSessionCostSyncAction {
+    let Some(terminal) = terminal else {
+        return ManualSessionCostSyncAction::None;
+    };
+    match (*state, terminal) {
+        (ManualSessionCostSyncState::Idle, _) => ManualSessionCostSyncAction::None,
+        (ManualSessionCostSyncState::NeedsRunAfterCurrent, _) => {
+            *state = ManualSessionCostSyncState::AwaitingManualRun;
+            ManualSessionCostSyncAction::QueueRun
+        }
+        (ManualSessionCostSyncState::AwaitingManualRun, SessionUsageSyncTerminal::Run) => {
+            *state = ManualSessionCostSyncState::Idle;
+            if sessions_visible {
+                ManualSessionCostSyncAction::RequeryVisiblePage
+            } else {
+                ManualSessionCostSyncAction::None
+            }
+        }
+        (ManualSessionCostSyncState::AwaitingManualRun, SessionUsageSyncTerminal::CodexRebuild) => {
+            ManualSessionCostSyncAction::QueueRun
+        }
+    }
+}
+
 fn handle_session_usage_sync_msg(
     app: &mut App,
     data: &mut data::UiData,
@@ -1816,21 +1920,22 @@ fn handle_session_usage_sync_msg(
     sync_tracker: &mut RequestTracker,
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
     msg: SessionUsageSyncMsg,
-) {
+) -> Option<SessionUsageSyncTerminal> {
     let request_id = match &msg {
         SessionUsageSyncMsg::Finished { request_id, .. }
         | SessionUsageSyncMsg::CodexRebuilt { request_id, .. } => *request_id,
     };
     if !sync_tracker.finish_if_active(request_id) {
-        return;
+        return None;
     }
 
-    match msg {
+    let terminal = match msg {
         SessionUsageSyncMsg::Finished { result, .. } => {
             app.usage.finish_manual_session_refresh();
             if let Err(err) = result {
                 log::debug!("background session usage sync failed: {err}");
             }
+            SessionUsageSyncTerminal::Run
         }
         SessionUsageSyncMsg::CodexRebuilt { result, .. } => {
             app.usage.finish_codex_usage_rebuild();
@@ -1857,8 +1962,9 @@ fn handle_session_usage_sync_msg(
                     ToastKind::Error,
                 ),
             }
+            SessionUsageSyncTerminal::CodexRebuild
         }
-    }
+    };
 
     // A best-effort import may commit records before another source reports an
     // error. Treat every completed cycle as a Usage invalidation boundary; the
@@ -1867,7 +1973,7 @@ fn handle_session_usage_sync_msg(
 
     if usage_pricing_req_tx.is_none() {
         log::debug!("background session usage sync finished; usage/pricing worker unavailable");
-        return;
+        return Some(terminal);
     }
 
     // Completed aggregates are now stale, but their request tokens remain
@@ -1894,6 +2000,7 @@ fn handle_session_usage_sync_msg(
         app.usage.request_log_page_refresh_after_aggregate();
     }
     data_cache.remember_current(&app.app_type, data);
+    Some(terminal)
 }
 
 fn handle_app_data_msg(
@@ -2684,8 +2791,8 @@ fn queue_sessions_refresh_if_needed(
         request_id,
         scope_epoch: app.sessions.scope_epoch,
         provider_id,
-        // Entering the page uses the cached snapshot + delta revalidate; only
-        // manual `r` forces a full re-parse.
+        // Entering the page opens the persisted manifest only. A missing
+        // manifest bootstraps once; source revalidation is otherwise manual.
         force: purge_refresh,
     }) {
         app.sessions.fail_scan(request_id, err.to_string());
@@ -2937,6 +3044,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
     let mut webdav_loading = RequestTracker::default();
     let mut update_check = RequestTracker::default();
     let mut session_usage_sync = RequestTracker::default();
+    let mut manual_session_cost_sync = ManualSessionCostSyncState::Idle;
     let mut codex_history_save = RequestTracker::default();
     // Session usage sync scans every session log file, which is expensive with a
     // large history. It only feeds the Usage view, so defer it until the user
@@ -3358,6 +3466,19 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             while let Ok(msg) = sessions.result_rx.try_recv() {
                 frame_scheduler.mark_dirty();
                 handle_session_msg(&mut app, msg);
+                let _ = queue_pending_session_cost(&mut app, Some(&sessions.cost_req_tx));
+                if app.sessions.take_manual_usage_sync_request() {
+                    if session_usage_sync.active.is_some() {
+                        manual_session_cost_sync = ManualSessionCostSyncState::NeedsRunAfterCurrent;
+                    } else if queue_background_session_usage_sync(
+                        session_usage.as_ref().map(|system| &system.req_tx),
+                        &mut session_usage_sync,
+                    ) {
+                        manual_session_cost_sync = ManualSessionCostSyncState::AwaitingManualRun;
+                    } else {
+                        manual_session_cost_sync = ManualSessionCostSyncState::Idle;
+                    }
+                }
                 if app.sessions.take_message_cancel_pending() {
                     let _ = sessions.req_tx.send(SessionReq::CancelMessages);
                 }
@@ -3428,7 +3549,7 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         if let Some(session_usage) = session_usage.as_ref() {
             while let Ok(msg) = session_usage.result_rx.try_recv() {
                 frame_scheduler.mark_dirty();
-                handle_session_usage_sync_msg(
+                let terminal = handle_session_usage_sync_msg(
                     &mut app,
                     &mut data,
                     &mut data_cache,
@@ -3436,6 +3557,27 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
                     usage_pricing.as_ref().map(|s| &s.req_tx),
                     msg,
                 );
+                match manual_session_cost_sync_action(
+                    &mut manual_session_cost_sync,
+                    terminal,
+                    matches!(app.route, route::Route::Sessions),
+                ) {
+                    ManualSessionCostSyncAction::RequeryVisiblePage => {
+                        let _ = queue_current_session_cost(
+                            &mut app,
+                            sessions.as_ref().map(|system| &system.cost_req_tx),
+                        );
+                    }
+                    ManualSessionCostSyncAction::QueueRun => {
+                        if !queue_background_session_usage_sync(
+                            Some(&session_usage.req_tx),
+                            &mut session_usage_sync,
+                        ) {
+                            manual_session_cost_sync = ManualSessionCostSyncState::Idle;
+                        }
+                    }
+                    ManualSessionCostSyncAction::None => {}
+                }
             }
         }
 
@@ -3652,6 +3794,12 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
             if app.should_quit {
                 break;
             }
+        }
+        if !app.should_quit {
+            let _ = queue_pending_session_cost(
+                &mut app,
+                sessions.as_ref().map(|system| &system.cost_req_tx),
+            );
         }
 
         // Kick off the deferred session-usage sync the first time the user lands

@@ -138,6 +138,115 @@ fn app_with_pending_purge_manifest() -> (App, TempDir, u64, String) {
     (app, manifest_dir, delete_request_id, deleted_key)
 }
 
+fn app_with_costed_session_page() -> (App, TempDir) {
+    let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
+    let store =
+        crate::session_manager::paged_manifest::PagedManifestStore::open_at(manifest_dir.path())
+            .expect("manifest fixture store");
+    let mut builder = store.begin_build("claude").expect("manifest builder");
+    builder
+        .push(crate::session_manager::SessionMeta {
+            provider_id: "claude".to_string(),
+            session_id: "costed".to_string(),
+            source_path: Some("/tmp/costed.jsonl".to_string()),
+            usage: Some(crate::session_manager::SessionUsageSummary {
+                input_tokens: 10,
+                output_tokens: 2,
+                cost: Some(0.25),
+                ..crate::session_manager::SessionUsageSummary::default()
+            }),
+            ..crate::session_manager::SessionMeta::default()
+        })
+        .expect("manifest row");
+    let published = builder.publish().expect("publish manifest");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let _ = app.sessions.start_scan("claude".to_string());
+    let scope_epoch = app.sessions.scope_epoch;
+    assert!(app.sessions.apply_opened_manifest(
+        scope_epoch,
+        "claude",
+        published.generation,
+        published.total_rows,
+        published.first_page.page_index,
+        published.first_page.rows,
+        published.reader,
+    ));
+    (app, manifest_dir)
+}
+
+#[test]
+fn unavailable_cost_worker_clears_stale_values_and_active_request() {
+    let (mut app, _manifest_dir) = app_with_costed_session_page();
+
+    assert!(!queue_current_session_cost(&mut app, None));
+
+    assert_eq!(app.sessions.rows[0].usage, None);
+    assert!(!app.sessions.has_active_cost_overlay());
+}
+
+#[test]
+fn disconnected_cost_worker_clears_stale_values_and_active_request() {
+    let (mut app, _manifest_dir) = app_with_costed_session_page();
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (sender, receiver) = runtime_systems::session_cost::session_cost_mailbox(active);
+    drop(receiver);
+
+    assert!(!queue_current_session_cost(&mut app, Some(&sender)));
+
+    assert_eq!(app.sessions.rows[0].usage, None);
+    assert!(!app.sessions.has_active_cost_overlay());
+}
+
+#[test]
+fn empty_visible_page_cancels_the_previous_cost_query_without_a_replacement() {
+    let (mut app, _manifest_dir) = app_with_costed_session_page();
+    app.sessions
+        .start_cost_overlay()
+        .expect("initial visible-page request");
+
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let (sender, _receiver) =
+        runtime_systems::session_cost::session_cost_mailbox(std::sync::Arc::clone(&active));
+    let old_control = crate::services::session_cost::QueryControl {
+        active_cost_seq: active,
+        cost_seq: 1,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+    };
+    assert!(!old_control.is_cancelled());
+
+    app.sessions.rows.clear();
+    app.sessions.request_cost_overlay();
+    let _ = queue_pending_session_cost(&mut app, Some(&sender));
+
+    assert!(
+        old_control.is_cancelled(),
+        "an empty search/page transition must interrupt the old read transaction"
+    );
+    assert!(!app.sessions.has_active_cost_overlay());
+}
+
+#[test]
+fn sessions_help_distinguishes_main_usage_rows_from_hermes_estimates() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = route::Route::Sessions;
+    let data = UiData::default();
+
+    let _english = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+    let english = help::context_help_for_app(&app, &data).lines.join("\n");
+    assert!(english.contains("proxy_request_logs"), "{english}");
+    assert!(english.contains("Hermes"), "{english}");
+    assert!(english.contains("state.db"), "{english}");
+
+    drop(_english);
+    let _chinese = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::Chinese);
+    let chinese = help::context_help_for_app(&app, &data).lines.join("\n");
+    assert!(chinese.contains("proxy_request_logs"), "{chinese}");
+    assert!(chinese.contains("Hermes"), "{chinese}");
+    assert!(chinese.contains("state.db"), "{chinese}");
+}
+
 struct EnvGuard {
     _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
@@ -1061,7 +1170,7 @@ fn no_op_reload_candidate_preserves_pending_app_data_load() {
 }
 
 #[test]
-fn switch_to_sessions_queues_scan_without_waiting_for_next_tick() {
+fn switch_to_sessions_queues_cached_open_without_forcing_source_refresh() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Codex));
     let mut data = UiData::default();
@@ -1105,10 +1214,12 @@ fn switch_to_sessions_queues_scan_without_waiting_for_next_tick() {
         SessionReq::Refresh {
             request_id: queued_request_id,
             provider_id,
+            force,
             ..
         } => {
             assert_eq!(queued_request_id, request_id);
             assert_eq!(provider_id, "codex");
+            assert!(!force);
         }
         other => panic!("unexpected sessions request: {other:?}"),
     }
@@ -2132,6 +2243,54 @@ fn background_session_usage_sync_queues_once() {
         SessionUsageSyncReq::Run { request_id: 1 }
     ));
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn manual_session_cost_sync_requeries_once_and_periodic_terminals_do_not() {
+    let mut pending = ManualSessionCostSyncState::Idle;
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::None,
+        "an ordinary periodic sync terminal must not refresh Sessions cost"
+    );
+
+    pending = ManualSessionCostSyncState::AwaitingManualRun;
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::RequeryVisiblePage
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::Idle);
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::None,
+        "the manual terminal is consumed exactly once"
+    );
+
+    pending = ManualSessionCostSyncState::NeedsRunAfterCurrent;
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), true,),
+        ManualSessionCostSyncAction::QueueRun,
+        "a Run that predates metadata publication must be followed by a new incremental run"
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::AwaitingManualRun);
+    assert_eq!(
+        manual_session_cost_sync_action(&mut pending, Some(SessionUsageSyncTerminal::Run), false,),
+        ManualSessionCostSyncAction::None,
+        "leaving Sessions suppresses only the terminal requery"
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::Idle);
+
+    pending = ManualSessionCostSyncState::AwaitingManualRun;
+    assert_eq!(
+        manual_session_cost_sync_action(
+            &mut pending,
+            Some(SessionUsageSyncTerminal::CodexRebuild),
+            true,
+        ),
+        ManualSessionCostSyncAction::QueueRun,
+        "an unexpected rebuild terminal must still lead to the promised incremental run"
+    );
+    assert_eq!(pending, ManualSessionCostSyncState::AwaitingManualRun);
 }
 
 #[test]

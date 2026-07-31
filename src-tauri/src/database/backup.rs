@@ -54,6 +54,7 @@ where
 
 const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_request_logs",
+    "session_log_sync",
     "stream_check_logs",
     "proxy_live_backup",
     "proxy_failover_live_snapshots",
@@ -62,7 +63,7 @@ const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
 
 const SYNC_EXPORT_RESETTABLE_TABLES: &[&str] = &["provider_health"];
 
-const SYNC_LOCAL_SETTINGS_KEYS: &[&str] = &["proxy_runtime_session"];
+const SYNC_LOCAL_SETTINGS_KEYS: &[&str] = &["proxy_runtime_session", "usage_prune_high_watermark"];
 const PROXY_CONFIG_LOCAL_COLUMNS: &[&str] =
     &["proxy_enabled", "listen_address", "listen_port", "enabled"];
 
@@ -1168,6 +1169,12 @@ mod tests {
                  VALUES ('current_profile_id_claude-desktop', 'remote-profile')",
                 [],
             )?;
+            conn.execute(
+                "INSERT INTO session_log_sync
+                    (file_path, last_modified, last_line_offset, last_synced_at)
+                 VALUES ('/shared/session.jsonl', 999, 999, 999)",
+                [],
+            )?;
         }
         let remote_sql = remote_db.export_sql_string_for_sync()?;
 
@@ -1200,6 +1207,12 @@ mod tests {
                     provider_id, provider_name, app_type, status, success, message,
                     response_time_ms, http_status, model_used, retry_count, tested_at
                 ) VALUES ('local-provider', 'Local Provider', 'claude', 'operational', 1, 'ok', 42, 200, 'claude-3', 0, 1000)",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO session_log_sync
+                    (file_path, last_modified, last_line_offset, last_synced_at)
+                 VALUES ('/shared/session.jsonl', 123, 12, 1000)",
                 [],
             )?;
         }
@@ -1260,6 +1273,21 @@ mod tests {
         assert_eq!(
             stream_logs, 1,
             "local stream check logs should be preserved"
+        );
+        let local_sync: (i64, i64, i64) = {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            conn.query_row(
+                "SELECT last_modified, last_line_offset, last_synced_at
+                 FROM session_log_sync
+                 WHERE file_path = '/shared/session.jsonl'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+        };
+        assert_eq!(
+            local_sync,
+            (123, 12, 1000),
+            "WebDAV restore must not mix remote sync evidence with local usage rows"
         );
 
         let semantics: (i64, i64) = {
@@ -1453,6 +1481,12 @@ mod tests {
         local_db
             .set_setting("proxy_runtime_session", "{\"pid\":123}")
             .expect("persist local runtime session");
+        local_db
+            .set_setting(
+                "usage_prune_high_watermark",
+                r#"{"epoch":123,"history_complete":true}"#,
+            )
+            .expect("persist local prune watermark");
         {
             let conn = crate::database::lock_conn!(local_db.conn);
             seed_provider(&conn, "local-provider")?;
@@ -1466,6 +1500,13 @@ mod tests {
                 .expect("read local runtime session after import")
                 .as_deref(),
             Some("{\"pid\":123}")
+        );
+        assert_eq!(
+            local_db
+                .get_setting("usage_prune_high_watermark")
+                .expect("read local prune watermark after import")
+                .as_deref(),
+            Some(r#"{"epoch":123,"history_complete":true}"#)
         );
 
         Ok(())
