@@ -101,6 +101,23 @@ pub(super) fn render_sessions(
     render_session_detail(frame, app, &visible, body[1], theme);
 }
 
+/// Fixed width of the relative-time column.
+const TIME_COLUMN_WIDTH: u16 = 10;
+/// Fixed width of the cost column: `≥$999.99` plus one column of slack.
+const COST_COLUMN_WIDTH: u16 = 9;
+
+/// Column visibility for the session list at a given pane width.
+///
+/// Degradation order is Title > Time > Cost. Title never leaves because it is
+/// the only cell that identifies a row. Cost drops first: the Overview pane
+/// spells the exact amount out for the selected session anyway, while Time is
+/// the only per-row ordering cue the list itself provides.
+fn session_list_columns(width: u16) -> (bool, bool) {
+    let show_cost = width >= 30;
+    let show_time = width >= 19;
+    (show_time, show_cost)
+}
+
 fn render_session_list(
     frame: &mut Frame<'_>,
     app: &App,
@@ -204,19 +221,21 @@ fn render_session_list(
         return;
     }
 
-    // The enlarged pane leaves just enough room for all three columns on a
-    // standard 80-column terminal. Only sacrifice Time below that boundary;
-    // Title remains the flexible column and Cost keeps a stable right edge.
-    let show_time = inner.width >= 27;
+    // The enlarged pane leaves room for all three columns on a standard
+    // 80-column terminal. Below that the columns are dropped in priority order
+    // (see `session_list_columns`): Title always stays, Time outranks Cost.
+    let (show_time, show_cost) = session_list_columns(inner.width);
     let mut header_cells = vec![Cell::from(texts::tui_sessions_header_title())];
     if show_time {
         header_cells.push(Cell::from(
             Text::from(texts::tui_sessions_header_time()).alignment(Alignment::Right),
         ));
     }
-    header_cells.push(Cell::from(
-        Text::from(texts::tui_sessions_header_cost()).alignment(Alignment::Right),
-    ));
+    if show_cost {
+        header_cells.push(Cell::from(
+            Text::from(texts::tui_sessions_header_cost()).alignment(Alignment::Right),
+        ));
+    }
     let header =
         Row::new(header_cells).style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -263,32 +282,36 @@ fn render_session_list(
             };
             let mut cells = vec![Cell::from(title_line)];
             if show_time {
-                cells.push(Cell::from(Text::from(time).alignment(Alignment::Right)));
+                cells.push(Cell::from(
+                    Text::from(Line::styled(time, Style::default().fg(theme.comment)))
+                        .alignment(Alignment::Right),
+                ));
             }
-            cells.push(Cell::from(
-                Text::from(
-                    session
-                        .usage
-                        .as_ref()
-                        .map(format_session_cost)
-                        .unwrap_or_else(|| "-".to_string()),
-                )
-                .alignment(Alignment::Right),
-            ));
+            if show_cost {
+                cells.push(Cell::from(
+                    Text::from(Line::from(session_cost_spans(
+                        session.usage.as_ref(),
+                        theme,
+                        MarkerSpacing::Glued,
+                    )))
+                    .alignment(Alignment::Right),
+                ));
+            }
             Row::new(cells)
         });
 
-    let widths = if show_time {
-        vec![
-            Constraint::Min(0),
-            Constraint::Length(10),
-            Constraint::Length(8),
-        ]
-    } else {
-        vec![Constraint::Min(0), Constraint::Length(8)]
-    };
+    let mut widths = vec![Constraint::Min(0)];
+    if show_time {
+        widths.push(Constraint::Length(TIME_COLUMN_WIDTH));
+    }
+    if show_cost {
+        widths.push(Constraint::Length(COST_COLUMN_WIDTH));
+    }
     let table = Table::new(rows, widths)
         .header(header)
+        // Cost sits right against Time without this; two columns of air is what
+        // separates the three fields once they no longer differ in color alone.
+        .column_spacing(2)
         .block(Block::default().borders(Borders::NONE))
         .row_highlight_style(selection_style(theme))
         .highlight_symbol(highlight_symbol(theme));
@@ -314,9 +337,12 @@ fn render_session_detail(
     theme: &super::theme::Theme,
 ) {
     let selected = selected_session(app, visible);
+    // Six overview rows plus the block borders; Tokens and Cost each own a
+    // labelled row now, so the pane needs one line more than the message list
+    // (which absorbs the change through its `Min(0)` share).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .constraints([Constraint::Length(8), Constraint::Min(0)])
         .split(area);
 
     render_session_overview(frame, selected, chunks[0], theme);
@@ -341,7 +367,6 @@ fn render_session_overview(
     };
 
     let inner = inset_left(block.inner(area), CONTENT_INSET_LEFT);
-    let value_width = inner.width.saturating_sub(16);
     let time = session
         .last_active_at
         .or(session.created_at)
@@ -358,41 +383,45 @@ fn render_session_overview(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(texts::tui_na());
-    let (tokens, cost) = session
-        .usage
-        .as_ref()
-        .map(|usage| (format_session_tokens(usage), format_session_cost(usage)))
-        .unwrap_or_else(|| {
-            (
-                format!("{}: -", texts::tui_sessions_overview_tokens_label()),
-                "-".to_string(),
-            )
-        });
+    let usage = session.usage.as_ref();
+    let token_spans = session_token_spans(usage, theme);
+    let cost_spans = session_cost_spans(usage, theme, MarkerSpacing::Spaced);
 
     let lines = vec![
         overview_field_line(
             texts::tui_sessions_overview_time_label(),
             &time,
-            value_width,
+            inner.width,
             theme,
         ),
         overview_field_line(
             texts::tui_sessions_overview_workdir_label(),
             project,
-            value_width,
+            inner.width,
             theme,
         ),
         overview_field_line(
             texts::tui_sessions_overview_summary_label(),
             &title,
-            value_width,
+            inner.width,
             theme,
         ),
-        overview_usage_line(&tokens, &cost, inner.width, theme),
+        overview_field_spans_line(
+            texts::tui_sessions_overview_tokens_label(),
+            token_spans,
+            inner.width,
+            theme,
+        ),
+        overview_field_spans_line(
+            texts::tui_sessions_header_cost(),
+            cost_spans,
+            inner.width,
+            theme,
+        ),
         overview_field_line(
             texts::tui_sessions_resume_command(),
             resume_command,
-            value_width,
+            inner.width,
             theme,
         ),
     ];
@@ -410,76 +439,151 @@ fn session_usage_marker(usage: &crate::session_manager::SessionUsageSummary) -> 
     }
 }
 
-fn format_session_cost(usage: &crate::session_manager::SessionUsageSummary) -> String {
-    usage
-        .cost
-        .map(|cost| {
-            format!(
-                "{}{}",
-                session_usage_marker(usage),
-                super::usage::format_money(cost)
-            )
-        })
-        .unwrap_or_else(|| "-".to_string())
+/// Sessions pin the cost to two decimals so every row shares one decimal
+/// point; the Usage and Home surfaces keep their own magnitude-dependent
+/// precision through [`super::usage::format_money`].
+fn format_session_money(value: f64) -> String {
+    format!("${value:.2}")
 }
 
-fn format_session_tokens(usage: &crate::session_manager::SessionUsageSummary) -> String {
-    format!(
-        "{}{}",
+/// Coverage/estimate marker and the value it qualifies, kept apart so the
+/// render layer can style the marker as a quiet prefix instead of gluing it
+/// onto the number.
+fn format_session_cost(
+    usage: &crate::session_manager::SessionUsageSummary,
+) -> Option<(&'static str, String)> {
+    usage
+        .cost
+        .map(|cost| (session_usage_marker(usage), format_session_money(cost)))
+}
+
+fn format_session_tokens(
+    usage: &crate::session_manager::SessionUsageSummary,
+) -> (&'static str, String) {
+    (
         session_usage_marker(usage),
         super::usage::format_token_breakdown_compact(
             usage.input_tokens,
             usage.output_tokens,
             usage.cache_read_tokens,
             usage.cache_creation_tokens,
-        )
+        ),
     )
 }
 
-fn overview_usage_line(
-    tokens: &str,
-    cost: &str,
-    width: u16,
-    theme: &super::theme::Theme,
-) -> Line<'static> {
-    let separator = super::usage::token_breakdown_separator();
-    let suffix_width =
-        UnicodeWidthStr::width(separator).saturating_add(UnicodeWidthStr::width(cost));
-    let full_width = UnicodeWidthStr::width(tokens).saturating_add(suffix_width);
-
-    if full_width <= usize::from(width) {
-        Line::from(vec![
-            Span::raw(tokens.to_string()),
-            Span::styled(separator, Style::default().fg(theme.dim)),
-            Span::raw(cost.to_string()),
-        ])
-    } else if suffix_width < usize::from(width) {
-        // Keep Cost visible at narrow widths and spend the remaining columns
-        // on the beginning of the four-bucket token breakdown.
-        let token_width = usize::from(width).saturating_sub(suffix_width) as u16;
-        Line::from(vec![
-            Span::raw(truncate_to_display_width(tokens, token_width)),
-            Span::styled(separator, Style::default().fg(theme.dim)),
-            Span::raw(cost.to_string()),
-        ])
-    } else {
-        Line::raw(truncate_to_display_width(cost, width))
-    }
+/// How much air separates the coverage marker from the value it qualifies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MarkerSpacing {
+    /// Right-aligned table cells keep the marker glued so the column edge stays
+    /// stable regardless of whether a marker is present.
+    Glued,
+    /// Label-aligned Overview rows read as prefix + value, so the marker gets
+    /// its own column of space.
+    Spaced,
 }
 
-fn overview_field_line<'a>(
-    label: &'static str,
-    value: &'a str,
-    value_width: u16,
+fn marker_span(
+    marker: &'static str,
+    spacing: MarkerSpacing,
     theme: &super::theme::Theme,
-) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(
-            format!("{}  ", pad_to_display_width(label, 12)),
-            Style::default().fg(theme.dim),
-        ),
-        Span::raw(truncate_to_display_width(value, value_width)),
-    ])
+) -> Span<'static> {
+    let text = match spacing {
+        MarkerSpacing::Glued => marker.to_string(),
+        MarkerSpacing::Spaced => format!("{marker} "),
+    };
+    Span::styled(text, Style::default().fg(theme.dim))
+}
+
+fn unavailable_span(theme: &super::theme::Theme) -> Span<'static> {
+    Span::styled("-", Style::default().fg(theme.comment))
+}
+
+fn session_cost_spans(
+    usage: Option<&crate::session_manager::SessionUsageSummary>,
+    theme: &super::theme::Theme,
+    spacing: MarkerSpacing,
+) -> Vec<Span<'static>> {
+    let Some((marker, cost)) = usage.and_then(format_session_cost) else {
+        return vec![unavailable_span(theme)];
+    };
+    let mut spans = Vec::with_capacity(2);
+    if !marker.is_empty() {
+        spans.push(marker_span(marker, spacing, theme));
+    }
+    spans.push(Span::styled(cost, Style::default().fg(theme.ok)));
+    spans
+}
+
+fn session_token_spans(
+    usage: Option<&crate::session_manager::SessionUsageSummary>,
+    theme: &super::theme::Theme,
+) -> Vec<Span<'static>> {
+    let Some(usage) = usage else {
+        return vec![unavailable_span(theme)];
+    };
+    let (marker, tokens) = format_session_tokens(usage);
+    let mut spans = Vec::with_capacity(2);
+    if !marker.is_empty() {
+        spans.push(marker_span(marker, MarkerSpacing::Spaced, theme));
+    }
+    spans.push(Span::raw(tokens));
+    spans
+}
+
+fn overview_field_line(
+    label: &'static str,
+    value: &str,
+    pane_width: u16,
+    theme: &super::theme::Theme,
+) -> Line<'static> {
+    overview_field_spans_line(label, vec![Span::raw(value.to_string())], pane_width, theme)
+}
+
+/// One Overview row: a 12-column dim label plus a two-space gutter, then the
+/// value clipped to whatever is left of `pane_width`.
+///
+/// The value budget is derived from the rendered label instead of a fixed
+/// margin so a short label (Tokens, Cost) spends every remaining column while
+/// an over-long one (Resume Command) still cannot push the line past the pane
+/// and wrap a row out of the fixed-height block.
+fn overview_field_spans_line(
+    label: &'static str,
+    value: Vec<Span<'static>>,
+    pane_width: u16,
+    theme: &super::theme::Theme,
+) -> Line<'static> {
+    let label = format!("{}  ", pad_to_display_width(label, 12));
+    let value_width = pane_width.saturating_sub(UnicodeWidthStr::width(label.as_str()) as u16);
+    let mut spans = Vec::with_capacity(value.len() + 1);
+    spans.push(Span::styled(label, Style::default().fg(theme.dim)));
+    spans.extend(truncate_spans_to_display_width(value, value_width));
+    Line::from(spans)
+}
+
+/// Truncate a styled value to `width` display columns, spending the budget span
+/// by span so a marker prefix and its value are measured together instead of
+/// each being clipped to the full width.
+fn truncate_spans_to_display_width(spans: Vec<Span<'static>>, width: u16) -> Vec<Span<'static>> {
+    let mut remaining = width;
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let span_width = UnicodeWidthStr::width(span.content.as_ref());
+        if span_width <= usize::from(remaining) {
+            remaining -= span_width as u16;
+            out.push(span);
+            continue;
+        }
+        let style = span.style;
+        out.push(Span::styled(
+            truncate_to_display_width(span.content.as_ref(), remaining),
+            style,
+        ));
+        break;
+    }
+    out
 }
 
 fn render_session_messages(
@@ -926,30 +1030,55 @@ mod tests {
             cost_kind: SessionCostKind::Recorded,
             coverage: SessionCostCoverage::Complete,
         };
-        assert_eq!(format_session_cost(&complete), "$1.250");
-        assert!(!format_session_tokens(&complete).starts_with('≥'));
+        assert_eq!(
+            format_session_cost(&complete),
+            Some(("", "$1.25".to_string()))
+        );
+        assert_eq!(format_session_tokens(&complete).0, "");
 
         let partial = SessionUsageSummary {
             coverage: SessionCostCoverage::Partial,
             ..complete
         };
-        assert_eq!(format_session_cost(&partial), "≥$1.250");
-        assert!(format_session_tokens(&partial).starts_with('≥'));
+        assert_eq!(
+            format_session_cost(&partial),
+            Some(("≥", "$1.25".to_string()))
+        );
+        assert_eq!(format_session_tokens(&partial).0, "≥");
 
         let unknown = SessionUsageSummary {
             coverage: SessionCostCoverage::Unknown,
             ..complete
         };
-        assert_eq!(format_session_cost(&unknown), "≥$1.250");
-        assert!(format_session_tokens(&unknown).starts_with('≥'));
+        assert_eq!(
+            format_session_cost(&unknown),
+            Some(("≥", "$1.25".to_string()))
+        );
+        assert_eq!(format_session_tokens(&unknown).0, "≥");
 
         let estimated = SessionUsageSummary {
             cost_kind: SessionCostKind::Estimated,
             coverage: SessionCostCoverage::Unknown,
             ..complete
         };
-        assert_eq!(format_session_cost(&estimated), "~$1.250");
-        assert!(format_session_tokens(&estimated).starts_with('~'));
+        assert_eq!(
+            format_session_cost(&estimated),
+            Some(("~", "$1.25".to_string()))
+        );
+        assert_eq!(format_session_tokens(&estimated).0, "~");
+    }
+
+    #[test]
+    fn session_cost_keeps_two_decimals_across_magnitudes() {
+        assert_eq!(format_session_money(0.4), "$0.40");
+        assert_eq!(format_session_money(1.25), "$1.25");
+        assert_eq!(format_session_money(12.5), "$12.50");
+        assert_eq!(format_session_money(125.0), "$125.00");
+        // The widest realistic amount still fits the fixed Cost column.
+        assert!(
+            UnicodeWidthStr::width(format!("≥{}", format_session_money(999.99)).as_str())
+                <= usize::from(COST_COLUMN_WIDTH)
+        );
     }
 
     #[test]
@@ -964,8 +1093,113 @@ mod tests {
             coverage: crate::session_manager::SessionCostCoverage::Partial,
         };
 
-        assert_eq!(format_session_cost(&usage), "-");
-        assert!(format_session_tokens(&usage).contains("In: 10"));
-        assert!(format_session_tokens(&usage).starts_with('≥'));
+        assert_eq!(format_session_cost(&usage), None);
+        let (marker, tokens) = format_session_tokens(&usage);
+        assert_eq!(marker, "≥");
+        assert!(tokens.contains("In: 10"), "{tokens}");
+    }
+
+    #[test]
+    fn narrow_session_list_drops_cost_before_time_and_never_the_title() {
+        // Below the Time threshold only the flexible Title column survives.
+        assert_eq!(session_list_columns(0), (false, false));
+        assert_eq!(session_list_columns(18), (false, false));
+        // Time comes back first...
+        assert_eq!(session_list_columns(19), (true, false));
+        assert_eq!(session_list_columns(29), (true, false));
+        // ...and Cost only once the pane can hold all three.
+        assert_eq!(session_list_columns(30), (true, true));
+        assert_eq!(session_list_columns(200), (true, true));
+    }
+
+    fn test_theme() -> crate::cli::tui::theme::Theme {
+        crate::cli::tui::theme::theme_for(&crate::app_config::AppType::Claude)
+    }
+
+    fn span_texts(spans: &[Span<'static>]) -> Vec<String> {
+        spans.iter().map(|span| span.content.to_string()).collect()
+    }
+
+    #[test]
+    fn overview_usage_rows_separate_the_marker_from_the_value() {
+        use crate::session_manager::{SessionCostCoverage, SessionCostKind, SessionUsageSummary};
+
+        let theme = test_theme();
+        let complete = SessionUsageSummary {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_creation_tokens: 40,
+            cost: Some(1.25),
+            cost_kind: SessionCostKind::Recorded,
+            coverage: SessionCostCoverage::Complete,
+        };
+
+        // Complete coverage carries no marker at all.
+        let tokens = session_token_spans(Some(&complete), &theme);
+        assert_eq!(tokens.len(), 1);
+        assert!(tokens[0].content.starts_with("In: 10"), "{:?}", tokens[0]);
+        let cost = session_cost_spans(Some(&complete), &theme, MarkerSpacing::Spaced);
+        assert_eq!(span_texts(&cost), vec!["$1.25".to_string()]);
+        assert_eq!(cost[0].style.fg, Some(theme.ok));
+
+        // A lower bound gets a spaced, dim marker span of its own.
+        let partial = SessionUsageSummary {
+            coverage: SessionCostCoverage::Partial,
+            ..complete
+        };
+        let tokens = session_token_spans(Some(&partial), &theme);
+        assert_eq!(tokens[0].content, "≥ ");
+        assert_eq!(tokens[0].style.fg, Some(theme.dim));
+        assert!(tokens[1].content.starts_with("In: 10"), "{:?}", tokens[1]);
+        let cost = session_cost_spans(Some(&partial), &theme, MarkerSpacing::Spaced);
+        assert_eq!(
+            span_texts(&cost),
+            vec!["≥ ".to_string(), "$1.25".to_string()]
+        );
+        assert_eq!(cost[0].style.fg, Some(theme.dim));
+
+        // The list column keeps the marker glued to the amount.
+        let cost = session_cost_spans(Some(&partial), &theme, MarkerSpacing::Glued);
+        assert_eq!(
+            span_texts(&cost),
+            vec!["≥".to_string(), "$1.25".to_string()]
+        );
+
+        // No usage at all renders a muted placeholder on both rows.
+        let tokens = session_token_spans(None, &theme);
+        assert_eq!(span_texts(&tokens), vec!["-".to_string()]);
+        assert_eq!(tokens[0].style.fg, Some(theme.comment));
+        let cost = session_cost_spans(None, &theme, MarkerSpacing::Spaced);
+        assert_eq!(span_texts(&cost), vec!["-".to_string()]);
+        assert_eq!(cost[0].style.fg, Some(theme.comment));
+    }
+
+    #[test]
+    fn overview_rows_share_the_label_column_and_clip_the_value_only() {
+        let theme = test_theme();
+        // 14 columns of label plus an 8-column value budget.
+        let line = overview_field_spans_line(
+            "Tokens",
+            vec![
+                Span::raw("≥ ".to_string()),
+                Span::raw("In: 1.0k - Out: 2.0k".to_string()),
+            ],
+            22,
+            &theme,
+        );
+
+        // 12-column label plus the two-space gutter, exactly like every other
+        // Overview row.
+        assert!(line.spans[0].content.starts_with("Tokens"));
+        assert_eq!(UnicodeWidthStr::width(line.spans[0].content.as_ref()), 14);
+        // The marker is spent from the same budget as the value it qualifies.
+        let value: String = line.spans[1..]
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(UnicodeWidthStr::width(value.as_str()), 8);
+        assert!(value.starts_with("≥ In:"), "{value}");
+        assert!(value.ends_with('…'), "{value}");
     }
 }

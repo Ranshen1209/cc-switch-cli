@@ -1779,15 +1779,25 @@ fn tui_sessions_renders_split_detail_and_message_preview() {
     assert!(all.contains("Time"), "{all}");
     assert!(all.contains("Work Dir"), "{all}");
     assert!(all.contains("Title"), "{all}");
-    let usage_line = line_with(&all, "In: 4.8k");
-    for value in ["Out: 1.9M", "CR: 347.7M", "CW: 12.2M", "$0.420"] {
+    // Tokens and Cost each own a labelled Overview row, aligned with the rest
+    // of the pane instead of sharing one bare line.
+    let tokens_line = line_with(&all, "In: 4.8k");
+    assert!(tokens_line.contains("Tokens"), "{tokens_line}");
+    for value in ["Out: 1.9M", "CR: 347.7M"] {
         assert!(
-            usage_line.contains(value),
-            "{value} missing in {usage_line}"
+            tokens_line.contains(value),
+            "{value} missing in {tokens_line}"
         );
     }
-    assert!(all.contains("Cost"), "{all}");
-    assert!(all.contains("$0.420"), "{all}");
+    assert!(
+        !tokens_line.contains("$0.42"),
+        "the Cost value now lives on its own row: {tokens_line}"
+    );
+    let cost_line = all
+        .lines()
+        .find(|line| line.contains("Cost") && line.contains("$0.42"))
+        .unwrap_or_else(|| panic!("missing labelled Overview Cost row in:\n{all}"));
+    assert!(cost_line.contains("$0.42"), "{cost_line}");
     assert!(all.contains("Resume Command"), "{all}");
     assert!(all.contains("Refactor proxy routing"), "{all}");
     assert!(!all.contains("Tighten worker routing"), "{all}");
@@ -2213,20 +2223,36 @@ fn tui_sessions_cost_column_keeps_the_title_visible_at_eighty_columns() {
         80,
         24,
     ));
-    let session_row = line_with(&rendered, "Fix r");
+    // Title outranks every other column, so an 80-column pane spends its width
+    // on the whole Title instead of squeezing it next to Cost.
+    let session_row = line_with(&rendered, "Fix routing");
     assert!(
-        session_row.contains("Fix r") && session_row.contains("$1.250"),
-        "the 80-column session row should retain a recognizable Title and Cost: {session_row}"
+        session_row.contains("Fix routing"),
+        "the 80-column session row should retain the complete Title: {session_row}"
     );
     let header_row = line_with(&rendered, "Title");
+    let list_header = header_row
+        .split('│')
+        .find(|segment| segment.contains("Title"))
+        .unwrap_or_else(|| panic!("missing session list header in:\n{rendered}"));
     assert!(
-        header_row.contains("Time") && header_row.contains("Cost"),
-        "the standard 80-column layout should retain every session column: {header_row}"
+        list_header.contains("Time"),
+        "Time outranks Cost when the list narrows: {header_row}"
     );
-    let overview_usage = line_with(&rendered, "In:");
     assert!(
-        overview_usage.contains("In:") && overview_usage.contains("$1.250"),
-        "the narrow Overview row must keep the token breakdown and Cost together: {overview_usage}"
+        !list_header.contains("Cost"),
+        "Cost is the first column to yield: {header_row}"
+    );
+    // The exact amount stays one pane away, on its own Overview row.
+    let overview_tokens = line_with(&rendered, "In:");
+    assert!(
+        overview_tokens.contains("In:"),
+        "the Overview keeps a token breakdown even when narrow: {overview_tokens}"
+    );
+    let overview_cost = line_with(&rendered, "$1.25");
+    assert!(
+        overview_cost.contains("$1.25"),
+        "the Overview keeps the exact cost: {overview_cost}"
     );
 }
 
