@@ -47,6 +47,8 @@ struct ClaudeConfig {
     haiku_model: Option<String>,
     sonnet_model: Option<String>,
     opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +160,16 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
         println!(
             "  Opus:     {}",
             config.opus_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Fable:    {}",
+            config.fable_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Subagent: {}",
+            config
+                .subagent_model
+                .unwrap_or_else(|| "default".to_string())
         );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
@@ -1041,6 +1053,14 @@ fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
                 .map(simplify_model_name),
             opus_model: env
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
+            fable_model: env
+                .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
+            subagent_model: env
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
                 .and_then(|value| value.as_str())
                 .map(simplify_model_name),
         }

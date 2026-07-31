@@ -638,8 +638,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeModelConfig => HelpContent::new(
             texts::tui_label_claude_model_config(),
             help_lines(
-                "配置 Claude 的模型分层。在模型列按 Enter 编辑，按 Space 从 API 自动获取。Sonnet 和 Opus 可用 ←→ 移到 1M 列并按 Enter 切换；1M 只向 Claude Code 声明百万上下文能力，不会检测上游是否真正支持。底层继续使用模型 ID 的 [1M] 后缀，以兼容现有配置。次要快捷键 a 可将当前模型填充到全部角色。",
-                "Configures Claude model tiers. In the model column, press Enter to edit or Space to fetch from the API. For Sonnet and Opus, use ←→ to focus the 1M column and Enter to toggle it. 1M only declares million-token context support to Claude Code; it does not detect upstream capability. The existing [1M] model-ID suffix remains the storage format. The secondary a shortcut fills every role from the current model.",
+                "配置 Claude 的模型分层。在模型列按 Enter 编辑，按 Space 从 API 自动获取。Sonnet、Opus、Fable 和 Subagent 可用 ←→ 移到 1M 列并按 Enter 切换；1M 只向 Claude Code 声明百万上下文能力，不会检测上游是否真正支持。Fable 留空时依次回退到 Opus 和默认模型；Subagent 控制后台代理任务使用的模型。底层继续使用模型 ID 的 [1M] 后缀，以兼容现有配置。次要快捷键 a 可将当前模型填充到全部角色。",
+                "Configures Claude model tiers. In the model column, press Enter to edit or Space to fetch from the API. Sonnet, Opus, Fable, and Subagent support the 1M column; use ←→ to focus it and Enter to toggle. 1M only declares million-token context support to Claude Code and does not detect upstream capability. An unset Fable falls back to Opus and then the default model; Subagent controls the model used by background agents. The existing [1M] model-ID suffix remains the storage format. The secondary a shortcut fills every role from the current model.",
             ),
         ),
         ProviderAddField::ClaudeApiFormat if matches!(app_type, AppType::Codex) => {
@@ -682,8 +682,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeFallbackModel => HelpContent::new(
             texts::tui_label_claude_fallback_model(),
             help_lines(
-                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。",
-                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints.",
+                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。可在模型名末尾追加 [1M] 声明百万上下文支持；此标记不会验证上游能力。",
+                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints. Append [1M] to declare million-token context support; this marker does not verify upstream capability.",
             ),
         ),
         ProviderAddField::ClaudeQuickConfig => HelpContent::new(

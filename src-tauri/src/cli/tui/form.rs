@@ -47,6 +47,7 @@ pub(crate) use provider_state::{
 pub(crate) use s3::{S3Preset, S3SyncField, S3SyncFormState};
 pub(crate) use webdav::{WebDavSyncField, WebDavSyncFormState};
 
+pub(crate) use crate::claude_model_config::ClaudeModelRole;
 pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE};
 pub(crate) use crate::openclaw_config::{
     OPENCLAW_API_PROTOCOLS, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
@@ -528,7 +529,8 @@ pub struct ProviderAddFormState {
     pub codex_preview_section: CodexPreviewSection,
     pub codex_auth_scroll: usize,
     pub codex_config_scroll: usize,
-    claude_model_config_touched: bool,
+    claude_fallback_model_touched: bool,
+    claude_model_role_touched: [bool; ClaudeModelRole::COUNT],
 
     pub claude_api_key: TextInput,
     pub claude_api_key_field: ClaudeApiKeyField,
@@ -538,8 +540,12 @@ pub struct ProviderAddFormState {
     pub claude_haiku_model: TextInput,
     pub claude_sonnet_model: TextInput,
     pub claude_opus_model: TextInput,
+    pub claude_fable_model: TextInput,
+    pub claude_subagent_model: TextInput,
     claude_sonnet_one_m: bool,
     claude_opus_one_m: bool,
+    claude_fable_one_m: bool,
+    claude_subagent_one_m: bool,
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
     pub claude_teammates: bool,

@@ -1790,7 +1790,7 @@ impl App {
         // The fallback model lives outside the model-mapping sub-page, so editing it
         // here must still mark the model config touched to persist ANTHROPIC_MODEL.
         if changed && selected == ProviderAddField::ClaudeFallbackModel {
-            provider.mark_claude_model_config_touched();
+            provider.mark_claude_fallback_model_touched();
         }
 
         if let Some(message) = validate_provider_inline_field(provider, selected) {

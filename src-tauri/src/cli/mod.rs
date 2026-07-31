@@ -1015,6 +1015,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_add_claude_role_model_options() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "add",
+            "--name",
+            "roles",
+            "--base-url",
+            "https://api.example.com",
+            "--api-key",
+            "sk-test",
+            "--fable-model",
+            "fable[1M]",
+            "--subagent-model",
+            "subagent[1M]",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
+                fable_model,
+                subagent_model,
+                ..
+            })) => {
+                assert_eq!(fable_model.as_deref(), Some("fable[1M]"));
+                assert_eq!(subagent_model.as_deref(), Some("subagent[1M]"));
+            }
+            _ => panic!("expected provider add command with Claude role models"),
+        }
+    }
+
+    #[test]
     fn parses_provider_duplicate_edit_option() {
         let cli = Cli::parse_from(["cc-switch", "provider", "duplicate", "demo", "--edit"]);
 

@@ -11,8 +11,8 @@ use crate::services::skill::SyncMethod;
 
 use super::data::UiData;
 use super::form::{
-    ClaudeModelPickerColumn, CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType,
-    McpAddField, McpAddFormState, McpKeyValueKind, McpTransport, PromptMetaField,
+    ClaudeModelPickerColumn, ClaudeModelRole, CodexWireApi, FormFocus, FormMode, FormState,
+    GeminiAuthType, McpAddField, McpAddFormState, McpKeyValueKind, McpTransport, PromptMetaField,
     PromptMetaFormState, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};

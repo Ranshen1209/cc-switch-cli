@@ -304,6 +304,8 @@ fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     form.claude_haiku_model.set("haiku-model");
     form.set_claude_model_from_config(1, "sonnet-model[1M]");
     form.set_claude_model_from_config(2, "opus-model");
+    form.set_claude_model_from_config(3, "fable-model[1M]");
+    form.set_claude_model_from_config(4, "subagent-model");
     app.form = Some(FormState::ProviderAdd(form));
     app.overlay = Overlay::ClaudeModelPicker {
         selected: 1,
@@ -326,6 +328,8 @@ fn claude_model_picker_renders_role_scoped_one_m_controls_and_dynamic_keys() {
     assert!(one_m.contains("Default Haiku Model"), "{one_m}");
     assert!(one_m.contains("Default Sonnet Model"), "{one_m}");
     assert!(one_m.contains("Default Opus Model"), "{one_m}");
+    assert!(one_m.contains("Default Fable Model"), "{one_m}");
+    assert!(one_m.contains("Subagent Model"), "{one_m}");
     assert!(!one_m.contains("Reasoning Model"), "{one_m}");
     assert!(one_m.contains("switch column"), "{one_m}");
     assert!(one_m.contains("toggle"), "{one_m}");
@@ -3034,6 +3038,7 @@ fn codex_provider_form_renders_toml_values_in_plaintext() {
             )
         }
     });
+    form.codex_model.set("gpt-5.4");
     app.form = Some(FormState::ProviderAdd(form));
 
     let all = all_text(&render_with_size(

@@ -14096,6 +14096,23 @@ mod tests {
                 editing: false,
             }
         ));
+
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 2,
+            column: ClaudeModelPickerColumn::Model,
+            editing: false,
+        };
+        app.on_key(key(KeyCode::Down), &data());
+        app.on_key(key(KeyCode::Down), &data());
+        app.on_key(key(KeyCode::Right), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 4,
+                column: ClaudeModelPickerColumn::OneM,
+                editing: false,
+            }
+        ));
     }
 
     #[test]

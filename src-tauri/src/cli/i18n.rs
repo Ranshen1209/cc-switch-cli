@@ -3636,11 +3636,27 @@ pub mod texts {
         }
     }
 
+    pub fn tui_claude_default_fable_model_label() -> &'static str {
+        if is_chinese() {
+            "默认 Fable 模型"
+        } else {
+            "Default Fable Model"
+        }
+    }
+
+    pub fn tui_claude_subagent_model_label() -> &'static str {
+        if is_chinese() {
+            "Subagent 模型"
+        } else {
+            "Subagent Model"
+        }
+    }
+
     pub fn tui_claude_model_config_summary(configured_count: usize) -> String {
         if is_chinese() {
-            format!("已配置 {configured_count}/3")
+            format!("已配置 {configured_count}/5")
         } else {
-            format!("Configured {configured_count}/3")
+            format!("Configured {configured_count}/5")
         }
     }
 
@@ -3673,6 +3689,8 @@ pub mod texts {
             0 => tui_claude_default_haiku_model_label(),
             1 => tui_claude_default_sonnet_model_label(),
             2 => tui_claude_default_opus_model_label(),
+            3 => tui_claude_default_fable_model_label(),
+            4 => tui_claude_subagent_model_label(),
             _ => "",
         }
     }
@@ -10748,6 +10766,38 @@ pub mod texts {
             "如 claude-3-opus-20240229"
         } else {
             "e.g., claude-3-opus-20240229"
+        }
+    }
+
+    pub fn model_fable_label() -> &'static str {
+        if is_chinese() {
+            "Fable 模型："
+        } else {
+            "Fable Model:"
+        }
+    }
+
+    pub fn model_fable_placeholder() -> &'static str {
+        if is_chinese() {
+            "如 claude-fable-5"
+        } else {
+            "e.g., claude-fable-5"
+        }
+    }
+
+    pub fn model_subagent_label() -> &'static str {
+        if is_chinese() {
+            "Subagent 模型："
+        } else {
+            "Subagent Model:"
+        }
+    }
+
+    pub fn model_subagent_placeholder() -> &'static str {
+        if is_chinese() {
+            "如 claude-haiku-4-5-20251001"
+        } else {
+            "e.g., claude-haiku-4-5-20251001"
         }
     }
 
