@@ -4491,27 +4491,29 @@ pub enum LoadingKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpEnvEditorField {
+pub enum McpKeyValueEditorField {
     Key,
     Value,
 }
 
 #[derive(Debug, Clone)]
-pub struct McpEnvEntryEditorState {
+pub struct McpKeyValueEntryEditorState {
+    pub kind: crate::cli::tui::form::McpKeyValueKind,
     pub row: Option<usize>,
     pub return_selected: usize,
-    pub field: McpEnvEditorField,
+    pub return_reveal_values: bool,
+    pub field: McpKeyValueEditorField,
     pub key: crate::cli::tui::form::TextInput,
     pub value: crate::cli::tui::form::TextInput,
 }
 
-impl McpEnvEntryEditorState {
+impl McpKeyValueEntryEditorState {
     pub fn key_active(&self) -> bool {
-        matches!(self.field, McpEnvEditorField::Key)
+        matches!(self.field, McpKeyValueEditorField::Key)
     }
 
     pub fn value_active(&self) -> bool {
-        matches!(self.field, McpEnvEditorField::Value)
+        matches!(self.field, McpKeyValueEditorField::Value)
     }
 
     pub fn is_editing(&self) -> bool {
@@ -4636,13 +4638,15 @@ pub enum Overlay {
     SkillsSyncMethodPicker {
         selected: usize,
     },
-    McpEnvPicker {
+    McpKeyValuePicker {
+        kind: crate::cli::tui::form::McpKeyValueKind,
         selected: usize,
+        reveal_values: bool,
     },
     McpTypePicker {
         selected: usize,
     },
-    McpEnvEntryEditor(McpEnvEntryEditorState),
+    McpKeyValueEntryEditor(McpKeyValueEntryEditorState),
     Loading {
         kind: LoadingKind,
         title: String,
@@ -4800,7 +4804,7 @@ impl Overlay {
                 | Overlay::SkillsAppsPicker { .. }
                 | Overlay::SkillsImportPicker { .. }
                 | Overlay::SkillsSyncMethodPicker { .. }
-                | Overlay::McpEnvPicker { .. }
+                | Overlay::McpKeyValuePicker { .. }
                 | Overlay::McpTypePicker { .. }
                 | Overlay::SpeedtestResult { .. }
                 | Overlay::StreamCheckResult { .. }
@@ -4818,7 +4822,7 @@ impl Overlay {
             Overlay::HermesModelsPicker { editing } => *editing,
             Overlay::ModelFetchPicker { .. } => true,
             Overlay::SessionProjectPicker(_) => true,
-            Overlay::McpEnvEntryEditor(editor) => editor.is_editing(),
+            Overlay::McpKeyValueEntryEditor(editor) => editor.is_editing(),
             Overlay::None
             | Overlay::Help(_)
             | Overlay::Confirm(_)
@@ -4842,7 +4846,7 @@ impl Overlay {
             | Overlay::SkillsAppsPicker { .. }
             | Overlay::SkillsImportPicker { .. }
             | Overlay::SkillsSyncMethodPicker { .. }
-            | Overlay::McpEnvPicker { .. }
+            | Overlay::McpKeyValuePicker { .. }
             | Overlay::McpTypePicker { .. }
             | Overlay::Loading { .. }
             | Overlay::SpeedtestRunning { .. }

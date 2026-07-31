@@ -35,9 +35,9 @@ pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
 pub(crate) use provider_request_overrides::{
     format_local_proxy_body_override, format_local_proxy_header_overrides,
-    normalize_local_proxy_header_overrides, parse_local_proxy_body_override,
-    parse_local_proxy_header_overrides, user_agent_picker_option_count,
-    user_agent_picker_selection, USER_AGENT_PICKER_CUSTOM_INDEX,
+    is_valid_http_header_name, is_valid_http_header_value, normalize_local_proxy_header_overrides,
+    parse_local_proxy_body_override, parse_local_proxy_header_overrides,
+    user_agent_picker_option_count, user_agent_picker_selection, USER_AGENT_PICKER_CUSTOM_INDEX,
     USER_AGENT_PICKER_NO_OVERRIDE_INDEX, USER_AGENT_PICKER_PRESET_OFFSET, USER_AGENT_PRESETS,
 };
 pub(crate) use provider_state::resolve_provider_id_for_submit;
@@ -464,6 +464,7 @@ pub enum McpAddField {
     Args,
     Url,
     Env,
+    Headers,
     AppClaude,
     AppCodex,
     AppGemini,
@@ -485,8 +486,14 @@ pub enum McpTransport {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpKeyValueKind {
+    Env,
+    Headers,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpEnvVarRow {
+pub struct McpKeyValueRow {
     pub key: String,
     pub value: String,
 }
@@ -627,7 +634,8 @@ struct McpFormSnapshot {
     command: String,
     args_state: McpArgsState,
     url: String,
-    env_rows: Vec<McpEnvVarRow>,
+    env_rows: Vec<McpKeyValueRow>,
+    header_rows: Vec<McpKeyValueRow>,
     apps: McpApps,
 }
 
@@ -647,7 +655,8 @@ pub struct McpAddFormState {
     pub args: TextInput,
     args_state: McpArgsState,
     pub url: TextInput,
-    pub env_rows: Vec<McpEnvVarRow>,
+    pub env_rows: Vec<McpKeyValueRow>,
+    pub header_rows: Vec<McpKeyValueRow>,
     pub apps: McpApps,
     pub json_scroll: usize,
     initial_snapshot: Option<McpFormSnapshot>,

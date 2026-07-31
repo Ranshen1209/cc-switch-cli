@@ -6,8 +6,8 @@ use super::app::{App, Focus, Overlay, SettingsItem};
 use super::data::UiData;
 use super::form::{
     CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, FormFocus, FormMode,
-    FormState, LocalProxySettingsField, ProviderAddField, ProviderFormPage, S3SyncField,
-    UsageQueryField, UsageQueryTemplate, WebDavSyncField,
+    FormState, LocalProxySettingsField, McpAddField, McpKeyValueKind, ProviderAddField,
+    ProviderFormPage, S3SyncField, UsageQueryField, UsageQueryTemplate, WebDavSyncField,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +86,9 @@ enum HelpTarget {
     WebDavField {
         field: WebDavSyncField,
     },
+    McpField {
+        field: McpAddField,
+    },
     Empty,
 }
 
@@ -118,6 +121,18 @@ fn current_help_target(app: &App) -> HelpTarget {
             }
             Overlay::FailoverQueueManager { .. } => HelpTarget::FailoverQueue,
             Overlay::SessionProjectPicker(_) => HelpTarget::Sessions,
+            Overlay::McpKeyValuePicker { kind, .. } => HelpTarget::McpField {
+                field: match kind {
+                    McpKeyValueKind::Env => McpAddField::Env,
+                    McpKeyValueKind::Headers => McpAddField::Headers,
+                },
+            },
+            Overlay::McpKeyValueEntryEditor(editor) => HelpTarget::McpField {
+                field: match editor.kind {
+                    McpKeyValueKind::Env => McpAddField::Env,
+                    McpKeyValueKind::Headers => McpAddField::Headers,
+                },
+            },
             Overlay::S3PresetPicker { .. } => HelpTarget::S3Field {
                 field: S3SyncField::Preset,
             },
@@ -155,6 +170,22 @@ fn current_help_target(app: &App) -> HelpTarget {
     if let Some(FormState::WebDavSync(form)) = app.form.as_ref() {
         return HelpTarget::WebDavField {
             field: form.selected_field(),
+        };
+    }
+
+    if let Some(FormState::McpAdd(form)) = app.form.as_ref() {
+        return match form.focus {
+            FormFocus::Fields => {
+                let fields = form.fields();
+                fields
+                    .get(form.field_idx.min(fields.len().saturating_sub(1)))
+                    .copied()
+                    .map_or(HelpTarget::Global, |field| match field {
+                        McpAddField::Env | McpAddField::Headers => HelpTarget::McpField { field },
+                        _ => HelpTarget::Global,
+                    })
+            }
+            _ => HelpTarget::Global,
         };
     }
 
@@ -324,7 +355,28 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         ),
         HelpTarget::S3Field { field } => s3_field_help(field),
         HelpTarget::WebDavField { field } => webdav_field_help(field),
+        HelpTarget::McpField { field } => mcp_field_help(field),
         HelpTarget::Empty => HelpContent::empty(),
+    }
+}
+
+fn mcp_field_help(field: McpAddField) -> HelpContent {
+    match field {
+        McpAddField::Headers => HelpContent::new(
+            texts::tui_label_headers(),
+            help_lines(
+                "为 HTTP/SSE MCP 请求配置静态 HTTP Headers，例如 `Authorization: Bearer <token>` 或 `X-API-Key`。列表和 JSON 预览默认隐藏值；进入单项编辑时会显示原值。\nHeaders 保存在 cc-switch 的统一 MCP 配置中，并投影到所选应用。Codex 使用 `http_headers`，其余受支持应用使用 `headers`。",
+                "Configure static HTTP headers for HTTP/SSE MCP requests, such as `Authorization: Bearer <token>` or `X-API-Key`. Values are hidden in the list and JSON preview by default; opening an entry for editing shows its value.\nHeaders are stored in cc-switch's unified MCP config and projected to selected apps. Codex uses `http_headers`; other supported apps use `headers`.",
+            ),
+        ),
+        McpAddField::Env => HelpContent::new(
+            texts::tui_label_env(),
+            help_lines(
+                "为 stdio MCP 进程设置环境变量。环境变量名大小写敏感，并按名称排序保存。",
+                "Set environment variables for the stdio MCP process. Names are case-sensitive and saved in sorted order.",
+            ),
+        ),
+        _ => HelpContent::empty(),
     }
 }
 

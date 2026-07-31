@@ -31,8 +31,8 @@ use crate::{
             UsageSnapshot, UsageSummarySnapshot, UsageTrendBucket,
         },
         form::{
-            ClaudeModelPickerColumn, FormFocus, FormState, PromptMetaFormState, ProviderAddField,
-            TextInput, UsageQueryField,
+            ClaudeModelPickerColumn, FormFocus, FormState, McpKeyValueKind, PromptMetaFormState,
+            ProviderAddField, TextInput, UsageQueryField,
         },
         route::{NavItem, Route},
         theme::theme_for,
@@ -492,7 +492,7 @@ fn mcp_preview_shows_environment_values_in_plaintext() {
     form.id.set("server");
     form.name.set("Server");
     form.command.set("node");
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: secret.to_string(),
     });
@@ -510,7 +510,7 @@ fn mcp_preview_shows_environment_values_in_plaintext() {
 }
 
 #[test]
-fn mcp_preview_shows_custom_header_values_in_plaintext() {
+fn mcp_preview_masks_custom_header_values() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
     let _no_color = EnvGuard::remove("NO_COLOR");
@@ -547,10 +547,54 @@ fn mcp_preview_shows_custom_header_values_in_plaintext() {
         160,
         40,
     ));
-    assert!(all.contains(secret), "{all}");
-    assert!(all.contains("safe-but-hidden-too"), "{all}");
+    assert!(!all.contains(secret), "{all}");
+    assert!(!all.contains("safe-but-hidden-too"), "{all}");
     assert!(all.contains("X-Custom-Auth"), "{all}");
-    assert!(!all.contains("[redacted]"), "{all}");
+    assert!(all.contains("User-Agent"), "{all}");
+    assert!(all.contains("********"), "{all}");
+}
+
+#[test]
+fn mcp_preview_masks_legacy_codex_http_header_values() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "legacy-http-header-super-secret";
+    let server = crate::app_config::McpServer {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://example.test/mcp",
+            "http_headers": {
+                "Authorization": secret
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+    let mut form = crate::cli::tui::form::McpAddFormState::from_server(&server);
+    form.focus = FormFocus::JsonPreview;
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let all = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(all.contains("Authorization"), "{all}");
+    assert!(all.contains("********"), "{all}");
+    assert!(!all.contains(secret), "{all}");
+    assert!(!all.contains("http_headers"), "{all}");
 }
 
 #[test]
@@ -638,7 +682,7 @@ fn mcp_plaintext_preview_never_mutates_the_serialized_form_payload() {
         "--api-key".to_string(),
         "persistence-secret".to_string(),
     ]);
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: "environment-secret".to_string(),
     });
@@ -669,12 +713,16 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
     app.route = Route::Mcp;
     app.focus = Focus::Content;
     let mut form = crate::cli::tui::form::McpAddFormState::new();
-    form.env_rows.push(crate::cli::tui::form::McpEnvVarRow {
+    form.env_rows.push(crate::cli::tui::form::McpKeyValueRow {
         key: "CUSTOM_VALUE".to_string(),
         value: secret.to_string(),
     });
     app.form = Some(FormState::McpAdd(form));
-    app.overlay = Overlay::McpEnvPicker { selected: 0 };
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Env,
+        selected: 0,
+        reveal_values: false,
+    };
 
     let all = all_text(&render_with_size(
         &app,
@@ -688,6 +736,91 @@ fn mcp_env_picker_renders_environment_values_in_plaintext() {
 }
 
 #[test]
+fn mcp_headers_picker_masks_values_until_explicitly_revealed() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "Bearer picker-super-secret";
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.header_rows
+        .push(crate::cli::tui::form::McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: secret.to_string(),
+        });
+    app.form = Some(FormState::McpAdd(form));
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Headers,
+        selected: 0,
+        reveal_values: false,
+    };
+
+    let masked = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(masked.contains("Authorization"), "{masked}");
+    assert!(masked.contains("********"), "{masked}");
+    assert!(!masked.contains(secret), "{masked}");
+    assert!(masked.contains("v show"), "{masked}");
+
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Headers,
+        selected: 0,
+        reveal_values: true,
+    };
+    let revealed = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        100,
+        35,
+    ));
+    assert!(revealed.contains(secret), "{revealed}");
+}
+
+#[test]
+fn mcp_remote_json_preview_masks_header_values_without_mutating_payload() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let secret = "Bearer preview-super-secret";
+    let mut form = crate::cli::tui::form::McpAddFormState::new();
+    form.focus = FormFocus::JsonPreview;
+    form.server_type = crate::cli::tui::form::McpTransport::Http;
+    form.url.set("https://example.com/mcp");
+    form.header_rows
+        .push(crate::cli::tui::form::McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: secret.to_string(),
+        });
+    assert_eq!(
+        form.to_mcp_server_json_value()["server"]["headers"]["Authorization"],
+        secret
+    );
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Mcp;
+    app.focus = Focus::Content;
+    app.form = Some(FormState::McpAdd(form));
+
+    let preview = all_text(&render_with_size(
+        &app,
+        &minimal_data(&app.app_type),
+        160,
+        40,
+    ));
+    assert!(preview.contains("Authorization"), "{preview}");
+    assert!(preview.contains("********"), "{preview}");
+    assert!(!preview.contains(secret), "{preview}");
+}
+
+#[test]
 fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);
@@ -696,7 +829,7 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     let selected = 9_999usize;
     let mut form = crate::cli::tui::form::McpAddFormState::new();
     form.env_rows = (0..10_000)
-        .map(|index| crate::cli::tui::form::McpEnvVarRow {
+        .map(|index| crate::cli::tui::form::McpKeyValueRow {
             key: format!("ENV-{index:05}"),
             value: format!("secret-{index}"),
         })
@@ -707,7 +840,11 @@ fn mcp_env_picker_materializes_only_the_selected_large_collection_window() {
     app.route = Route::Mcp;
     app.focus = Focus::Content;
     app.form = Some(FormState::McpAdd(form));
-    app.overlay = Overlay::McpEnvPicker { selected };
+    app.overlay = Overlay::McpKeyValuePicker {
+        kind: McpKeyValueKind::Env,
+        selected,
+        reveal_values: false,
+    };
 
     let all = all_text(&render_with_size(
         &app,
@@ -734,13 +871,16 @@ fn mcp_env_value_editor_shows_the_active_value_in_plaintext() {
     app.form = Some(FormState::McpAdd(
         crate::cli::tui::form::McpAddFormState::new(),
     ));
-    app.overlay = Overlay::McpEnvEntryEditor(crate::cli::tui::app::McpEnvEntryEditorState {
-        row: None,
-        return_selected: 0,
-        field: crate::cli::tui::app::McpEnvEditorField::Value,
-        key: TextInput::new("CUSTOM_VALUE"),
-        value: TextInput::new(secret),
-    });
+    app.overlay =
+        Overlay::McpKeyValueEntryEditor(crate::cli::tui::app::McpKeyValueEntryEditorState {
+            kind: McpKeyValueKind::Env,
+            row: None,
+            return_selected: 0,
+            return_reveal_values: false,
+            field: crate::cli::tui::app::McpKeyValueEditorField::Value,
+            key: TextInput::new("CUSTOM_VALUE"),
+            value: TextInput::new(secret),
+        });
 
     let all = all_text(&render_with_size(
         &app,

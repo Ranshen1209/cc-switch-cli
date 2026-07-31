@@ -3070,7 +3070,11 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_entry_count(count: usize) -> String {
+    pub fn tui_label_headers() -> &'static str {
+        "Headers"
+    }
+
+    pub fn tui_mcp_key_value_entry_count(count: usize) -> String {
         if is_chinese() {
             format!("{count} 项")
         } else if count == 1 {
@@ -3112,7 +3116,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_key_label() -> &'static str {
+    pub fn tui_mcp_key_label() -> &'static str {
         if is_chinese() {
             "键"
         } else {
@@ -3120,7 +3124,7 @@ pub mod texts {
         }
     }
 
-    pub fn tui_mcp_env_value_label() -> &'static str {
+    pub fn tui_mcp_value_label() -> &'static str {
         if is_chinese() {
             "值"
         } else {
@@ -7432,9 +7436,37 @@ pub mod texts {
 
     pub fn tui_mcp_env_empty_state() -> &'static str {
         if is_chinese() {
-            "暂无环境变量，按 a 新增。"
+            "暂无环境变量。"
         } else {
-            "No env entries yet. Press a to add one."
+            "No env entries yet."
+        }
+    }
+
+    pub fn tui_mcp_headers_title() -> &'static str {
+        "MCP Headers"
+    }
+
+    pub fn tui_mcp_headers_add_entry_title() -> &'static str {
+        if is_chinese() {
+            "新增 Header"
+        } else {
+            "Add Header"
+        }
+    }
+
+    pub fn tui_mcp_headers_edit_entry_title() -> &'static str {
+        if is_chinese() {
+            "编辑 Header"
+        } else {
+            "Edit Header"
+        }
+    }
+
+    pub fn tui_mcp_headers_empty_state() -> &'static str {
+        if is_chinese() {
+            "暂无 Headers。"
+        } else {
+            "No headers yet."
         }
     }
 
@@ -7805,6 +7837,22 @@ pub mod texts {
             format!("环境变量 Key '{}' 已存在。", key)
         } else {
             format!("Env key '{key}' already exists.")
+        }
+    }
+
+    pub fn tui_toast_mcp_header_key_empty() -> &'static str {
+        if is_chinese() {
+            "Header 名称不能为空。"
+        } else {
+            "Header name cannot be empty."
+        }
+    }
+
+    pub fn tui_toast_mcp_header_duplicate_key(key: &str) -> String {
+        if is_chinese() {
+            format!("Header '{}' 已存在。", key)
+        } else {
+            format!("Header '{key}' already exists.")
         }
     }
 
@@ -12975,6 +13023,14 @@ pub mod texts {
             "隐藏"
         } else {
             "hide"
+        }
+    }
+
+    pub fn tui_key_show() -> &'static str {
+        if is_chinese() {
+            "显示"
+        } else {
+            "show"
         }
     }
 

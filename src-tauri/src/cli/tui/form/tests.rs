@@ -3646,11 +3646,11 @@ fn mcp_env_form_restores_sorted_rows() {
     assert_eq!(
         form.env_rows,
         vec![
-            McpEnvVarRow {
+            McpKeyValueRow {
                 key: "A_TOKEN".to_string(),
                 value: "".to_string(),
             },
-            McpEnvVarRow {
+            McpKeyValueRow {
                 key: "Z_TOKEN".to_string(),
                 value: "tail".to_string(),
             },
@@ -3665,11 +3665,11 @@ fn mcp_env_form_serializes_rows_and_skips_empty_object() {
     form.name.set("Server One");
     form.command.set("npx");
     form.env_rows = vec![
-        McpEnvVarRow {
+        McpKeyValueRow {
             key: "API_KEY".to_string(),
             value: "secret".to_string(),
         },
-        McpEnvVarRow {
+        McpKeyValueRow {
             key: "PROJECT_ROOT".to_string(),
             value: "".to_string(),
         },
@@ -3690,24 +3690,27 @@ fn mcp_env_form_serializes_rows_and_skips_empty_object() {
 #[test]
 fn mcp_env_form_summary_uses_none_one_and_many_copy() {
     let mut form = McpAddFormState::new();
-    assert_eq!(form.env_summary(), crate::cli::i18n::texts::none());
+    assert_eq!(
+        form.key_value_summary(McpKeyValueKind::Env),
+        crate::cli::i18n::texts::none()
+    );
 
-    form.env_rows.push(McpEnvVarRow {
+    form.env_rows.push(McpKeyValueRow {
         key: "API_KEY".to_string(),
         value: "secret".to_string(),
     });
     assert_eq!(
-        form.env_summary(),
-        crate::cli::i18n::texts::tui_mcp_env_entry_count(1)
+        form.key_value_summary(McpKeyValueKind::Env),
+        crate::cli::i18n::texts::tui_mcp_key_value_entry_count(1)
     );
 
-    form.env_rows.push(McpEnvVarRow {
+    form.env_rows.push(McpKeyValueRow {
         key: "PROJECT_ROOT".to_string(),
         value: "".to_string(),
     });
     assert_eq!(
-        form.env_summary(),
-        crate::cli::i18n::texts::tui_mcp_env_entry_count(2)
+        form.key_value_summary(McpKeyValueKind::Env),
+        crate::cli::i18n::texts::tui_mcp_key_value_entry_count(2)
     );
 }
 
@@ -3748,11 +3751,27 @@ fn mcp_http_form_replaces_stdio_fields_with_url() {
     let fields = form.fields();
     assert!(fields.contains(&McpAddField::Type));
     assert!(fields.contains(&McpAddField::Url));
+    assert!(fields.contains(&McpAddField::Headers));
     assert!(!fields.contains(&McpAddField::Command));
     assert!(!fields.contains(&McpAddField::Args));
     assert!(!fields.contains(&McpAddField::Env));
     assert!(fields.contains(&McpAddField::AppOpenCode));
     assert!(fields.contains(&McpAddField::AppHermes));
+
+    let url_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Url)
+        .expect("URL field");
+    let headers_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::Headers)
+        .expect("Headers field");
+    let first_app_idx = fields
+        .iter()
+        .position(|field| *field == McpAddField::AppClaude)
+        .expect("first app field");
+    assert!(url_idx < headers_idx && headers_idx < first_app_idx);
+    assert!(form.input(McpAddField::Headers).is_none());
 }
 
 #[test]
@@ -3777,6 +3796,13 @@ fn mcp_form_restores_remote_server_type_and_url() {
     let form = McpAddFormState::from_server(&server);
     assert_eq!(form.server_type, McpTransport::Http);
     assert_eq!(form.url.value, "https://docs.langchain.com/mcp");
+    assert_eq!(
+        form.header_rows,
+        vec![McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer token".to_string(),
+        }]
+    );
 
     let roundtrip = form.to_mcp_server_json_value();
     assert_eq!(roundtrip["server"]["type"], "http");
@@ -3784,6 +3810,78 @@ fn mcp_form_restores_remote_server_type_and_url() {
     assert_eq!(
         roundtrip["server"]["headers"]["Authorization"],
         "Bearer token"
+    );
+}
+
+#[test]
+fn mcp_http_form_serializes_header_rows_and_omits_empty_headers() {
+    let mut form = McpAddFormState::new();
+    form.id.set("remote");
+    form.name.set("Remote");
+    form.server_type = McpTransport::Http;
+    form.url.set("https://example.com/mcp");
+    form.header_rows = vec![
+        McpKeyValueRow {
+            key: "X-Workspace".to_string(),
+            value: "team-a".to_string(),
+        },
+        McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer exact-token".to_string(),
+        },
+    ];
+
+    let saved = form.to_mcp_server_json_value();
+    assert_eq!(
+        saved["server"]["headers"]["Authorization"],
+        "Bearer exact-token"
+    );
+    assert_eq!(saved["server"]["headers"]["X-Workspace"], "team-a");
+
+    form.header_rows.clear();
+    let saved = form.to_mcp_server_json_value();
+    assert!(
+        saved["server"].get("headers").is_none(),
+        "empty header rows should remove server.headers"
+    );
+}
+
+#[test]
+fn mcp_http_form_canonicalizes_legacy_codex_http_headers() {
+    let server = crate::app_config::McpServer {
+        id: "remote".to_string(),
+        name: "Remote".to_string(),
+        server: json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "http_headers": {
+                "Authorization": "Bearer legacy-token"
+            }
+        }),
+        apps: crate::app_config::McpApps::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: Vec::new(),
+    };
+
+    let form = McpAddFormState::from_server(&server);
+    assert_eq!(
+        form.header_rows,
+        vec![McpKeyValueRow {
+            key: "Authorization".to_string(),
+            value: "Bearer legacy-token".to_string(),
+        }]
+    );
+
+    let saved = form.to_mcp_server_json_value();
+    assert_eq!(
+        saved["server"]["headers"]["Authorization"],
+        "Bearer legacy-token"
+    );
+    assert!(
+        saved["server"].get("http_headers").is_none(),
+        "TUI save must use the unified headers key"
     );
 }
 
@@ -3881,7 +3979,26 @@ fn mcp_add_form_has_unsaved_changes_after_env_edit() {
     let mut form = McpAddFormState::new();
     assert!(!form.has_unsaved_changes());
 
-    form.upsert_env_row(None, "API_KEY".to_string(), "secret".to_string());
+    form.upsert_key_value_row(
+        McpKeyValueKind::Env,
+        None,
+        "API_KEY".to_string(),
+        "secret".to_string(),
+    );
+    assert!(form.has_unsaved_changes());
+}
+
+#[test]
+fn mcp_add_form_has_unsaved_changes_after_header_edit() {
+    let mut form = McpAddFormState::new();
+    assert!(!form.has_unsaved_changes());
+
+    form.upsert_key_value_row(
+        McpKeyValueKind::Headers,
+        None,
+        "Authorization".to_string(),
+        "Bearer secret".to_string(),
+    );
     assert!(form.has_unsaved_changes());
 }
 

@@ -263,19 +263,27 @@ pub(crate) fn render_overlay(
                 *selected,
             )
         }
-        Overlay::McpEnvPicker { selected } => super::mcp_env::render_mcp_env_picker_overlay(
+        Overlay::McpKeyValuePicker {
+            kind,
+            selected,
+            reveal_values,
+        } => super::mcp_key_value::render_mcp_key_value_picker_overlay(
             frame,
             app,
             content_area,
             theme,
+            *kind,
             *selected,
+            *reveal_values,
         ),
-        Overlay::McpEnvEntryEditor(_) => super::mcp_env::render_mcp_env_entry_editor_overlay(
-            frame,
-            content_area,
-            theme,
-            &app.overlay,
-        ),
+        Overlay::McpKeyValueEntryEditor(_) => {
+            super::mcp_key_value::render_mcp_key_value_entry_editor_overlay(
+                frame,
+                content_area,
+                theme,
+                &app.overlay,
+            )
+        }
         Overlay::Loading {
             kind,
             title,

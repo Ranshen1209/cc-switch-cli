@@ -186,10 +186,18 @@ impl App {
                             };
                         }
                     }
-                    McpAddField::Env => {
+                    McpAddField::Env | McpAddField::Headers => {
                         if matches!(key.code, KeyCode::Enter) {
-                            let selected = 0;
-                            self.overlay = Overlay::McpEnvPicker { selected };
+                            let kind = if selected == McpAddField::Headers {
+                                McpKeyValueKind::Headers
+                            } else {
+                                McpKeyValueKind::Env
+                            };
+                            self.overlay = Overlay::McpKeyValuePicker {
+                                kind,
+                                selected: 0,
+                                reveal_values: false,
+                            };
                         }
                     }
                     McpAddField::AppClaude => mcp.apps.claude = !mcp.apps.claude,
