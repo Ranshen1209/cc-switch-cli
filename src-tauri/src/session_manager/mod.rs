@@ -40,15 +40,11 @@ pub struct SessionMeta {
     pub project_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
-    /// Nanosecond source version captured from the exact file/row snapshot
-    /// that produced this metadata. `None` means an older manifest cannot
-    /// prove usage-sync completeness.
+    /// Nanosecond source version captured from the exact file snapshot that
+    /// produced this metadata. The scan cache uses it to reject mismatched
+    /// cached rows when a provider fingerprint includes sibling state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_mtime_ns: Option<i64>,
-    /// Whether `created_at` came from provider data or a filesystem fallback.
-    /// Legacy rows omit this field and therefore cannot claim complete cost.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_at_kind: Option<SessionCreatedAtKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_active_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,30 +57,6 @@ pub struct SessionMeta {
     pub usage: Option<SessionUsageSummary>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionCreatedAtKind {
-    ProviderTimestamp,
-    FileMtimeFallback,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionCostKind {
-    #[default]
-    Recorded,
-    Estimated,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionCostCoverage {
-    Complete,
-    Partial,
-    #[default]
-    Unknown,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SessionUsageSummary {
@@ -92,9 +64,9 @@ pub struct SessionUsageSummary {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
-    pub cost: Option<f64>,
-    pub cost_kind: SessionCostKind,
-    pub coverage: SessionCostCoverage,
+    /// Best-effort USD estimate derived from locally available usage records.
+    /// `None` means the available evidence cannot produce a trustworthy number.
+    pub estimated_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

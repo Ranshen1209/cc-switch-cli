@@ -6,13 +6,9 @@ use rusqlite::{params, Connection};
 
 use crate::database::Database;
 use crate::services::sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL};
-use crate::session_manager::{
-    SessionCostCoverage, SessionCostKind, SessionCreatedAtKind, SessionUsageSummary,
-};
+use crate::session_manager::SessionUsageSummary;
 
-use super::{
-    project_main_connection, project_page, QueryControl, SessionCostIdentity, SessionCostTarget,
-};
+use super::{project_main_connection, project_page, QueryControl, SessionCostIdentity};
 
 fn identity(provider: &str, session_id: &str, source_path: &str) -> SessionCostIdentity {
     SessionCostIdentity {
@@ -22,20 +18,8 @@ fn identity(provider: &str, session_id: &str, source_path: &str) -> SessionCostI
     }
 }
 
-fn target(
-    provider: &str,
-    session_id: &str,
-    source_path: &str,
-    created_at: i64,
-    source_mtime: Option<i64>,
-    created_at_kind: Option<SessionCreatedAtKind>,
-) -> SessionCostTarget {
-    SessionCostTarget {
-        identity: identity(provider, session_id, source_path),
-        created_at: Some(created_at),
-        source_mtime_ns: source_mtime,
-        created_at_kind,
-    }
+fn target(provider: &str, session_id: &str, source_path: &str) -> SessionCostIdentity {
+    identity(provider, session_id, source_path)
 }
 
 fn control(seq: u64) -> QueryControl {
@@ -44,27 +28,6 @@ fn control(seq: u64) -> QueryControl {
         cost_seq: seq,
         deadline: Instant::now() + Duration::from_secs(2),
     }
-}
-
-fn set_watermark(conn: &Connection, epoch: i64, history_complete: bool) {
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value)
-         VALUES ('usage_prune_high_watermark', ?1)",
-        [format!(
-            r#"{{"epoch":{epoch},"history_complete":{history_complete}}}"#
-        )],
-    )
-    .expect("set prune watermark");
-}
-
-fn set_sync(conn: &Connection, source_path: &str, last_modified: i64) {
-    conn.execute(
-        "INSERT OR REPLACE INTO session_log_sync (
-             file_path, last_modified, last_line_offset, last_synced_at
-         ) VALUES (?1, ?2, 0, 1)",
-        params![source_path, last_modified],
-    )
-    .expect("set sync evidence");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,201 +119,7 @@ fn summary<'a>(
 }
 
 #[test]
-fn coverage_classifier_obeys_complete_partial_and_unknown_truth_table() {
-    let db = Database::memory().expect("memory database");
-    let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 1_000, true);
-
-    let cases = [
-        (
-            "gemini-complete",
-            "/gemini-complete.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-            20,
-            SessionCostCoverage::Complete,
-        ),
-        (
-            "missing-source-version",
-            "/missing-source-version.json",
-            2_000_000,
-            None,
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-            20,
-            SessionCostCoverage::Unknown,
-        ),
-        (
-            "legacy-created-kind",
-            "/legacy-created-kind.json",
-            2_000_000,
-            Some(20),
-            None,
-            20,
-            SessionCostCoverage::Unknown,
-        ),
-        (
-            "mtime-created",
-            "/mtime-created.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::FileMtimeFallback),
-            20,
-            SessionCostCoverage::Partial,
-        ),
-        (
-            "stale-sync",
-            "/stale-sync.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-            19,
-            SessionCostCoverage::Partial,
-        ),
-        (
-            "predates-prune",
-            "/predates-prune.json",
-            999_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-            20,
-            SessionCostCoverage::Partial,
-        ),
-    ];
-
-    let mut targets = Vec::new();
-    for (session_id, path, created_at, source_mtime, kind, synced, _) in cases {
-        insert_log(
-            &conn,
-            &format!("request-{session_id}"),
-            "gemini",
-            session_id,
-            10,
-            2,
-            3,
-            4,
-            INPUT_TOKEN_SEMANTICS_FRESH,
-            0.25,
-            "test-model",
-            "proxy",
-            2_000,
-        );
-        set_sync(&conn, path, synced);
-        targets.push(target(
-            "gemini",
-            session_id,
-            path,
-            created_at,
-            source_mtime,
-            kind,
-        ));
-    }
-
-    for provider in ["claude", "opencode"] {
-        let session_id = format!("{provider}-capped");
-        let path = format!("/{session_id}.jsonl");
-        insert_log(
-            &conn,
-            &format!("request-{session_id}"),
-            provider,
-            &session_id,
-            10,
-            2,
-            3,
-            4,
-            INPUT_TOKEN_SEMANTICS_FRESH,
-            0.25,
-            "test-model",
-            "proxy",
-            2_000,
-        );
-        set_sync(&conn, &path, 20);
-        targets.push(target(
-            provider,
-            &session_id,
-            &path,
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ));
-    }
-
-    let overlays =
-        project_main_connection(&conn, &targets, &control(1)).expect("project main database");
-    for (session_id, path, _, _, _, _, expected) in cases {
-        assert_eq!(
-            summary(&overlays, "gemini", session_id, path).coverage,
-            expected,
-            "{session_id}"
-        );
-    }
-    for provider in ["claude", "opencode"] {
-        let session_id = format!("{provider}-capped");
-        let path = format!("/{session_id}.jsonl");
-        assert_eq!(
-            summary(&overlays, provider, &session_id, &path).coverage,
-            SessionCostCoverage::Partial
-        );
-    }
-}
-
-#[test]
-fn missing_or_incomplete_prune_evidence_never_becomes_complete() {
-    for watermark in [
-        None,
-        Some("not-json"),
-        Some(r#"{"epoch":1000,"history_complete":false}"#),
-    ] {
-        let db = Database::memory().expect("memory database");
-        let conn = db.conn.lock().expect("database lock");
-        conn.execute(
-            "DELETE FROM settings WHERE key = 'usage_prune_high_watermark'",
-            [],
-        )
-        .expect("clear watermark");
-        if let Some(value) = watermark {
-            conn.execute(
-                "INSERT INTO settings (key, value)
-                 VALUES ('usage_prune_high_watermark', ?1)",
-                [value],
-            )
-            .expect("seed watermark");
-        }
-        insert_log(
-            &conn,
-            "request-1",
-            "gemini",
-            "session-1",
-            1,
-            1,
-            0,
-            0,
-            INPUT_TOKEN_SEMANTICS_FRESH,
-            0.1,
-            "test-model",
-            "proxy",
-            2_000,
-        );
-        set_sync(&conn, "/session-1.json", 20);
-        let targets = [target(
-            "gemini",
-            "session-1",
-            "/session-1.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        )];
-        let overlays =
-            project_main_connection(&conn, &targets, &control(1)).expect("project database");
-        assert_ne!(
-            summary(&overlays, "gemini", "session-1", "/session-1.json").coverage,
-            SessionCostCoverage::Complete
-        );
-    }
-}
-
-#[test]
-fn missing_watermark_table_fails_closed_instead_of_showing_a_partial_subtotal() {
+fn projection_does_not_depend_on_coverage_settings_table() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
     insert_log(
@@ -368,29 +137,32 @@ fn missing_watermark_table_fails_closed_instead_of_showing_a_partial_subtotal() 
         "proxy",
         2_000,
     );
-    set_sync(&conn, "/session-structural-error.json", 20);
     conn.execute("DROP TABLE settings", [])
         .expect("drop settings table");
     let targets = [target(
         "gemini",
         "session-structural-error",
         "/session-structural-error.json",
-        2_000_000,
-        Some(20),
-        Some(SessionCreatedAtKind::ProviderTimestamp),
     )];
 
-    assert!(
-        project_main_connection(&conn, &targets, &control(1)).is_err(),
-        "structural SQL errors must make the row unavailable (`-`), not a Partial subtotal"
+    let overlays = project_main_connection(&conn, &targets, &control(1))
+        .expect("cost estimates must not depend on historical coverage evidence");
+    assert_eq!(
+        summary(
+            &overlays,
+            "gemini",
+            "session-structural-error",
+            "/session-structural-error.json"
+        )
+        .estimated_cost_usd,
+        Some(0.25)
     );
 }
 
 #[test]
-fn unpriced_rows_are_classified_per_row_and_zero_token_errors_do_not_poison() {
+fn unpriced_token_rows_make_cost_unavailable_and_zero_token_errors_do_not_poison() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 1_000, true);
     conn.execute(
         "INSERT OR REPLACE INTO model_pricing (
              model_id, display_name, input_cost_per_million,
@@ -400,16 +172,6 @@ fn unpriced_rows_are_classified_per_row_and_zero_token_errors_do_not_poison() {
         [],
     )
     .expect("seed free model");
-
-    for (session_id, path) in [
-        ("mixed", "/mixed.json"),
-        ("all-unpriced", "/all-unpriced.json"),
-        ("zero-error", "/zero-error.json"),
-        ("true-zero", "/true-zero.json"),
-    ] {
-        set_sync(&conn, path, 20);
-        let _ = session_id;
-    }
 
     insert_log(
         &conn,
@@ -501,72 +263,191 @@ fn unpriced_rows_are_classified_per_row_and_zero_token_errors_do_not_poison() {
         "proxy",
         2_000,
     );
+    insert_log(
+        &conn,
+        "negative-priced",
+        "gemini",
+        "negative",
+        10,
+        1,
+        0,
+        0,
+        INPUT_TOKEN_SEMANTICS_FRESH,
+        0.5,
+        "test-model",
+        "proxy",
+        2_000,
+    );
+    insert_log(
+        &conn,
+        "negative-invalid",
+        "gemini",
+        "negative",
+        2,
+        1,
+        0,
+        0,
+        INPUT_TOKEN_SEMANTICS_FRESH,
+        -0.1,
+        "test-model",
+        "proxy",
+        2_001,
+    );
 
     let targets = [
-        target(
-            "gemini",
-            "mixed",
-            "/mixed.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
-        target(
-            "gemini",
-            "all-unpriced",
-            "/all-unpriced.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
-        target(
-            "gemini",
-            "zero-error",
-            "/zero-error.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
-        target(
-            "gemini",
-            "true-zero",
-            "/true-zero.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
+        target("gemini", "mixed", "/mixed.json"),
+        target("gemini", "all-unpriced", "/all-unpriced.json"),
+        target("gemini", "zero-error", "/zero-error.json"),
+        target("gemini", "true-zero", "/true-zero.json"),
+        target("gemini", "negative", "/negative.json"),
     ];
     let overlays = project_main_connection(&conn, &targets, &control(1)).expect("project database");
 
     let mixed = summary(&overlays, "gemini", "mixed", "/mixed.json");
-    assert_eq!(mixed.cost, Some(0.5));
-    assert_eq!(mixed.coverage, SessionCostCoverage::Partial);
+    assert_eq!(
+        mixed.estimated_cost_usd, None,
+        "a partially priced session must not present a misleading estimate"
+    );
     assert_eq!(mixed.input_tokens, 30);
 
     let all_unpriced = summary(&overlays, "gemini", "all-unpriced", "/all-unpriced.json");
-    assert_eq!(all_unpriced.cost, None);
+    assert_eq!(all_unpriced.estimated_cost_usd, None);
     assert_eq!(all_unpriced.input_tokens, 20);
-    assert_eq!(all_unpriced.coverage, SessionCostCoverage::Partial);
 
     let zero_error = summary(&overlays, "gemini", "zero-error", "/zero-error.json");
-    assert_eq!(zero_error.cost, Some(0.5));
-    assert_eq!(zero_error.coverage, SessionCostCoverage::Complete);
+    assert_eq!(zero_error.estimated_cost_usd, Some(0.5));
 
     let true_zero = summary(&overlays, "gemini", "true-zero", "/true-zero.json");
-    assert_eq!(true_zero.cost, Some(0.0));
-    assert_eq!(true_zero.coverage, SessionCostCoverage::Complete);
+    assert_eq!(true_zero.estimated_cost_usd, Some(0.0));
+
+    let negative = summary(&overlays, "gemini", "negative", "/negative.json");
+    assert_eq!(
+        negative.estimated_cost_usd, None,
+        "a negative token-row cost is invalid even when the aggregate remains positive"
+    );
+}
+
+#[test]
+fn write_time_pricing_evidence_proves_zero_cost_without_read_time_model_matching() {
+    let db = Database::memory().expect("memory database");
+    let conn = db.conn.lock().expect("database lock");
+    conn.execute(
+        "INSERT OR REPLACE INTO model_pricing (
+             model_id, display_name, input_cost_per_million,
+             output_cost_per_million, cache_read_cost_per_million,
+             cache_creation_cost_per_million
+         ) VALUES ('claude-haiku-4.5', 'Claude Haiku', '0', '0', '0', '0')",
+        [],
+    )
+    .expect("seed canonical free-model pricing");
+    insert_log(
+        &conn,
+        "aliased-zero",
+        "claude",
+        "aliased-zero",
+        10,
+        1,
+        0,
+        0,
+        INPUT_TOKEN_SEMANTICS_FRESH,
+        0.0,
+        "anthropic/claude-haiku-4.5",
+        "proxy",
+        2_000,
+    );
+
+    let wanted = target("claude", "aliased-zero", "/aliased-zero.jsonl");
+    let overlays = project_main_connection(&conn, std::slice::from_ref(&wanted), &control(1))
+        .expect("project explicitly priced zero");
+
+    assert_eq!(
+        overlays
+            .get(&wanted)
+            .expect("zero-cost overlay")
+            .estimated_cost_usd,
+        Some(0.0),
+        "non-empty pricing_model records write-time pricing success; the read path must not \
+         re-resolve an alias against today's pricing table"
+    );
+}
+
+#[test]
+fn malformed_stored_cost_fails_closed_even_with_pricing_evidence() {
+    let db = Database::memory().expect("memory database");
+    let conn = db.conn.lock().expect("database lock");
+    conn.execute(
+        "INSERT OR REPLACE INTO model_pricing (
+             model_id, display_name, input_cost_per_million,
+             output_cost_per_million, cache_read_cost_per_million,
+             cache_creation_cost_per_million
+         ) VALUES ('free-model', 'Free', '0', '0', '0', '0')",
+        [],
+    )
+    .expect("seed free-model pricing");
+    conn.execute(
+        "INSERT INTO proxy_request_logs (
+             request_id, provider_id, app_type, model, request_model, pricing_model,
+             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+             input_token_semantics, total_cost_usd, latency_ms, status_code,
+             session_id, created_at, data_source
+         ) VALUES (
+             'malformed-cost', '_session_test', 'claude', 'free-model', 'free-model',
+             'free-model', 10, 1, 0, 0, ?1, 'not-a-decimal', 1, 200,
+             'malformed-cost', 2000, 'proxy'
+         )",
+        [INPUT_TOKEN_SEMANTICS_FRESH],
+    )
+    .expect("insert malformed stored cost");
+
+    let wanted = target("claude", "malformed-cost", "/malformed-cost.jsonl");
+    let overlays = project_main_connection(&conn, std::slice::from_ref(&wanted), &control(1))
+        .expect("project malformed cost");
+
+    assert_eq!(
+        overlays
+            .get(&wanted)
+            .expect("token overlay remains available")
+            .estimated_cost_usd,
+        None,
+        "SQLite must not silently CAST malformed cost text into a trusted zero"
+    );
+}
+
+#[test]
+fn zero_token_only_rows_do_not_create_displayable_usage() {
+    let db = Database::memory().expect("memory database");
+    let conn = db.conn.lock().expect("database lock");
+    insert_log(
+        &conn,
+        "zero-token-only",
+        "gemini",
+        "zero-token-only",
+        0,
+        0,
+        0,
+        0,
+        INPUT_TOKEN_SEMANTICS_FRESH,
+        0.0,
+        "",
+        "proxy",
+        2_000,
+    );
+    let wanted = target("gemini", "zero-token-only", "/zero-token-only.json");
+
+    let overlays = project_main_connection(&conn, std::slice::from_ref(&wanted), &control(1))
+        .expect("project zero-token-only session");
+
+    assert!(
+        !overlays.contains_key(&wanted),
+        "without a token-bearing row both Cost and Tokens must remain unavailable"
+    );
 }
 
 #[test]
 fn legacy_null_pricing_keeps_recorded_cost_but_zero_cost_remains_unpriced() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 1_000, true);
-    for (session_id, path) in [
-        ("legacy-priced", "/legacy-priced.json"),
-        ("legacy-zero", "/legacy-zero.json"),
-    ] {
-        set_sync(&conn, path, 20);
+    for session_id in ["legacy-priced", "legacy-zero"] {
         insert_log_with_nullable_pricing(
             &conn,
             &format!("request-{session_id}"),
@@ -589,43 +470,23 @@ fn legacy_null_pricing_keeps_recorded_cost_but_zero_cost_remains_unpriced() {
     }
 
     let targets = [
-        target(
-            "gemini",
-            "legacy-priced",
-            "/legacy-priced.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
-        target(
-            "gemini",
-            "legacy-zero",
-            "/legacy-zero.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
+        target("gemini", "legacy-priced", "/legacy-priced.json"),
+        target("gemini", "legacy-zero", "/legacy-zero.json"),
     ];
     let overlays = project_main_connection(&conn, &targets, &control(1))
         .expect("project legacy nullable pricing rows");
 
     let priced = summary(&overlays, "gemini", "legacy-priced", "/legacy-priced.json");
-    assert_eq!(priced.cost, Some(0.25));
-    assert_eq!(priced.coverage, SessionCostCoverage::Complete);
+    assert_eq!(priced.estimated_cost_usd, Some(0.25));
 
     let zero = summary(&overlays, "gemini", "legacy-zero", "/legacy-zero.json");
-    assert_eq!(zero.cost, None);
-    assert_eq!(zero.coverage, SessionCostCoverage::Partial);
+    assert_eq!(zero.estimated_cost_usd, None);
 }
 
 #[test]
 fn codex_aliases_merge_without_absorbing_child_threads_and_claude_subagents_do_merge() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 1_000, true);
-
-    set_sync(&conn, "/codex-root.jsonl", 20);
-    set_sync(&conn, "/codex-child.jsonl", 999);
     insert_log(
         &conn,
         "codex-root-direct",
@@ -672,7 +533,6 @@ fn codex_aliases_merge_without_absorbing_child_threads_and_claude_subagents_do_m
         2_002,
     );
 
-    set_sync(&conn, "/claude-root.jsonl", 20);
     insert_log(
         &conn,
         "claude-root",
@@ -705,41 +565,24 @@ fn codex_aliases_merge_without_absorbing_child_threads_and_claude_subagents_do_m
     );
 
     let targets = [
-        target(
-            "codex",
-            "root",
-            "/codex-root.jsonl",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
-        target(
-            "claude",
-            "claude-root",
-            "/claude-root.jsonl",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
+        target("codex", "root", "/codex-root.jsonl"),
+        target("claude", "claude-root", "/claude-root.jsonl"),
     ];
     let overlays = project_main_connection(&conn, &targets, &control(1)).expect("project database");
 
     let codex = summary(&overlays, "codex", "root", "/codex-root.jsonl");
-    assert!((codex.cost.expect("codex cost") - 0.3).abs() < 1e-9);
+    assert!((codex.estimated_cost_usd.expect("codex cost") - 0.3).abs() < 1e-9);
     assert_eq!(codex.input_tokens, 30);
-    assert_eq!(codex.coverage, SessionCostCoverage::Complete);
 
     let claude = summary(&overlays, "claude", "claude-root", "/claude-root.jsonl");
-    assert!((claude.cost.expect("claude cost") - 0.3).abs() < 1e-9);
+    assert!((claude.estimated_cost_usd.expect("claude cost") - 0.3).abs() < 1e-9);
     assert_eq!(claude.input_tokens, 30);
-    assert_eq!(claude.coverage, SessionCostCoverage::Partial);
 }
 
 #[test]
 fn duplicate_visible_source_paths_are_ambiguous_and_receive_no_overlay() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 1_000, true);
     insert_log(
         &conn,
         "ambiguous",
@@ -755,26 +598,9 @@ fn duplicate_visible_source_paths_are_ambiguous_and_receive_no_overlay() {
         "proxy",
         2_000,
     );
-    for path in ["/one.jsonl", "/two.jsonl"] {
-        set_sync(&conn, path, 20);
-    }
     let targets = [
-        target(
-            "codex",
-            "same-id",
-            "/one.jsonl",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
-        target(
-            "codex",
-            "same-id",
-            "/two.jsonl",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        ),
+        target("codex", "same-id", "/one.jsonl"),
+        target("codex", "same-id", "/two.jsonl"),
     ];
 
     let overlays = project_main_connection(&conn, &targets, &control(1)).expect("project database");
@@ -785,8 +611,6 @@ fn duplicate_visible_source_paths_are_ambiguous_and_receive_no_overlay() {
 fn session_projection_matches_usage_page_bucket_and_cost_semantics() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 0, true);
-    set_sync(&conn, "/parity.jsonl", 20);
     insert_log(
         &conn,
         "fresh",
@@ -817,14 +641,7 @@ fn session_projection_matches_usage_page_bucket_and_cost_semantics() {
         "proxy",
         2_001,
     );
-    let target = target(
-        "codex",
-        "parity",
-        "/parity.jsonl",
-        2_000_000,
-        Some(20),
-        Some(SessionCreatedAtKind::ProviderTimestamp),
-    );
+    let target = target("codex", "parity", "/parity.jsonl");
     let overlays =
         project_main_connection(&conn, &[target], &control(1)).expect("project main database");
     let projected = summary(&overlays, "codex", "parity", "/parity.jsonl");
@@ -835,15 +652,13 @@ fn session_projection_matches_usage_page_bucket_and_cost_semantics() {
     assert_eq!(projected.output_tokens, usage.output_tokens);
     assert_eq!(projected.cache_read_tokens, usage.cache_read_tokens);
     assert_eq!(projected.cache_creation_tokens, usage.cache_creation_tokens);
-    assert_eq!(projected.cost, Some(usage.total_cost_usd));
+    assert_eq!(projected.estimated_cost_usd, Some(usage.total_cost_usd));
 }
 
 #[test]
 fn projection_connection_performs_no_writes() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    set_watermark(&conn, 0, true);
-    set_sync(&conn, "/readonly.json", 20);
     insert_log(
         &conn,
         "readonly",
@@ -879,14 +694,7 @@ fn projection_connection_performs_no_writes() {
         .expect("enable query-only guard");
     let overlays = project_main_connection(
         &conn,
-        &[target(
-            "gemini",
-            "readonly",
-            "/readonly.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        )],
+        &[target("gemini", "readonly", "/readonly.json")],
         &control(1),
     )
     .expect("read-only projection");
@@ -914,14 +722,7 @@ fn projection_connection_performs_no_writes() {
 fn main_projection_query_plan_is_driven_by_the_session_index() {
     let db = Database::memory().expect("memory database");
     let conn = db.conn.lock().expect("database lock");
-    let targets = [target(
-        "codex",
-        "indexed",
-        "/indexed.jsonl",
-        2_000_000,
-        Some(20),
-        Some(SessionCreatedAtKind::ProviderTimestamp),
-    )];
+    let targets = [target("codex", "indexed", "/indexed.jsonl")];
 
     let plan = super::projection::explain_main_query_plan(&conn, &targets)
         .expect("explain main projection");
@@ -948,14 +749,7 @@ fn missing_and_future_schema_databases_degrade_to_empty_overlays_without_initial
                 .expect("set future schema");
         }
 
-        let targets = [target(
-            "gemini",
-            "missing",
-            "/missing.json",
-            2_000_000,
-            Some(20),
-            Some(SessionCreatedAtKind::ProviderTimestamp),
-        )];
+        let targets = [target("gemini", "missing", "/missing.json")];
         assert!(project_page(&targets, &control(1)).is_empty());
         if !future_schema {
             assert!(
@@ -1003,14 +797,7 @@ fn locked_main_database_degrades_within_the_overlay_busy_budget() {
     );
 
     let started = Instant::now();
-    let targets = [target(
-        "gemini",
-        "locked",
-        "/locked.json",
-        2_000_000,
-        Some(20),
-        Some(SessionCreatedAtKind::ProviderTimestamp),
-    )];
+    let targets = [target("gemini", "locked", "/locked.json")];
     assert!(project_page(&targets, &control(1)).is_empty());
     assert!(
         started.elapsed() < Duration::from_secs(1),
@@ -1072,15 +859,8 @@ fn replacement_sequence_interrupts_an_inflight_sqlite_statement() {
 }
 
 #[test]
-fn openclaw_has_no_v3_projection_and_hermes_is_always_estimated() {
-    let openclaw = target(
-        "openclaw",
-        "openclaw-session",
-        "/openclaw.jsonl",
-        2_000_000,
-        Some(20),
-        Some(SessionCreatedAtKind::ProviderTimestamp),
-    );
+fn openclaw_has_no_cost_projection_and_summary_cost_is_explicitly_estimated() {
+    let openclaw = target("openclaw", "openclaw-session", "/openclaw.jsonl");
     let overlays = project_page(&[openclaw], &control(1));
     assert!(overlays.is_empty());
 
@@ -1089,10 +869,7 @@ fn openclaw_has_no_v3_projection_and_hermes_is_always_estimated() {
         output_tokens: 2,
         cache_read_tokens: 3,
         cache_creation_tokens: 4,
-        cost: Some(0.5),
-        cost_kind: SessionCostKind::Estimated,
-        coverage: SessionCostCoverage::Unknown,
+        estimated_cost_usd: Some(0.5),
     };
-    assert_eq!(estimated.cost_kind, SessionCostKind::Estimated);
-    assert_ne!(estimated.coverage, SessionCostCoverage::Complete);
+    assert_eq!(estimated.estimated_cost_usd, Some(0.5));
 }

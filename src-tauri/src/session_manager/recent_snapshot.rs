@@ -199,7 +199,6 @@ fn clone_bounded_manifest_candidate(row: &SessionMeta) -> Option<SessionMeta> {
         project_dir: bounded_action(row.project_dir.as_deref()),
         created_at: row.created_at,
         source_mtime_ns: row.source_mtime_ns,
-        created_at_kind: row.created_at_kind,
         last_active_at: row.last_active_at,
         source_path,
         resume_command: bounded_action(row.resume_command.as_deref()),

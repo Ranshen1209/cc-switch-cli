@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    SearchSnippet, SessionCreatedAtKind, SessionMessage, SessionMessageBatch,
-    SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
+    SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta,
+    SessionSearchHit,
 };
 
 use super::utils::{
@@ -378,16 +378,6 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
     let created_at = provider_created_at
         .or(provider_last_active_at)
         .or(fallback_time);
-    let created_at_kind = if provider_created_at.is_some() {
-        Some(SessionCreatedAtKind::ProviderTimestamp)
-    } else if provider_last_active_at.is_some() || fallback_time.is_some() {
-        // `lastUpdated` is useful recency fallback for an oversized file, but
-        // it cannot prove when the session began. The two-value wire enum uses
-        // the conservative fallback variant for every non-creation timestamp.
-        Some(SessionCreatedAtKind::FileMtimeFallback)
-    } else {
-        None
-    };
     let title = extract_json_value(prefix, "content")
         .and_then(|value| value.as_str().map(|text| truncate_summary(text, 160)))
         .or_else(|| {
@@ -403,7 +393,6 @@ fn parse_session_lightweight(path: &Path, prefix: &str) -> SessionMeta {
         project_dir: None,
         created_at,
         source_mtime_ns: None,
-        created_at_kind,
         last_active_at,
         source_path: Some(path.to_string_lossy().into_owned()),
         resume_command: Some(format!("gemini --resume {session_id}")),
@@ -656,7 +645,6 @@ fn parse_session_data(path: &Path, data: &str) -> Option<SessionMeta> {
         project_dir: None, // (optionally) populated later
         created_at,
         source_mtime_ns: None,
-        created_at_kind: created_at.map(|_| SessionCreatedAtKind::ProviderTimestamp),
         last_active_at: last_active_at.or(created_at),
         source_path: Some(source_path),
         resume_command: Some(format!("gemini --resume {session_id}")),
@@ -747,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn lightweight_last_updated_is_not_trusted_as_session_creation_time() {
+    fn lightweight_last_updated_is_used_as_a_recency_fallback() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session.json");
         std::fs::write(&path, "{}").expect("write session");
@@ -761,11 +749,7 @@ mod tests {
         );
 
         assert_eq!(meta.created_at, meta.last_active_at);
-        assert_eq!(
-            meta.created_at_kind,
-            Some(SessionCreatedAtKind::FileMtimeFallback),
-            "a recency timestamp cannot prove that retained usage covers session creation"
-        );
+        assert!(meta.created_at.is_some());
     }
 
     #[test]

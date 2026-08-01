@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::cli::tui::app::{SessionPageSource, SessionPageToken, SessionRowIdentity};
 use crate::cli::tui::runtime_systems::types::SessionMsg;
-use crate::services::session_cost::{QueryControl, SessionCostTarget};
-use crate::session_manager::{SessionCreatedAtKind, SessionMeta};
+use crate::services::session_cost::{QueryControl, SessionCostIdentity};
+use crate::session_manager::SessionMeta;
 
 use super::{
     execute_request, lazy_session_cost_sender, session_cost_mailbox, ActiveCostOverlay,
@@ -29,7 +29,6 @@ fn row(session_id: &str, source_path: &str) -> SessionMeta {
         source_path: Some(source_path.to_string()),
         created_at: Some(2_000_000),
         source_mtime_ns: Some(20),
-        created_at_kind: Some(SessionCreatedAtKind::ProviderTimestamp),
         ..SessionMeta::default()
     }
 }
@@ -40,7 +39,7 @@ fn request(seq: u64, generation: &str, page: usize, session_id: &str) -> Session
         cost_seq: seq,
         page_token: token(generation, 3),
         page_index: page,
-        targets: vec![SessionCostTarget::from(&row)],
+        identities: vec![SessionCostIdentity::from(&row)],
     }
 }
 
@@ -196,7 +195,7 @@ fn cost_worker_is_started_lazily_by_the_first_projection_request() {
     );
 
     let mut first = request(1, "lazy", 0, "lazy");
-    first.targets[0].identity.provider_id = "openclaw".to_string();
+    first.identities[0].provider_id = "openclaw".to_string();
     sender.submit(first).expect("start lazy worker");
 
     assert!(sender.worker_started_for_test());

@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::session_manager::paged_manifest::PAGE_SIZE;
-use crate::session_manager::{SessionCreatedAtKind, SessionMeta, SessionUsageSummary};
+use crate::session_manager::{SessionMeta, SessionUsageSummary};
 
 pub(crate) use projection::project_main_connection;
 
@@ -26,25 +26,6 @@ impl From<&SessionMeta> for SessionCostIdentity {
             provider_id: row.provider_id.clone(),
             session_id: row.session_id.clone(),
             source_path: row.source_path.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SessionCostTarget {
-    pub(crate) identity: SessionCostIdentity,
-    pub(crate) created_at: Option<i64>,
-    pub(crate) source_mtime_ns: Option<i64>,
-    pub(crate) created_at_kind: Option<SessionCreatedAtKind>,
-}
-
-impl From<&SessionMeta> for SessionCostTarget {
-    fn from(row: &SessionMeta) -> Self {
-        Self {
-            identity: SessionCostIdentity::from(row),
-            created_at: row.created_at,
-            source_mtime_ns: row.source_mtime_ns,
-            created_at_kind: row.created_at_kind,
         }
     }
 }
@@ -84,30 +65,24 @@ impl QueryControl {
 /// Exact duplicate rows collapse harmlessly. A logical provider/session pair
 /// with different source paths is withheld entirely so an overlay can never be
 /// attached to the wrong visible row.
-fn unambiguous_targets(targets: &[SessionCostTarget]) -> Vec<SessionCostTarget> {
+fn unambiguous_identities(identities: &[SessionCostIdentity]) -> Vec<SessionCostIdentity> {
     let mut paths = HashMap::<(&str, &str), HashSet<Option<&str>>>::new();
-    for target in targets {
+    for identity in identities {
         paths
-            .entry((
-                target.identity.provider_id.as_str(),
-                target.identity.session_id.as_str(),
-            ))
+            .entry((identity.provider_id.as_str(), identity.session_id.as_str()))
             .or_default()
-            .insert(target.identity.source_path.as_deref());
+            .insert(identity.source_path.as_deref());
     }
 
     let mut seen = HashSet::new();
-    targets
+    identities
         .iter()
-        .filter(|target| {
+        .filter(|identity| {
             paths
-                .get(&(
-                    target.identity.provider_id.as_str(),
-                    target.identity.session_id.as_str(),
-                ))
+                .get(&(identity.provider_id.as_str(), identity.session_id.as_str()))
                 .is_some_and(|sources| sources.len() == 1)
         })
-        .filter(|target| seen.insert(target.identity.clone()))
+        .filter(|identity| seen.insert((*identity).clone()))
         .cloned()
         .collect()
 }
@@ -115,26 +90,26 @@ fn unambiguous_targets(targets: &[SessionCostTarget]) -> Vec<SessionCostTarget> 
 /// Project one immutable manifest page. Every failure is deliberately local:
 /// the Sessions page keeps metadata and renders `-` for unavailable usage.
 pub(crate) fn project_page(
-    targets: &[SessionCostTarget],
+    identities: &[SessionCostIdentity],
     control: &QueryControl,
 ) -> HashMap<SessionCostIdentity, SessionUsageSummary> {
-    if targets.is_empty() || targets.len() > PAGE_SIZE || control.is_cancelled() {
+    if identities.is_empty() || identities.len() > PAGE_SIZE || control.is_cancelled() {
         return HashMap::new();
     }
-    let targets = unambiguous_targets(targets);
+    let identities = unambiguous_identities(identities);
     let mut overlays = HashMap::new();
 
-    let main_targets = targets
+    let main_identities = identities
         .iter()
-        .filter(|target| {
+        .filter(|identity| {
             matches!(
-                target.identity.provider_id.as_str(),
+                identity.provider_id.as_str(),
                 "claude" | "codex" | "gemini" | "opencode"
             )
         })
         .cloned()
         .collect::<Vec<_>>();
-    if !main_targets.is_empty() {
+    if !main_identities.is_empty() {
         match Database::open_readonly_current_schema_with_busy_timeout(
             std::time::Duration::from_millis(250),
         ) {
@@ -144,7 +119,7 @@ pub(crate) fn project_page(
                     conn.busy_timeout(std::time::Duration::from_millis(250))?;
                     conn.pragma_update(None, "query_only", true)?;
                     control.install_progress_handler(&conn);
-                    let result = project_main_connection(&conn, &main_targets, control);
+                    let result = project_main_connection(&conn, &main_identities, control);
                     QueryControl::clear_progress_handler(&conn);
                     result
                 })();
@@ -161,13 +136,13 @@ pub(crate) fn project_page(
         }
     }
 
-    let hermes_targets = targets
+    let hermes_identities = identities
         .iter()
-        .filter(|target| target.identity.provider_id == "hermes")
+        .filter(|identity| identity.provider_id == "hermes")
         .cloned()
         .collect::<Vec<_>>();
-    if !hermes_targets.is_empty() && !control.is_cancelled() {
-        match hermes::project(&hermes_targets, control) {
+    if !hermes_identities.is_empty() && !control.is_cancelled() {
+        match hermes::project(&hermes_identities, control) {
             Ok(values) => overlays.extend(values),
             Err(error) => log::debug!("[SESSION-COST] Hermes projection unavailable: {error}"),
         }

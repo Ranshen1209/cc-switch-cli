@@ -60,58 +60,27 @@ impl Database {
     /// then delete the aggregated detail rows.
     /// Returns the number of deleted detail rows.
     pub fn rollup_and_prune(&self, retain_days: i64) -> Result<u64, AppError> {
-        self.rollup_and_prune_impl(retain_days, || Ok(()))
-    }
-
-    #[cfg(test)]
-    fn rollup_and_prune_with_after_watermark<F>(
-        &self,
-        retain_days: i64,
-        after_watermark: F,
-    ) -> Result<u64, AppError>
-    where
-        F: FnOnce() -> Result<(), AppError>,
-    {
-        self.rollup_and_prune_impl(retain_days, after_watermark)
-    }
-
-    fn rollup_and_prune_impl<F>(
-        &self,
-        retain_days: i64,
-        after_watermark: F,
-    ) -> Result<u64, AppError>
-    where
-        F: FnOnce() -> Result<(), AppError>,
-    {
         let cutoff = compute_local_midnight_cutoff(Local::now(), retain_days)?;
         let conn = lock_conn!(self.conn);
+
+        // Check if there are any rows to process
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE created_at < ?1",
+                [cutoff],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        if count == 0 {
+            return Ok(0);
+        }
 
         // Use a savepoint for atomicity
         conn.execute("SAVEPOINT rollup_prune;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        let result = (|| {
-            let has_prunable_rows: bool = conn
-                .query_row(
-                    "SELECT EXISTS(
-                         SELECT 1 FROM proxy_request_logs
-                         WHERE created_at < ?1
-                     )",
-                    [cutoff],
-                    |row| row.get(0),
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let deleted = if has_prunable_rows {
-                Self::do_rollup_and_prune(&conn, cutoff)?
-            } else {
-                0
-            };
-            crate::database::usage_prune_watermark::advance_usage_prune_high_watermark(
-                &conn, cutoff,
-            )?;
-            after_watermark()?;
-            Ok(deleted)
-        })();
+        let result = Self::do_rollup_and_prune(&conn, cutoff);
 
         match result {
             Ok(deleted) => {
@@ -298,113 +267,6 @@ mod tests {
                 row.get(0)
             })?;
         assert_eq!(remaining, 3);
-        Ok(())
-    }
-
-    #[test]
-    fn prune_savepoint_rollback_does_not_advance_high_watermark() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let now = chrono::Utc::now().timestamp();
-        let old_ts = now - 40 * 86_400;
-        {
-            let conn = crate::database::lock_conn!(db.conn);
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value)
-                 VALUES ('usage_prune_high_watermark',
-                         '{\"epoch\":10,\"history_complete\":true}')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO proxy_request_logs (
-                     request_id, provider_id, app_type, model,
-                     input_tokens, output_tokens, total_cost_usd,
-                     latency_ms, status_code, created_at
-                 ) VALUES (
-                     'rollback-probe', 'provider', 'claude', 'model',
-                     1, 1, '0.1', 1, 200, ?1
-                 )",
-                [old_ts],
-            )?;
-        }
-
-        let error = db
-            .rollup_and_prune_with_after_watermark(30, || {
-                Err(AppError::Message(
-                    "injected failure after watermark write".to_string(),
-                ))
-            })
-            .expect_err("injected failure must roll back the savepoint");
-        assert!(error.to_string().contains("injected failure"));
-
-        let conn = crate::database::lock_conn!(db.conn);
-        let value: String = conn.query_row(
-            "SELECT value FROM settings WHERE key = 'usage_prune_high_watermark'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(value, r#"{"epoch":10,"history_complete":true}"#);
-        assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM proxy_request_logs
-                 WHERE request_id = 'rollback-probe'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?,
-            1,
-            "detail deletion must roll back with its watermark"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn successful_empty_prune_still_advances_the_complete_watermark() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        assert_eq!(db.rollup_and_prune(30)?, 0);
-        let conn = crate::database::lock_conn!(db.conn);
-        let watermark =
-            crate::database::usage_prune_watermark::read_usage_prune_high_watermark(&conn)
-                .expect("read watermark")
-                .expect("fresh database watermark");
-        assert!(watermark.history_complete);
-        assert!(watermark.epoch > 0);
-        Ok(())
-    }
-
-    #[test]
-    fn successful_empty_prune_skips_rollup_and_detail_delete_statements() -> Result<(), AppError> {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-
-        let db = Database::memory()?;
-        let saw_expensive_prune_statement = Arc::new(AtomicBool::new(false));
-        {
-            let observer = Arc::clone(&saw_expensive_prune_statement);
-            let conn = crate::database::lock_conn!(db.conn);
-            conn.authorizer(Some(move |context: AuthContext<'_>| {
-                if matches!(
-                    context.action,
-                    AuthAction::Insert {
-                        table_name: "usage_daily_rollups"
-                    } | AuthAction::Delete {
-                        table_name: "proxy_request_logs"
-                    }
-                ) {
-                    observer.store(true, Ordering::Relaxed);
-                }
-                Authorization::Allow
-            }));
-        }
-
-        assert_eq!(db.rollup_and_prune(30)?, 0);
-        {
-            let conn = crate::database::lock_conn!(db.conn);
-            conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        }
-        assert!(
-            !saw_expensive_prune_statement.load(Ordering::Relaxed),
-            "an empty maintenance pass may update only the prune watermark"
-        );
         Ok(())
     }
 

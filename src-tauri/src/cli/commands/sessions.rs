@@ -1003,7 +1003,6 @@ mod tests {
             project_dir: None,
             created_at: None,
             source_mtime_ns: None,
-            created_at_kind: None,
             last_active_at: None,
             source_path: Some(format!("/tmp/{provider_id}/{session_id}.jsonl")),
             usage: None,

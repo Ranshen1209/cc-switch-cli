@@ -4131,7 +4131,7 @@ mod tests {
                 session_id: "cached-session".to_string(),
                 usage: Some(crate::session_manager::SessionUsageSummary {
                     input_tokens: 42,
-                    cost: Some(0.125),
+                    estimated_cost_usd: Some(0.125),
                     ..crate::session_manager::SessionUsageSummary::default()
                 }),
                 ..crate::session_manager::SessionMeta::default()

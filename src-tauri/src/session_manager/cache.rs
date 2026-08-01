@@ -30,7 +30,7 @@ pub const SCAN_CACHE_VERSION: i64 = 1;
 pub struct FileScanTarget {
     pub path: PathBuf,
     /// Raw mtime of the source itself. Unlike `mtime_ns`, sibling fingerprint
-    /// decoration must never alter this coverage evidence.
+    /// decoration must never alter this cache-consistency evidence.
     pub source_mtime_ns: i64,
     pub mtime_ns: i64,
     pub size: i64,
@@ -1985,7 +1985,6 @@ mod tests {
             project_dir: Some("/tmp/project".to_string()),
             created_at: Some(1_000),
             source_mtime_ns: None,
-            created_at_kind: None,
             last_active_at: Some(2_000),
             source_path: Some(format!("/tmp/{session_id}.jsonl")),
             usage: None,

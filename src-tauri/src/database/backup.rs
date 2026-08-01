@@ -54,6 +54,9 @@ where
 
 const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_request_logs",
+    // This cursor describes files on the current device. Cost projection does
+    // not read it, but importing another device's cursor could still skip
+    // local usage lines permanently.
     "session_log_sync",
     "stream_check_logs",
     "proxy_live_backup",
@@ -63,7 +66,7 @@ const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
 
 const SYNC_EXPORT_RESETTABLE_TABLES: &[&str] = &["provider_health"];
 
-const SYNC_LOCAL_SETTINGS_KEYS: &[&str] = &["proxy_runtime_session", "usage_prune_high_watermark"];
+const SYNC_LOCAL_SETTINGS_KEYS: &[&str] = &["proxy_runtime_session"];
 const PROXY_CONFIG_LOCAL_COLUMNS: &[&str] =
     &["proxy_enabled", "listen_address", "listen_port", "enabled"];
 
@@ -1287,9 +1290,8 @@ mod tests {
         assert_eq!(
             local_sync,
             (123, 12, 1000),
-            "WebDAV restore must not mix remote sync evidence with local usage rows"
+            "WebDAV restore must not replace local file progress with a remote device's cursor"
         );
-
         let semantics: (i64, i64) = {
             let conn = crate::database::lock_conn!(local_db.conn);
             conn.query_row(
@@ -1481,12 +1483,6 @@ mod tests {
         local_db
             .set_setting("proxy_runtime_session", "{\"pid\":123}")
             .expect("persist local runtime session");
-        local_db
-            .set_setting(
-                "usage_prune_high_watermark",
-                r#"{"epoch":123,"history_complete":true}"#,
-            )
-            .expect("persist local prune watermark");
         {
             let conn = crate::database::lock_conn!(local_db.conn);
             seed_provider(&conn, "local-provider")?;
@@ -1500,13 +1496,6 @@ mod tests {
                 .expect("read local runtime session after import")
                 .as_deref(),
             Some("{\"pid\":123}")
-        );
-        assert_eq!(
-            local_db
-                .get_setting("usage_prune_high_watermark")
-                .expect("read local prune watermark after import")
-                .as_deref(),
-            Some(r#"{"epoch":123,"history_complete":true}"#)
         );
 
         Ok(())

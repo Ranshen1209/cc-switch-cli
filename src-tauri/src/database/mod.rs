@@ -27,7 +27,6 @@ mod backup;
 mod dao;
 mod migration;
 mod schema;
-pub(crate) mod usage_prune_watermark;
 
 #[cfg(test)]
 mod tests;
@@ -610,8 +609,7 @@ impl Database {
         // 顺序很重要——`journal_mode=WAL` 会写入 page 1，之后再设 `auto_vacuum`
         // 对空库将静默失效（模式仍为 NONE，需整库 VACUUM 才能切换）。
         // unix 下文件已被预创建为空，因此以「是否已存在用户表」判断是否为全新库。
-        let is_new_database = !Self::has_user_tables(&conn)?;
-        if is_new_database {
+        if !Self::has_user_tables(&conn)? {
             conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
@@ -675,10 +673,6 @@ impl Database {
 
         db.create_tables()?;
         db.apply_schema_migrations()?;
-        {
-            let conn = lock_conn!(db.conn);
-            usage_prune_watermark::initialize_usage_prune_high_watermark(&conn, is_new_database)?;
-        }
         // 存量库若仍是 auto_vacuum=NONE（老版本从未启用增量回收），在此切换到
         // INCREMENTAL 并整库 VACUUM 一次，回收历史累积的空闲页（issue #327：
         // proxy_request_logs 等本地表被 prune 删除后文件从不收缩，导致 WebDAV
@@ -805,10 +799,6 @@ impl Database {
             db_path: None,
         };
         db.create_tables()?;
-        {
-            let conn = lock_conn!(db.conn);
-            usage_prune_watermark::initialize_usage_prune_high_watermark(&conn, true)?;
-        }
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)

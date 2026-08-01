@@ -9,7 +9,7 @@ use rusqlite::{params_from_iter, Connection, OpenFlags};
 use crate::database::database_path;
 use crate::services::usage_stats::effective_usage_log_filter;
 
-use super::{project_page, projection, QueryControl, SessionCostIdentity, SessionCostTarget};
+use super::{project_page, projection, QueryControl, SessionCostIdentity};
 
 #[test]
 #[ignore = "requires CC_SWITCH_SESSION_COST_BENCH_DB pointing at a read-only sandbox copy"]
@@ -42,15 +42,15 @@ fn top_100_projection_on_explicit_database_copy() {
     conn.pragma_update(None, "query_only", true)
         .expect("enforce query-only benchmark connection");
 
-    let targets = latest_targets(&conn);
+    let identities = latest_identities(&conn);
     assert_eq!(
-        targets.len(),
+        identities.len(),
         100,
         "benchmark database must contain at least 100 attributable sessions"
     );
-    let matched_rows = matched_detail_rows(&conn, &targets);
+    let matched_rows = matched_detail_rows(&conn, &identities);
     let plan =
-        projection::explain_main_query_plan(&conn, &targets).expect("explain projection query");
+        projection::explain_main_query_plan(&conn, &identities).expect("explain projection query");
     assert!(
         plan.iter()
             .any(|line| line.contains("idx_request_logs_session")),
@@ -69,7 +69,7 @@ fn top_100_projection_on_explicit_database_copy() {
             deadline: Instant::now() + Duration::from_secs(2),
         };
         let started = Instant::now();
-        let overlays = project_page(&targets, &control);
+        let overlays = project_page(&identities, &control);
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(2),
@@ -94,7 +94,7 @@ fn top_100_projection_on_explicit_database_copy() {
     );
 }
 
-fn latest_targets(conn: &Connection) -> Vec<SessionCostTarget> {
+fn latest_identities(conn: &Connection) -> Vec<SessionCostIdentity> {
     let mut statement = conn
         .prepare(
             "SELECT app_type, session_id
@@ -114,7 +114,7 @@ fn latest_targets(conn: &Connection) -> Vec<SessionCostTarget> {
         .expect("query latest sessions");
 
     let mut seen = HashSet::new();
-    let mut targets = Vec::with_capacity(100);
+    let mut identities = Vec::with_capacity(100);
     for row in rows {
         let (provider_id, stored_id) = row.expect("read latest session");
         let session_id = if provider_id == "codex" {
@@ -128,38 +128,30 @@ fn latest_targets(conn: &Connection) -> Vec<SessionCostTarget> {
         if !seen.insert((provider_id.clone(), session_id.clone())) {
             continue;
         }
-        targets.push(SessionCostTarget {
-            identity: SessionCostIdentity {
-                provider_id,
-                session_id,
-                source_path: None,
-            },
-            created_at: None,
-            source_mtime_ns: None,
-            created_at_kind: None,
+        identities.push(SessionCostIdentity {
+            provider_id,
+            session_id,
+            source_path: None,
         });
-        if targets.len() == 100 {
+        if identities.len() == 100 {
             break;
         }
     }
-    targets
+    identities
 }
 
-fn matched_detail_rows(conn: &Connection, targets: &[SessionCostTarget]) -> i64 {
-    let mut wanted = Vec::with_capacity(targets.len() * 2);
+fn matched_detail_rows(conn: &Connection, identities: &[SessionCostIdentity]) -> i64 {
+    let mut wanted = Vec::with_capacity(identities.len() * 2);
     let mut seen = HashSet::new();
-    for target in targets {
-        let direct = (
-            target.identity.provider_id.clone(),
-            target.identity.session_id.clone(),
-        );
+    for identity in identities {
+        let direct = (identity.provider_id.clone(), identity.session_id.clone());
         if seen.insert(direct.clone()) {
             wanted.push(direct);
         }
-        if target.identity.provider_id == "codex" {
+        if identity.provider_id == "codex" {
             let alias = (
                 "codex".to_string(),
-                format!("codex_{}", target.identity.session_id),
+                format!("codex_{}", identity.session_id),
             );
             if seen.insert(alias.clone()) {
                 wanted.push(alias);

@@ -15,8 +15,8 @@ use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::{
     config::write_json_file,
     session_manager::{
-        SearchSnippet, SessionCreatedAtKind, SessionMessage, SessionMessageBatch,
-        SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
+        SearchSnippet, SessionMessage, SessionMessageBatch, SessionMessageBatchBuilder,
+        SessionMeta, SessionSearchHit,
     },
 };
 
@@ -821,7 +821,6 @@ fn parse_session_lines(
         project_dir: cwd,
         created_at,
         source_mtime_ns: None,
-        created_at_kind: created_at.map(|_| SessionCreatedAtKind::ProviderTimestamp),
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume

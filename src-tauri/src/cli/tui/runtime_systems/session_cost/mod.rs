@@ -3,7 +3,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cli::tui::app::{SessionPageToken, SessionRowIdentity};
-use crate::services::session_cost::{QueryControl, SessionCostTarget};
+use crate::services::session_cost::{QueryControl, SessionCostIdentity};
 
 use super::types::SessionMsg;
 
@@ -14,7 +14,7 @@ pub(crate) struct SessionCostRequest {
     pub(crate) cost_seq: u64,
     pub(crate) page_token: SessionPageToken,
     pub(crate) page_index: usize,
-    pub(crate) targets: Vec<SessionCostTarget>,
+    pub(crate) identities: Vec<SessionCostIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,21 +277,21 @@ fn execute_request(
     control: QueryControl,
     result_tx: &mpsc::Sender<SessionMsg>,
 ) -> bool {
-    let overlays = crate::services::session_cost::project_page(&request.targets, &control);
+    let overlays = crate::services::session_cost::project_page(&request.identities, &control);
     // A replacement owns the visible page and makes this result stale.
     // A deadline, however, is a current-request failure: publish the empty
     // projection so an accepted overlay clears previously displayed data
-    // to `-` instead of leaving a stale exact amount on screen.
+    // to `-` instead of leaving a stale estimate on screen.
     if control.is_superseded() {
         return true;
     }
     let identities = request
-        .targets
+        .identities
         .iter()
-        .map(|target| SessionRowIdentity {
-            provider_id: target.identity.provider_id.clone(),
-            session_id: target.identity.session_id.clone(),
-            source_path: target.identity.source_path.clone(),
+        .map(|identity| SessionRowIdentity {
+            provider_id: identity.provider_id.clone(),
+            session_id: identity.session_id.clone(),
+            source_path: identity.source_path.clone(),
         })
         .collect();
     result_tx

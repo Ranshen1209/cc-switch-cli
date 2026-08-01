@@ -103,14 +103,14 @@ pub(super) fn render_sessions(
 
 /// Fixed width of the relative-time column.
 const TIME_COLUMN_WIDTH: u16 = 10;
-/// Fixed width of the cost column: `≥$999.99` plus one column of slack.
+/// Fixed width of the cost column: `$999.99` plus two columns of slack.
 const COST_COLUMN_WIDTH: u16 = 9;
 
 /// Column visibility for the session list at a given pane width.
 ///
 /// Degradation order is Title > Time > Cost. Title never leaves because it is
 /// the only cell that identifies a row. Cost drops first: the Overview pane
-/// spells the exact amount out for the selected session anyway, while Time is
+/// shows the estimate for the selected session anyway, while Time is
 /// the only per-row ordering cue the list itself provides.
 fn session_list_columns(width: u16) -> (bool, bool) {
     let show_cost = width >= 30;
@@ -292,7 +292,6 @@ fn render_session_list(
                     Text::from(Line::from(session_cost_spans(
                         session.usage.as_ref(),
                         theme,
-                        MarkerSpacing::Glued,
                     )))
                     .alignment(Alignment::Right),
                 ));
@@ -385,7 +384,7 @@ fn render_session_overview(
         .unwrap_or(texts::tui_na());
     let usage = session.usage.as_ref();
     let token_spans = session_token_spans(usage, theme);
-    let cost_spans = session_cost_spans(usage, theme, MarkerSpacing::Spaced);
+    let cost_spans = session_cost_spans(usage, theme);
 
     let lines = vec![
         overview_field_line(
@@ -429,16 +428,6 @@ fn render_session_overview(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn session_usage_marker(usage: &crate::session_manager::SessionUsageSummary) -> &'static str {
-    if usage.cost_kind == crate::session_manager::SessionCostKind::Estimated {
-        "~"
-    } else if usage.coverage == crate::session_manager::SessionCostCoverage::Complete {
-        ""
-    } else {
-        "≥"
-    }
-}
-
 /// Sessions pin the cost to two decimals so every row shares one decimal
 /// point; the Usage and Home surfaces keep their own magnitude-dependent
 /// precision through [`super::usage::format_money`].
@@ -446,52 +435,20 @@ fn format_session_money(value: f64) -> String {
     format!("${value:.2}")
 }
 
-/// Coverage/estimate marker and the value it qualifies, kept apart so the
-/// render layer can style the marker as a quiet prefix instead of gluing it
-/// onto the number.
-fn format_session_cost(
-    usage: &crate::session_manager::SessionUsageSummary,
-) -> Option<(&'static str, String)> {
+fn format_session_cost(usage: &crate::session_manager::SessionUsageSummary) -> Option<String> {
     usage
-        .cost
-        .map(|cost| (session_usage_marker(usage), format_session_money(cost)))
+        .estimated_cost_usd
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(format_session_money)
 }
 
-fn format_session_tokens(
-    usage: &crate::session_manager::SessionUsageSummary,
-) -> (&'static str, String) {
-    (
-        session_usage_marker(usage),
-        super::usage::format_token_breakdown_compact(
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_read_tokens,
-            usage.cache_creation_tokens,
-        ),
+fn format_session_tokens(usage: &crate::session_manager::SessionUsageSummary) -> String {
+    super::usage::format_token_breakdown_compact(
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_creation_tokens,
     )
-}
-
-/// How much air separates the coverage marker from the value it qualifies.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MarkerSpacing {
-    /// Right-aligned table cells keep the marker glued so the column edge stays
-    /// stable regardless of whether a marker is present.
-    Glued,
-    /// Label-aligned Overview rows read as prefix + value, so the marker gets
-    /// its own column of space.
-    Spaced,
-}
-
-fn marker_span(
-    marker: &'static str,
-    spacing: MarkerSpacing,
-    theme: &super::theme::Theme,
-) -> Span<'static> {
-    let text = match spacing {
-        MarkerSpacing::Glued => marker.to_string(),
-        MarkerSpacing::Spaced => format!("{marker} "),
-    };
-    Span::styled(text, Style::default().fg(theme.dim))
 }
 
 fn unavailable_span(theme: &super::theme::Theme) -> Span<'static> {
@@ -501,17 +458,11 @@ fn unavailable_span(theme: &super::theme::Theme) -> Span<'static> {
 fn session_cost_spans(
     usage: Option<&crate::session_manager::SessionUsageSummary>,
     theme: &super::theme::Theme,
-    spacing: MarkerSpacing,
 ) -> Vec<Span<'static>> {
-    let Some((marker, cost)) = usage.and_then(format_session_cost) else {
+    let Some(cost) = usage.and_then(format_session_cost) else {
         return vec![unavailable_span(theme)];
     };
-    let mut spans = Vec::with_capacity(2);
-    if !marker.is_empty() {
-        spans.push(marker_span(marker, spacing, theme));
-    }
-    spans.push(Span::styled(cost, Style::default().fg(theme.ok)));
-    spans
+    vec![Span::raw(cost)]
 }
 
 fn session_token_spans(
@@ -521,13 +472,7 @@ fn session_token_spans(
     let Some(usage) = usage else {
         return vec![unavailable_span(theme)];
     };
-    let (marker, tokens) = format_session_tokens(usage);
-    let mut spans = Vec::with_capacity(2);
-    if !marker.is_empty() {
-        spans.push(marker_span(marker, MarkerSpacing::Spaced, theme));
-    }
-    spans.push(Span::raw(tokens));
-    spans
+    vec![Span::raw(format_session_tokens(usage))]
 }
 
 fn overview_field_line(
@@ -561,8 +506,7 @@ fn overview_field_spans_line(
 }
 
 /// Truncate a styled value to `width` display columns, spending the budget span
-/// by span so a marker prefix and its value are measured together instead of
-/// each being clipped to the full width.
+/// by span so independently styled fragments share one width budget.
 fn truncate_spans_to_display_width(spans: Vec<Span<'static>>, width: u16) -> Vec<Span<'static>> {
     let mut remaining = width;
     let mut out = Vec::with_capacity(spans.len());
@@ -961,7 +905,6 @@ mod tests {
             project_dir: Some("/tmp/project".to_string()),
             created_at: None,
             source_mtime_ns: None,
-            created_at_kind: None,
             last_active_at: None,
             source_path: None,
             usage: None,
@@ -1018,54 +961,18 @@ mod tests {
     }
 
     #[test]
-    fn session_cost_and_tokens_render_coverage_and_estimate_markers() {
-        use crate::session_manager::{SessionCostCoverage, SessionCostKind, SessionUsageSummary};
+    fn session_cost_and_tokens_render_estimates_without_markers() {
+        use crate::session_manager::SessionUsageSummary;
 
-        let complete = SessionUsageSummary {
+        let usage = SessionUsageSummary {
             input_tokens: 10,
             output_tokens: 20,
             cache_read_tokens: 30,
             cache_creation_tokens: 40,
-            cost: Some(1.25),
-            cost_kind: SessionCostKind::Recorded,
-            coverage: SessionCostCoverage::Complete,
+            estimated_cost_usd: Some(1.25),
         };
-        assert_eq!(
-            format_session_cost(&complete),
-            Some(("", "$1.25".to_string()))
-        );
-        assert_eq!(format_session_tokens(&complete).0, "");
-
-        let partial = SessionUsageSummary {
-            coverage: SessionCostCoverage::Partial,
-            ..complete
-        };
-        assert_eq!(
-            format_session_cost(&partial),
-            Some(("≥", "$1.25".to_string()))
-        );
-        assert_eq!(format_session_tokens(&partial).0, "≥");
-
-        let unknown = SessionUsageSummary {
-            coverage: SessionCostCoverage::Unknown,
-            ..complete
-        };
-        assert_eq!(
-            format_session_cost(&unknown),
-            Some(("≥", "$1.25".to_string()))
-        );
-        assert_eq!(format_session_tokens(&unknown).0, "≥");
-
-        let estimated = SessionUsageSummary {
-            cost_kind: SessionCostKind::Estimated,
-            coverage: SessionCostCoverage::Unknown,
-            ..complete
-        };
-        assert_eq!(
-            format_session_cost(&estimated),
-            Some(("~", "$1.25".to_string()))
-        );
-        assert_eq!(format_session_tokens(&estimated).0, "~");
+        assert_eq!(format_session_cost(&usage), Some("$1.25".to_string()));
+        assert!(format_session_tokens(&usage).starts_with("In: 10"));
     }
 
     #[test]
@@ -1076,26 +983,34 @@ mod tests {
         assert_eq!(format_session_money(125.0), "$125.00");
         // The widest realistic amount still fits the fixed Cost column.
         assert!(
-            UnicodeWidthStr::width(format!("≥{}", format_session_money(999.99)).as_str())
+            UnicodeWidthStr::width(format_session_money(999.99).as_str())
                 <= usize::from(COST_COLUMN_WIDTH)
         );
     }
 
     #[test]
-    fn unavailable_cost_does_not_hide_available_covered_tokens() {
+    fn invalid_cost_estimates_fail_closed_at_the_rendering_boundary() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01] {
+            let usage = crate::session_manager::SessionUsageSummary {
+                estimated_cost_usd: Some(value),
+                ..crate::session_manager::SessionUsageSummary::default()
+            };
+            assert_eq!(format_session_cost(&usage), None);
+        }
+    }
+
+    #[test]
+    fn unavailable_cost_does_not_hide_available_tokens() {
         let usage = crate::session_manager::SessionUsageSummary {
             input_tokens: 10,
             output_tokens: 20,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
-            cost: None,
-            cost_kind: crate::session_manager::SessionCostKind::Recorded,
-            coverage: crate::session_manager::SessionCostCoverage::Partial,
+            estimated_cost_usd: None,
         };
 
         assert_eq!(format_session_cost(&usage), None);
-        let (marker, tokens) = format_session_tokens(&usage);
-        assert_eq!(marker, "≥");
+        let tokens = format_session_tokens(&usage);
         assert!(tokens.contains("In: 10"), "{tokens}");
     }
 
@@ -1121,56 +1036,33 @@ mod tests {
     }
 
     #[test]
-    fn overview_usage_rows_separate_the_marker_from_the_value() {
-        use crate::session_manager::{SessionCostCoverage, SessionCostKind, SessionUsageSummary};
+    fn overview_usage_rows_render_values_without_markers() {
+        use crate::session_manager::SessionUsageSummary;
 
         let theme = test_theme();
-        let complete = SessionUsageSummary {
+        let usage = SessionUsageSummary {
             input_tokens: 10,
             output_tokens: 20,
             cache_read_tokens: 30,
             cache_creation_tokens: 40,
-            cost: Some(1.25),
-            cost_kind: SessionCostKind::Recorded,
-            coverage: SessionCostCoverage::Complete,
+            estimated_cost_usd: Some(1.25),
         };
 
-        // Complete coverage carries no marker at all.
-        let tokens = session_token_spans(Some(&complete), &theme);
+        let tokens = session_token_spans(Some(&usage), &theme);
         assert_eq!(tokens.len(), 1);
         assert!(tokens[0].content.starts_with("In: 10"), "{:?}", tokens[0]);
-        let cost = session_cost_spans(Some(&complete), &theme, MarkerSpacing::Spaced);
+        let cost = session_cost_spans(Some(&usage), &theme);
         assert_eq!(span_texts(&cost), vec!["$1.25".to_string()]);
-        assert_eq!(cost[0].style.fg, Some(theme.ok));
-
-        // A lower bound gets a spaced, dim marker span of its own.
-        let partial = SessionUsageSummary {
-            coverage: SessionCostCoverage::Partial,
-            ..complete
-        };
-        let tokens = session_token_spans(Some(&partial), &theme);
-        assert_eq!(tokens[0].content, "≥ ");
-        assert_eq!(tokens[0].style.fg, Some(theme.dim));
-        assert!(tokens[1].content.starts_with("In: 10"), "{:?}", tokens[1]);
-        let cost = session_cost_spans(Some(&partial), &theme, MarkerSpacing::Spaced);
         assert_eq!(
-            span_texts(&cost),
-            vec!["≥ ".to_string(), "$1.25".to_string()]
-        );
-        assert_eq!(cost[0].style.fg, Some(theme.dim));
-
-        // The list column keeps the marker glued to the amount.
-        let cost = session_cost_spans(Some(&partial), &theme, MarkerSpacing::Glued);
-        assert_eq!(
-            span_texts(&cost),
-            vec!["≥".to_string(), "$1.25".to_string()]
+            cost[0].style.fg, None,
+            "available Cost values should use the default white foreground"
         );
 
         // No usage at all renders a muted placeholder on both rows.
         let tokens = session_token_spans(None, &theme);
         assert_eq!(span_texts(&tokens), vec!["-".to_string()]);
         assert_eq!(tokens[0].style.fg, Some(theme.comment));
-        let cost = session_cost_spans(None, &theme, MarkerSpacing::Spaced);
+        let cost = session_cost_spans(None, &theme);
         assert_eq!(span_texts(&cost), vec!["-".to_string()]);
         assert_eq!(cost[0].style.fg, Some(theme.comment));
     }
@@ -1181,10 +1073,7 @@ mod tests {
         // 14 columns of label plus an 8-column value budget.
         let line = overview_field_spans_line(
             "Tokens",
-            vec![
-                Span::raw("≥ ".to_string()),
-                Span::raw("In: 1.0k - Out: 2.0k".to_string()),
-            ],
+            vec![Span::raw("In: 1.0k - Out: 2.0k".to_string())],
             22,
             &theme,
         );
@@ -1193,13 +1082,12 @@ mod tests {
         // Overview row.
         assert!(line.spans[0].content.starts_with("Tokens"));
         assert_eq!(UnicodeWidthStr::width(line.spans[0].content.as_ref()), 14);
-        // The marker is spent from the same budget as the value it qualifies.
         let value: String = line.spans[1..]
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(UnicodeWidthStr::width(value.as_str()), 8);
-        assert!(value.starts_with("≥ In:"), "{value}");
+        assert!(value.starts_with("In:"), "{value}");
         assert!(value.ends_with('…'), "{value}");
     }
 }

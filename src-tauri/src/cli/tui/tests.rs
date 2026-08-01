@@ -152,7 +152,7 @@ fn app_with_costed_session_page() -> (App, TempDir) {
             usage: Some(crate::session_manager::SessionUsageSummary {
                 input_tokens: 10,
                 output_tokens: 2,
-                cost: Some(0.25),
+                estimated_cost_usd: Some(0.25),
                 ..crate::session_manager::SessionUsageSummary::default()
             }),
             ..crate::session_manager::SessionMeta::default()
@@ -228,7 +228,7 @@ fn empty_visible_page_cancels_the_previous_cost_query_without_a_replacement() {
 }
 
 #[test]
-fn sessions_help_distinguishes_main_usage_rows_from_hermes_estimates() {
+fn sessions_help_describes_costs_as_local_estimates_without_ui_prefixes() {
     let mut app = App::new(Some(AppType::Claude));
     app.route = route::Route::Sessions;
     let data = UiData::default();
@@ -238,6 +238,10 @@ fn sessions_help_distinguishes_main_usage_rows_from_hermes_estimates() {
     assert!(english.contains("proxy_request_logs"), "{english}");
     assert!(english.contains("Hermes"), "{english}");
     assert!(english.contains("state.db"), "{english}");
+    assert!(english.to_lowercase().contains("estimate"), "{english}");
+    assert!(english.to_lowercase().contains("not a bill"), "{english}");
+    assert!(!english.contains('≥'), "{english}");
+    assert!(!english.contains('~'), "{english}");
 
     drop(_english);
     let _chinese = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::Chinese);
@@ -245,6 +249,10 @@ fn sessions_help_distinguishes_main_usage_rows_from_hermes_estimates() {
     assert!(chinese.contains("proxy_request_logs"), "{chinese}");
     assert!(chinese.contains("Hermes"), "{chinese}");
     assert!(chinese.contains("state.db"), "{chinese}");
+    assert!(chinese.contains("估算"), "{chinese}");
+    assert!(chinese.contains("不是账单"), "{chinese}");
+    assert!(!chinese.contains('≥'), "{chinese}");
+    assert!(!chinese.contains('~'), "{chinese}");
 }
 
 struct EnvGuard {

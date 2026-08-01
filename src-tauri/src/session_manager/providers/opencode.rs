@@ -8,8 +8,8 @@ use serde_json::Value;
 use crate::session_manager::cache::{self, FileScanTarget};
 use crate::session_manager::scan_cache_store::ScanCacheStore;
 use crate::session_manager::{
-    append_utf8_bounded, truncate_string_utf8, SearchSnippet, SessionCreatedAtKind, SessionMessage,
-    SessionMessageBatch, SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
+    append_utf8_bounded, truncate_string_utf8, SearchSnippet, SessionMessage, SessionMessageBatch,
+    SessionMessageBatchBuilder, SessionMeta, SessionSearchHit,
     SESSION_MESSAGE_PREVIEW_MAX_MESSAGES, SESSION_MESSAGE_PREVIEW_MAX_MESSAGE_BYTES,
     SESSION_MESSAGE_PREVIEW_MAX_ROLE_BYTES,
 };
@@ -368,7 +368,6 @@ fn decode_sqlite_meta(row: &rusqlite::Row<'_>, db_display: &str) -> rusqlite::Re
         project_dir: (!directory.is_empty()).then_some(directory),
         created_at: Some(created),
         source_mtime_ns: Some(updated),
-        created_at_kind: Some(SessionCreatedAtKind::ProviderTimestamp),
         last_active_at: Some(updated),
         source_path: Some(format!("sqlite:{db_display}:{session_id}")),
         resume_command: Some(format!("opencode session resume {session_id}")),
@@ -1616,7 +1615,6 @@ fn parse_session_cancellable(
         project_dir: directory,
         created_at,
         source_mtime_ns: None,
-        created_at_kind: created_at.map(|_| SessionCreatedAtKind::ProviderTimestamp),
         last_active_at: updated_at.or(created_at),
         source_path: Some(
             storage
@@ -1658,13 +1656,6 @@ fn parse_session_lightweight(
     let created_at = provider_created_at
         .or(provider_updated_at)
         .or(fallback_time);
-    let created_at_kind = if provider_created_at.is_some() || provider_updated_at.is_some() {
-        Some(SessionCreatedAtKind::ProviderTimestamp)
-    } else if fallback_time.is_some() {
-        Some(SessionCreatedAtKind::FileMtimeFallback)
-    } else {
-        None
-    };
     let display_title = explicit_title
         .clone()
         .or_else(|| directory.as_deref().and_then(path_basename))
@@ -1687,7 +1678,6 @@ fn parse_session_lightweight(
         project_dir: directory,
         created_at,
         source_mtime_ns: None,
-        created_at_kind,
         last_active_at: updated_at.or(created_at),
         source_path: Some(
             storage

@@ -2498,10 +2498,10 @@ impl SessionsState {
             .iter()
             .map(SessionRowIdentity::capture)
             .collect::<Vec<_>>();
-        let targets = self
+        let cost_identities = self
             .rows
             .iter()
-            .map(crate::services::session_cost::SessionCostTarget::from)
+            .map(crate::services::session_cost::SessionCostIdentity::from)
             .collect::<Vec<_>>();
         self.cost_seq = self.cost_seq.wrapping_add(1);
         self.cost_cancel_pending = None;
@@ -2518,7 +2518,7 @@ impl SessionsState {
                 cost_seq: self.cost_seq,
                 page_token,
                 page_index,
-                targets,
+                identities: cost_identities,
             },
         )
     }
@@ -5228,7 +5228,7 @@ mod sessions_state_tests {
         ));
         let first_page_first_id = state.rows[0].session_id.clone();
         state.rows[0].usage = Some(crate::session_manager::SessionUsageSummary {
-            cost: Some(1.25),
+            estimated_cost_usd: Some(1.25),
             ..crate::session_manager::SessionUsageSummary::default()
         });
 

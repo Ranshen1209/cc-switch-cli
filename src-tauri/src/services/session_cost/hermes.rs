@@ -5,12 +5,12 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OpenFlags};
 
 use crate::error::AppError;
-use crate::session_manager::{SessionCostCoverage, SessionCostKind, SessionUsageSummary};
+use crate::session_manager::SessionUsageSummary;
 
-use super::{QueryControl, SessionCostIdentity, SessionCostTarget};
+use super::{QueryControl, SessionCostIdentity};
 
 pub(super) fn project(
-    targets: &[SessionCostTarget],
+    identities: &[SessionCostIdentity],
     control: &QueryControl,
 ) -> Result<HashMap<SessionCostIdentity, SessionUsageSummary>, AppError> {
     let path = crate::hermes_config::get_hermes_dir().join("state.db");
@@ -29,20 +29,20 @@ pub(super) fn project(
     conn.pragma_update(None, "query_only", true)
         .map_err(AppError::from)?;
     control.install_progress_handler(&conn);
-    let result = project_connection(&conn, targets, control);
+    let result = project_connection(&conn, identities, control);
     QueryControl::clear_progress_handler(&conn);
     result
 }
 
 fn project_connection(
     conn: &Connection,
-    targets: &[SessionCostTarget],
+    identities: &[SessionCostIdentity],
     control: &QueryControl,
 ) -> Result<HashMap<SessionCostIdentity, SessionUsageSummary>, AppError> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|error| AppError::Database(format!("begin Hermes cost snapshot: {error}")))?;
-    let overlays = project_snapshot(&tx, targets, control)?;
+    let overlays = project_snapshot(&tx, identities, control)?;
     tx.commit()
         .map_err(|error| AppError::Database(format!("end Hermes cost snapshot: {error}")))?;
     Ok(overlays)
@@ -50,59 +50,49 @@ fn project_connection(
 
 fn project_snapshot(
     conn: &Connection,
-    targets: &[SessionCostTarget],
+    identities: &[SessionCostIdentity],
     control: &QueryControl,
 ) -> Result<HashMap<SessionCostIdentity, SessionUsageSummary>, AppError> {
-    let wanted = targets
-        .iter()
-        .map(|target| target.identity.session_id.clone())
-        .collect::<HashSet<_>>();
-    let mut combined = HashMap::<String, UsageBuckets>::new();
+    if !table_exists(conn, "sessions")? {
+        return Ok(HashMap::new());
+    }
+    let columns = table_columns(conn, "sessions")?;
+    if [
+        "id",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    ]
+    .iter()
+    .any(|column| !columns.contains(*column))
+    {
+        return Ok(HashMap::new());
+    }
 
-    if table_exists(conn, "session_model_usage")? {
-        let columns = table_columns(conn, "session_model_usage")?;
-        if columns.contains("session_id") {
-            for (id, usage) in query_table(
-                conn,
-                "session_model_usage",
-                "session_id",
-                &columns,
-                &wanted,
-                control,
-            )? {
-                combined.insert(id, usage);
-            }
-        }
-    }
-    if table_exists(conn, "sessions")? {
-        let columns = table_columns(conn, "sessions")?;
-        if columns.contains("id") {
-            for (id, usage) in query_table(conn, "sessions", "id", &columns, &wanted, control)? {
-                combined
-                    .entry(id)
-                    .and_modify(|current| *current = current.maximum(usage))
-                    .or_insert(usage);
-            }
-        }
-    }
+    let wanted = identities
+        .iter()
+        .map(|identity| identity.session_id.clone())
+        .collect::<HashSet<_>>();
+    let by_session = query_sessions(conn, &columns, &wanted, control)?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
 
     let mut overlays = HashMap::new();
-    for target in targets {
-        let Some(usage) = combined.get(&target.identity.session_id).copied() else {
+    for identity in identities {
+        let Some(usage) = by_session.get(&identity.session_id).copied() else {
             continue;
         };
         if usage.is_empty() {
             continue;
         }
-        overlays.insert(target.identity.clone(), usage.into_summary());
+        overlays.insert(identity.clone(), usage.into_summary());
     }
     Ok(overlays)
 }
 
-fn query_table(
+fn query_sessions(
     conn: &Connection,
-    table: &str,
-    id_column: &str,
     columns: &HashSet<String>,
     wanted: &HashSet<String>,
     control: &QueryControl,
@@ -110,15 +100,8 @@ fn query_table(
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
-    let token = |name: &str| {
-        if columns.contains(name) {
-            format!("COALESCE(SUM(source.{name}), 0)")
-        } else {
-            "0".to_string()
-        }
-    };
     let cost = if columns.contains("estimated_cost_usd") {
-        "SUM(source.estimated_cost_usd)"
+        "source.estimated_cost_usd"
     } else {
         "NULL"
     };
@@ -128,33 +111,41 @@ fn query_table(
     let sql = format!(
         "WITH wanted(session_id) AS (VALUES {values})
          SELECT wanted.session_id,
-                {} AS input_tokens,
-                {} AS output_tokens,
-                {} AS cache_read_tokens,
-                {} AS cache_write_tokens,
+                source.input_tokens,
+                source.output_tokens,
+                source.cache_read_tokens,
+                source.cache_write_tokens,
                 {cost} AS estimated_cost_usd
          FROM wanted
-         JOIN {table} source ON source.{id_column} = wanted.session_id
-         GROUP BY wanted.session_id",
-        token("input_tokens"),
-        token("output_tokens"),
-        token("cache_read_tokens"),
-        token("cache_write_tokens"),
+         JOIN sessions source ON source.id = wanted.session_id",
     );
     let bindings = wanted.iter().cloned().map(Value::Text).collect::<Vec<_>>();
     let mut statement = conn.prepare(&sql).map_err(AppError::from)?;
     let rows = statement
         .query_map(params_from_iter(bindings), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
+            let session_id = row.get::<_, String>(0)?;
+            let Some(input_tokens) = valid_tokens(row.get(1)?) else {
+                return Ok(None);
+            };
+            let Some(output_tokens) = valid_tokens(row.get(2)?) else {
+                return Ok(None);
+            };
+            let Some(cache_read_tokens) = valid_tokens(row.get(3)?) else {
+                return Ok(None);
+            };
+            let Some(cache_creation_tokens) = valid_tokens(row.get(4)?) else {
+                return Ok(None);
+            };
+            Ok(Some((
+                session_id,
                 UsageBuckets {
-                    input_tokens: nonnegative(row.get(1)?),
-                    output_tokens: nonnegative(row.get(2)?),
-                    cache_read_tokens: nonnegative(row.get(3)?),
-                    cache_creation_tokens: nonnegative(row.get(4)?),
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
                     estimated_cost_usd: valid_cost(row.get(5)?),
                 },
-            ))
+            )))
         })
         .map_err(AppError::from)?;
     let mut result = Vec::new();
@@ -164,7 +155,9 @@ fn query_table(
                 "Hermes session cost projection cancelled".to_string(),
             ));
         }
-        result.push(row.map_err(AppError::from)?);
+        if let Some(row) = row.map_err(AppError::from)? {
+            result.push(row);
+        }
     }
     Ok(result)
 }
@@ -179,20 +172,6 @@ struct UsageBuckets {
 }
 
 impl UsageBuckets {
-    fn maximum(self, other: Self) -> Self {
-        Self {
-            input_tokens: self.input_tokens.max(other.input_tokens),
-            output_tokens: self.output_tokens.max(other.output_tokens),
-            cache_read_tokens: self.cache_read_tokens.max(other.cache_read_tokens),
-            cache_creation_tokens: self.cache_creation_tokens.max(other.cache_creation_tokens),
-            estimated_cost_usd: match (self.estimated_cost_usd, other.estimated_cost_usd) {
-                (Some(left), Some(right)) => Some(left.max(right)),
-                (Some(value), None) | (None, Some(value)) => Some(value),
-                (None, None) => None,
-            },
-        }
-    }
-
     fn is_empty(self) -> bool {
         self.input_tokens == 0
             && self.output_tokens == 0
@@ -206,9 +185,7 @@ impl UsageBuckets {
             output_tokens: self.output_tokens,
             cache_read_tokens: self.cache_read_tokens,
             cache_creation_tokens: self.cache_creation_tokens,
-            cost: self.estimated_cost_usd,
-            cost_kind: SessionCostKind::Estimated,
-            coverage: SessionCostCoverage::Unknown,
+            estimated_cost_usd: self.estimated_cost_usd,
         }
     }
 }
@@ -235,8 +212,8 @@ fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>, AppE
         .map_err(AppError::from)
 }
 
-fn nonnegative(value: i64) -> u64 {
-    value.max(0) as u64
+fn valid_tokens(value: Option<i64>) -> Option<u64> {
+    value.and_then(|value| u64::try_from(value).ok())
 }
 
 fn valid_cost(value: Option<f64>) -> Option<f64> {
@@ -251,8 +228,7 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use crate::services::session_cost::{QueryControl, SessionCostIdentity, SessionCostTarget};
-    use crate::session_manager::{SessionCostCoverage, SessionCostKind};
+    use crate::services::session_cost::{QueryControl, SessionCostIdentity};
 
     use super::project_connection;
 
@@ -264,16 +240,11 @@ mod tests {
         }
     }
 
-    fn target(session_id: &str) -> SessionCostTarget {
-        SessionCostTarget {
-            identity: SessionCostIdentity {
-                provider_id: "hermes".to_string(),
-                session_id: session_id.to_string(),
-                source_path: Some(format!("state.db#{session_id}")),
-            },
-            created_at: None,
-            source_mtime_ns: None,
-            created_at_kind: None,
+    fn target(session_id: &str) -> SessionCostIdentity {
+        SessionCostIdentity {
+            provider_id: "hermes".to_string(),
+            session_id: session_id.to_string(),
+            source_path: Some(format!("state.db#{session_id}")),
         }
     }
 
@@ -281,17 +252,16 @@ mod tests {
     fn wanted_sessions_are_projected_as_estimates_from_hermes_state() {
         let conn = Connection::open_in_memory().expect("Hermes fixture");
         conn.execute_batch(
-            "CREATE TABLE session_model_usage (
-                 session_id TEXT NOT NULL,
+            "CREATE TABLE sessions (
+                 id TEXT NOT NULL,
                  input_tokens INTEGER NOT NULL,
                  output_tokens INTEGER NOT NULL,
                  cache_read_tokens INTEGER NOT NULL,
                  cache_write_tokens INTEGER NOT NULL,
                  estimated_cost_usd REAL NOT NULL
              );
-             INSERT INTO session_model_usage VALUES
-                 ('wanted', 10, 20, 30, 40, 0.5),
-                 ('wanted', 1, 2, 3, 4, 0.25),
+             INSERT INTO sessions VALUES
+                 ('wanted', 11, 22, 33, 44, 0.75),
                  ('unrelated', 999, 999, 999, 999, 99.0);",
         )
         .expect("seed Hermes fixture");
@@ -300,9 +270,7 @@ mod tests {
         let overlays = project_connection(&conn, std::slice::from_ref(&wanted), &control())
             .expect("project Hermes state");
         assert_eq!(overlays.len(), 1);
-        let usage = overlays
-            .get(&wanted.identity)
-            .expect("wanted Hermes overlay");
+        let usage = overlays.get(&wanted).expect("wanted Hermes overlay");
         assert_eq!(
             (
                 usage.input_tokens,
@@ -312,9 +280,7 @@ mod tests {
             ),
             (11, 22, 33, 44)
         );
-        assert_eq!(usage.cost, Some(0.75));
-        assert_eq!(usage.cost_kind, SessionCostKind::Estimated);
-        assert_eq!(usage.coverage, SessionCostCoverage::Unknown);
+        assert_eq!(usage.estimated_cost_usd, Some(0.75));
     }
 
     #[test]
@@ -324,22 +290,74 @@ mod tests {
             "CREATE TABLE sessions (
                  id TEXT NOT NULL,
                  input_tokens INTEGER NOT NULL,
-                 output_tokens INTEGER NOT NULL
+                 output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 cache_write_tokens INTEGER NOT NULL
              );
-             INSERT INTO sessions VALUES ('wanted', 10, 5);",
+             INSERT INTO sessions VALUES ('wanted', 10, 5, 2, 1);",
         )
         .expect("seed Hermes fixture");
 
         let wanted = target("wanted");
         let overlays = project_connection(&conn, std::slice::from_ref(&wanted), &control())
             .expect("project Hermes state");
-        let usage = overlays
-            .get(&wanted.identity)
-            .expect("wanted Hermes overlay");
+        let usage = overlays.get(&wanted).expect("wanted Hermes overlay");
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
-        assert_eq!(usage.cost, None);
-        assert_eq!(usage.cost_kind, SessionCostKind::Estimated);
+        assert_eq!(usage.estimated_cost_usd, None);
+    }
+
+    #[test]
+    fn missing_any_token_column_fails_closed_instead_of_inventing_zero() {
+        let conn = Connection::open_in_memory().expect("Hermes fixture");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT NOT NULL,
+                 input_tokens INTEGER NOT NULL,
+                 output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 estimated_cost_usd REAL
+             );
+             INSERT INTO sessions VALUES ('wanted', 10, 5, 2, 0.75);",
+        )
+        .expect("seed incomplete Hermes schema");
+
+        let wanted = target("wanted");
+        let overlays = project_connection(&conn, std::slice::from_ref(&wanted), &control())
+            .expect("project incomplete Hermes state");
+
+        assert!(
+            overlays.is_empty(),
+            "a missing cache_write_tokens column is unknown, not a trustworthy zero"
+        );
+    }
+
+    #[test]
+    fn null_or_negative_token_values_fail_closed() {
+        let conn = Connection::open_in_memory().expect("Hermes fixture");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT NOT NULL,
+                 input_tokens INTEGER,
+                 output_tokens INTEGER,
+                 cache_read_tokens INTEGER,
+                 cache_write_tokens INTEGER,
+                 estimated_cost_usd REAL
+             );
+             INSERT INTO sessions VALUES
+                 ('null-token', 10, 5, NULL, 1, 0.75),
+                 ('negative-token', 10, 5, -1, 1, 0.75);",
+        )
+        .expect("seed invalid Hermes rows");
+
+        let targets = [target("null-token"), target("negative-token")];
+        let overlays =
+            project_connection(&conn, &targets, &control()).expect("project invalid Hermes rows");
+
+        assert!(
+            overlays.is_empty(),
+            "invalid external token values must not be normalized into believable usage"
+        );
     }
 
     #[test]
@@ -350,25 +368,24 @@ mod tests {
                  id TEXT NOT NULL,
                  input_tokens INTEGER NOT NULL,
                  output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 cache_write_tokens INTEGER NOT NULL,
                  actual_cost_usd REAL NOT NULL
              );
-             INSERT INTO sessions VALUES ('wanted', 10, 5, 0.75);",
+             INSERT INTO sessions VALUES ('wanted', 10, 5, 0, 0, 0.75);",
         )
         .expect("seed Hermes fixture");
 
         let wanted = target("wanted");
         let overlays = project_connection(&conn, std::slice::from_ref(&wanted), &control())
             .expect("project Hermes state");
-        let usage = overlays
-            .get(&wanted.identity)
-            .expect("wanted Hermes overlay");
+        let usage = overlays.get(&wanted).expect("wanted Hermes overlay");
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(
-            usage.cost, None,
-            "only the source's estimated_cost_usd field may render with ~"
+            usage.estimated_cost_usd, None,
+            "only the source's estimated_cost_usd field may be displayed"
         );
-        assert_eq!(usage.cost_kind, SessionCostKind::Estimated);
     }
 
     #[test]
@@ -379,23 +396,121 @@ mod tests {
                  id TEXT NOT NULL,
                  input_tokens INTEGER NOT NULL,
                  output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 cache_write_tokens INTEGER NOT NULL,
                  estimated_cost_usd REAL
              );
-             INSERT INTO sessions VALUES ('wanted', 10, 5, NULL);",
+             INSERT INTO sessions VALUES ('wanted', 10, 5, 0, 0, NULL);",
         )
         .expect("seed Hermes fixture");
 
         let wanted = target("wanted");
         let overlays = project_connection(&conn, std::slice::from_ref(&wanted), &control())
             .expect("project Hermes state");
-        let usage = overlays
-            .get(&wanted.identity)
-            .expect("wanted Hermes overlay");
+        let usage = overlays.get(&wanted).expect("wanted Hermes overlay");
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(
-            usage.cost, None,
-            "missing source estimates must render as unavailable, not ~$0"
+            usage.estimated_cost_usd, None,
+            "missing source estimates must render as unavailable, not $0"
+        );
+    }
+
+    #[test]
+    fn session_estimate_must_be_valid_when_tokens_are_present() {
+        let conn = Connection::open_in_memory().expect("Hermes fixture");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                 id TEXT NOT NULL,
+                 input_tokens INTEGER NOT NULL,
+                 output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 cache_write_tokens INTEGER NOT NULL,
+                 estimated_cost_usd REAL
+             );
+             INSERT INTO sessions VALUES
+                 ('missing', 12, 6, 0, 0, NULL),
+                 ('priced', 10, 5, 0, 0, 0.5),
+                 ('negative', 12, 6, 0, 0, -0.1);",
+        )
+        .expect("seed Hermes fixture");
+
+        let missing = target("missing");
+        let priced = target("priced");
+        let negative = target("negative");
+        let overlays = project_connection(
+            &conn,
+            &[missing.clone(), priced.clone(), negative.clone()],
+            &control(),
+        )
+        .expect("project Hermes state");
+
+        let missing_usage = overlays.get(&missing).expect("missing overlay");
+        assert_eq!(
+            (missing_usage.input_tokens, missing_usage.output_tokens),
+            (12, 6)
+        );
+        assert_eq!(missing_usage.estimated_cost_usd, None);
+
+        let priced_usage = overlays.get(&priced).expect("priced overlay");
+        assert_eq!(priced_usage.estimated_cost_usd, Some(0.5));
+
+        let negative_usage = overlays.get(&negative).expect("negative overlay");
+        assert_eq!(negative_usage.estimated_cost_usd, None);
+    }
+
+    #[test]
+    fn sessions_table_is_the_only_authoritative_session_total() {
+        let conn = Connection::open_in_memory().expect("Hermes fixture");
+        conn.execute_batch(
+            "CREATE TABLE session_model_usage (
+                 session_id TEXT NOT NULL,
+                 input_tokens INTEGER NOT NULL,
+                 output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 cache_write_tokens INTEGER NOT NULL,
+                 estimated_cost_usd REAL
+             );
+             CREATE TABLE sessions (
+                 id TEXT NOT NULL,
+                 input_tokens INTEGER NOT NULL,
+                 output_tokens INTEGER NOT NULL,
+                 cache_read_tokens INTEGER NOT NULL,
+                 cache_write_tokens INTEGER NOT NULL,
+                 estimated_cost_usd REAL
+             );
+             INSERT INTO session_model_usage VALUES
+                 ('wanted', 100, 20, 30, 40, 0.75),
+                 ('attribution-only', 90, 9, 8, 7, 0.65);
+             INSERT INTO sessions VALUES
+                 ('wanted', 10, 2, 3, 4, 0.5);",
+        )
+        .expect("seed dual-table Hermes fixture");
+
+        let wanted = target("wanted");
+        let attribution_only = target("attribution-only");
+        let overlays = project_connection(
+            &conn,
+            &[wanted.clone(), attribution_only.clone()],
+            &control(),
+        )
+        .expect("project dual-table Hermes state");
+
+        assert_eq!(
+            overlays.get(&wanted),
+            Some(&crate::session_manager::SessionUsageSummary {
+                input_tokens: 10,
+                output_tokens: 2,
+                cache_read_tokens: 3,
+                cache_creation_tokens: 4,
+                estimated_cost_usd: Some(0.5),
+            }),
+            "tokens and cost must come from the complete sessions row"
+        );
+        assert_eq!(
+            overlays.get(&attribution_only),
+            None,
+            "per-model attribution rows are not session-level totals"
         );
     }
 
