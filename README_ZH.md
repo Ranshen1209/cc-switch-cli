@@ -22,13 +22,19 @@
 本项目是原版 [CC-Switch](https://github.com/farion1231/cc-switch) 的 **CLI 分支**。🔄 WebDAV 同步功能与上游项目完全兼容。
 
 
-**致谢：** 原始架构和核心功能来自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
-
 **更新日志：** [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
 ## ❤️赞助商
+
+[![AICodeMirror](assets/partners/banners/aicodemirror.png)](https://www.aicodemirror.ai/register?invitecode=77V9EA)
+
+感谢 **AICodeMirror** 赞助了本项目！AICodeMirror 提供 Claude / Codex / Gemini 官方高稳定中转服务，支持企业级高并发、极速开票、7×24 专属技术支持。Codex 官方渠道低至 **0.7 折**，充值更有折上折！
+
+AICodeMirror 为 CC-Switch CLI 项目的用户提供了特别福利，通过[此链接](https://www.aicodemirror.ai/register?invitecode=77V9EA)注册的用户，可享受首充 **8 折**。
+
+---
 
 <table>
   <tr>
@@ -95,17 +101,6 @@
       CC-Switch CLI 专属优惠：通过
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">此链接</a>
       注册，并在充值时填写优惠码 <code>cc-switch-cli</code>，即可享受 <b>9 折优惠</b>。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://www.aicodemirror.ai/register?invitecode=9915W3">
-        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>AICodeMirror</b> 赞助本项目！<b>AICodeMirror</b> 提供 Claude Code / Codex / Gemini CLI 官方高稳定中转服务，支持企业级并发、快速开票与 7x24 专属技术支持。Claude Code / Codex / Gemini 官方通道价格低至原价的 <b>38% / 2% / 9%</b>，充值另有折上折！<br/>
-      <b>AICodeMirror</b> 为 cc-switch-cli 用户提供专属福利：通过<a href="https://www.aicodemirror.ai/register?invitecode=9915W3">此链接</a>注册，首充可享 <b>8 折</b>，即 <b>20% off</b>，企业客户最高可享 <b>75 折</b>，即 <b>25% off</b>。
     </td>
   </tr>
   <tr>

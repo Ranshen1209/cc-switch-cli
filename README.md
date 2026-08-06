@@ -26,13 +26,19 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 🔄 The WebDAV sync feature is fully compatible with the upstream project.
 
 
-**Credits:** Original architecture and core functionality from [farion1231/cc-switch](https://github.com/farion1231/cc-switch)
-
 **Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
 ## ❤️ Sponsor
+
+[![AICodeMirror](assets/partners/banners/aicodemirror.png)](https://www.aicodemirror.ai/register?invitecode=77V9EA)
+
+Thanks to **AICodeMirror** for sponsoring this project! AICodeMirror provides highly reliable official relay services for Claude, Codex, and Gemini, supporting enterprise-grade concurrency, fast invoice issuance, and dedicated 24/7 technical support. Official Codex access is available for as little as **7% of the standard price**, with additional discounts on account top-ups!
+
+AICodeMirror also offers an exclusive benefit to users of the CC-Switch CLI project: register through [this link](https://www.aicodemirror.ai/register?invitecode=77V9EA) to receive **20% off your first top-up**.
+
+---
 
 <table>
   <tr>
@@ -96,16 +102,6 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
     <td>
       Thanks to <b>PackyCode</b> for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. <br/>
       PackyCode provides special discounts for our software users: register via <a href="https://www.packyapi.com/register?aff=cc-switch-cli">this link</a> and use promo code <code>cc-switch-cli</code> when recharging to get <b>10% off</b>.
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://www.aicodemirror.ai/register?invitecode=9915W3">
-        <img src="assets/partners/logos/aicodemirror.png" alt="AICodeMirror" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>AICodeMirror</b> for sponsoring this project! <b>AICodeMirror</b> provides official high-stability relay services for Claude Code / Codex / Gemini CLI, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at <b>38% / 2% / 9%</b> of original price, with extra discounts on top-ups! <b>AICodeMirror</b> offers special benefits for cc-switch-cli users: register via <a href="https://www.aicodemirror.ai/register?invitecode=9915W3">this link</a> to enjoy <b>20% off</b> your first top-up, and enterprise customers can get up to <b>25% off</b>!
     </td>
   </tr>
   <tr>

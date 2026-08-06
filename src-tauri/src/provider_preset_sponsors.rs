@@ -84,7 +84,7 @@ pub(crate) const AI_CODE_MIRROR: SponsorProviderPreset = SponsorProviderPreset {
     provider_name: "AICodeMirror",
     chip_label: "* AICodeMirror",
     website_url: "https://www.aicodemirror.ai",
-    register_url: "https://www.aicodemirror.ai/register?invitecode=9915W3",
+    register_url: "https://www.aicodemirror.ai/register?invitecode=77V9EA",
     promo_code: "",
     partner_promotion_key: "aicodemirror",
     claude_base_url: "https://api.aicodemirror.ai/api/claudecode",
@@ -145,39 +145,39 @@ pub(crate) const FENNO: SponsorProviderPreset = SponsorProviderPreset {
 };
 
 pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 8] = [
+    AI_CODE_MIRROR,
     CLAUDE_API,
     PACKY_CODE,
     CUBENCE,
     RUN_API,
-    AI_CODE_MIRROR,
     DDS,
     QINIU,
     FENNO,
 ];
 
 const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 8] = [
+    AI_CODE_MIRROR,
     CLAUDE_API,
     QINIU,
     FENNO,
     RUN_API,
     CUBENCE,
     PACKY_CODE,
-    AI_CODE_MIRROR,
     DDS,
 ];
 const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 7] = [
+    AI_CODE_MIRROR,
     QINIU,
     FENNO,
     RUN_API,
     CUBENCE,
     PACKY_CODE,
-    AI_CODE_MIRROR,
     DDS,
 ];
 const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 4] =
-    [QINIU, CUBENCE, PACKY_CODE, AI_CODE_MIRROR];
+    [AI_CODE_MIRROR, QINIU, CUBENCE, PACKY_CODE];
 const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 6] =
-    [QINIU, FENNO, RUN_API, CUBENCE, PACKY_CODE, AI_CODE_MIRROR];
+    [AI_CODE_MIRROR, QINIU, FENNO, RUN_API, CUBENCE, PACKY_CODE];
 
 pub(crate) fn sponsor_provider_preset(id: &str) -> Option<SponsorProviderPreset> {
     SPONSOR_PROVIDER_PRESETS
@@ -217,14 +217,47 @@ mod tests {
     }
 
     #[test]
+    fn aicodemirror_uses_cli_affiliate_and_upstream_api_hosts() {
+        assert_eq!(AI_CODE_MIRROR.website_url, "https://www.aicodemirror.ai");
+        assert_eq!(
+            AI_CODE_MIRROR.register_url,
+            "https://www.aicodemirror.ai/register?invitecode=77V9EA"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.claude_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.codex_base_url,
+            "https://api.aicodemirror.ai/api/codex/backend-api/codex"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.gemini_base_url,
+            "https://api.aicodemirror.ai/api/gemini"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.opencode_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.hermes_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.openclaw_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+    }
+
+    #[test]
     fn additive_apps_share_one_sponsor_support_matrix() {
         let expected = [
+            "aicodemirror",
             "qiniu",
             "fenno",
             "runapi",
             "cubence",
             "packycode",
-            "aicodemirror",
         ];
         for app_type in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
             let ids = sponsor_provider_presets_for_app(&app_type)
@@ -232,6 +265,26 @@ mod tests {
                 .map(|preset| preset.id)
                 .collect::<Vec<_>>();
             assert_eq!(ids, expected);
+        }
+    }
+
+    #[test]
+    fn aicodemirror_is_the_first_sponsor_for_every_supported_app() {
+        for app_type in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            assert_eq!(
+                sponsor_provider_presets_for_app(&app_type)
+                    .first()
+                    .map(|preset| preset.id),
+                Some("aicodemirror"),
+                "AICodeMirror should be the first sponsor preset for {app_type:?}"
+            );
         }
     }
 }

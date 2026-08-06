@@ -1150,13 +1150,13 @@ requires_openai_auth = true
                 "Custom",
                 "Claude Official",
                 "Codex",
+                "* AICodeMirror",
                 "* ClaudeAPI",
                 "* Qiniu",
                 "* FennoAI",
                 "* RunAPI",
                 "* Cubence",
                 "* PackyCode",
-                "* AICodeMirror",
                 "* DDS",
             ]
         );
@@ -1165,12 +1165,12 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "OpenAI Official",
+                "* AICodeMirror",
                 "* Qiniu",
                 "* FennoAI",
                 "* RunAPI",
                 "* Cubence",
                 "* PackyCode",
-                "* AICodeMirror",
                 "* DDS",
                 "DeepSeek",
             ]
@@ -1180,46 +1180,46 @@ requires_openai_auth = true
             vec![
                 "Custom",
                 "Google OAuth",
+                "* AICodeMirror",
                 "* Qiniu",
                 "* Cubence",
                 "* PackyCode",
-                "* AICodeMirror",
             ]
         );
         assert_eq!(
             labels(AppType::OpenCode),
             vec![
                 "Custom",
+                "* AICodeMirror",
                 "* Qiniu",
                 "* FennoAI",
                 "* RunAPI",
                 "* Cubence",
-                "* PackyCode",
-                "* AICodeMirror"
+                "* PackyCode"
             ]
         );
         assert_eq!(
             labels(AppType::Hermes),
             vec![
                 "Custom",
+                "* AICodeMirror",
                 "* Qiniu",
                 "* FennoAI",
                 "* RunAPI",
                 "* Cubence",
-                "* PackyCode",
-                "* AICodeMirror"
+                "* PackyCode"
             ]
         );
         assert_eq!(
             labels(AppType::OpenClaw),
             vec![
                 "Custom",
+                "* AICodeMirror",
                 "* Qiniu",
                 "* FennoAI",
                 "* RunAPI",
                 "* Cubence",
-                "* PackyCode",
-                "* AICodeMirror"
+                "* PackyCode"
             ]
         );
     }
@@ -1862,7 +1862,15 @@ requires_openai_auth = true
             hermes.settings_config["base_url"],
             "https://api.aicodemirror.ai/api/claudecode"
         );
-        assert_eq!(hermes.settings_config["models"][0]["id"], "claude-opus-5");
+        assert!(hermes.settings_config.get("api_key").is_none());
+        assert_eq!(
+            hermes.settings_config["models"],
+            json!([
+                { "id": "claude-opus-5", "name": "Claude Opus 5" },
+                { "id": "claude-sonnet-5", "name": "Claude Sonnet 5" },
+                { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5" },
+            ])
+        );
 
         let openclaw =
             build_provider_template_seed(&AppType::OpenClaw, ProviderAddTemplate::Cubence, &[])
