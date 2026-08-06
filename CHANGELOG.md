@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Updater / Linux libc Safety**: Keep Linux `auto` and `musl` updates on the static musl build, require an explicit `CC_SWITCH_LINUX_LIBC=glibc` opt-in for glibc assets, and report the asset that is actually selected without silently crossing the libc boundary. Fixes [#398](https://github.com/SaladDay/cc-switch-cli/issues/398).
+
 ## [5.10.0] - 2026-08-02
 
 ### Added

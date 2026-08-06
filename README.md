@@ -194,7 +194,7 @@ curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/in
 This installs `cc-switch` to `~/.local/bin`. Set `CC_SWITCH_INSTALL_DIR` to change the target directory.
 
 - If the target already exists, the installer prompts in TTY and refuses to overwrite in non-interactive shells unless `CC_SWITCH_FORCE=1` is set.
-- On Linux, set `CC_SWITCH_LINUX_LIBC=glibc` if you need the glibc build.
+- On Linux, auto mode uses the static musl build and never falls back to glibc. Set `CC_SWITCH_LINUX_LIBC=glibc` only when you explicitly need a compatible glibc build.
 
 <details>
 <summary>Manual Installation</summary>
