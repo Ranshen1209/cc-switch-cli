@@ -7,10 +7,7 @@ use crate::commands::workspace;
 use crate::error::AppError;
 use crate::hermes_config::MemoryKind;
 use crate::services::ConfigService;
-use crate::settings::{
-    get_s3_sync_settings, get_webdav_sync_settings, set_s3_sync_settings, set_webdav_sync_settings,
-    S3SyncSettings, WebDavSyncSettings,
-};
+use crate::settings::set_webdav_sync_settings;
 
 use super::super::app::{LoadingKind, Overlay, TextViewState, ToastKind};
 use super::super::data::{load_state, UiData};
@@ -39,10 +36,7 @@ pub(super) fn show_full(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppErr
     let config = state.config.read().map_err(AppError::from)?;
     let content = serde_json::to_string_pretty(&*config)
         .map_err(|e| AppError::Message(texts::failed_to_serialize_json(&e.to_string())))?;
-    let title = texts::config_show_full()
-        .trim_start_matches("👁️")
-        .trim()
-        .to_string();
+    let title = texts::config_show_full().trim().to_string();
     ctx.app.overlay = Overlay::TextView(TextViewState {
         title,
         lines: content.lines().map(|s| s.to_string()).collect(),
@@ -162,117 +156,6 @@ pub(super) fn webdav_check_connection(ctx: &mut RuntimeActionContext<'_>) -> Res
         WebDavReqKind::CheckConnection,
         texts::tui_webdav_loading_title_check_connection().to_string(),
     )
-}
-
-pub(super) fn webdav_save(
-    ctx: &mut RuntimeActionContext<'_>,
-    mut settings: WebDavSyncSettings,
-) -> Result<(), AppError> {
-    settings.auto_sync = false;
-    set_webdav_sync_settings(Some(settings))?;
-    ctx.app.form = None;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    ctx.app
-        .push_toast(texts::tui_toast_webdav_settings_saved(), ToastKind::Success);
-    webdav_check_connection(ctx)
-}
-
-pub(super) fn webdav_set_enabled(
-    ctx: &mut RuntimeActionContext<'_>,
-    enabled: bool,
-) -> Result<(), AppError> {
-    let mut settings = get_webdav_sync_settings()
-        .ok_or_else(|| AppError::Message(texts::tui_webdav_status_not_configured().to_string()))?;
-    settings.enabled = enabled;
-    settings.auto_sync = false;
-    set_webdav_sync_settings(Some(settings))?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    ctx.app.push_toast(
-        texts::tui_cloud_sync_backend_state_changed("WebDAV", enabled),
-        ToastKind::Success,
-    );
-    Ok(())
-}
-
-pub(super) fn s3_save(
-    ctx: &mut RuntimeActionContext<'_>,
-    mut settings: S3SyncSettings,
-) -> Result<(), AppError> {
-    settings.auto_sync = false;
-    set_s3_sync_settings(Some(settings))?;
-    ctx.app.form = None;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    ctx.app
-        .push_toast(texts::tui_toast_s3_settings_saved(), ToastKind::Success);
-    s3_check_connection(ctx)
-}
-
-pub(super) fn s3_check_connection(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    queue_s3_request(
-        ctx,
-        WebDavReqKind::S3CheckConnection,
-        texts::tui_s3_loading_title_check_connection().to_string(),
-    )
-}
-
-pub(super) fn s3_fetch_remote_info(
-    ctx: &mut RuntimeActionContext<'_>,
-    intent: super::super::app::CloudSyncTransferIntent,
-) -> Result<(), AppError> {
-    let title = match intent {
-        super::super::app::CloudSyncTransferIntent::Upload => {
-            texts::tui_s3_loading_title_prepare_upload()
-        }
-        super::super::app::CloudSyncTransferIntent::Restore => {
-            texts::tui_s3_loading_title_prepare_restore()
-        }
-    };
-    queue_s3_request(
-        ctx,
-        WebDavReqKind::S3FetchRemoteInfo { intent },
-        title.to_string(),
-    )
-}
-
-pub(super) fn s3_upload(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    queue_s3_request(
-        ctx,
-        WebDavReqKind::S3Upload,
-        texts::tui_s3_loading_title_upload().to_string(),
-    )
-}
-
-pub(super) fn s3_download(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    queue_s3_request(
-        ctx,
-        WebDavReqKind::S3Download,
-        texts::tui_s3_loading_title_restore().to_string(),
-    )
-}
-
-pub(super) fn s3_set_enabled(
-    ctx: &mut RuntimeActionContext<'_>,
-    enabled: bool,
-) -> Result<(), AppError> {
-    let mut settings = get_s3_sync_settings()
-        .ok_or_else(|| AppError::Message(texts::tui_webdav_status_not_configured().to_string()))?;
-    settings.enabled = enabled;
-    settings.auto_sync = false;
-    set_s3_sync_settings(Some(settings))?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    ctx.app.push_toast(
-        texts::tui_cloud_sync_backend_state_changed("S3 Compatible", enabled),
-        ToastKind::Success,
-    );
-    Ok(())
-}
-
-pub(super) fn s3_reset(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    set_s3_sync_settings(None)?;
-    *ctx.data = UiData::load(&ctx.app.app_type)?;
-    ctx.app
-        .push_toast(texts::tui_toast_s3_settings_cleared(), ToastKind::Success);
-    Ok(())
 }
 
 pub(super) fn webdav_upload(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
@@ -435,19 +318,27 @@ fn open_directory(path: &Path) -> Result<bool, String> {
     }
 
     #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(path);
+        command
+    };
 
     #[cfg(target_os = "linux")]
-    let mut command = Command::new("xdg-open");
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(path);
+        command
+    };
 
     #[cfg(target_os = "windows")]
-    let mut command = Command::new("explorer");
-
-    #[cfg(target_os = "android")]
-    let mut command = Command::new("termux-open");
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(path);
+        command
+    };
 
     let status = command
-        .arg(path)
         .status()
         .map_err(|error| format!("Failed to open directory {}: {error}", path.display()))?;
 
@@ -549,33 +440,6 @@ fn queue_webdav_request(
         ctx.app.overlay = Overlay::None;
         ctx.app.push_toast(
             texts::tui_toast_webdav_request_failed(&err.to_string()),
-            ToastKind::Error,
-        );
-    }
-    Ok(())
-}
-
-fn queue_s3_request(
-    ctx: &mut RuntimeActionContext<'_>,
-    kind: WebDavReqKind,
-    title: String,
-) -> Result<(), AppError> {
-    let Some(tx) = ctx.webdav_req_tx else {
-        ctx.app
-            .push_toast(texts::tui_toast_s3_worker_disabled(), ToastKind::Warning);
-        return Ok(());
-    };
-    let request_id = ctx.webdav_loading.start();
-    ctx.app.overlay = Overlay::Loading {
-        kind: LoadingKind::S3,
-        title,
-        message: texts::tui_s3_loading_message().to_string(),
-    };
-    if let Err(error) = tx.send(WebDavReq { request_id, kind }) {
-        ctx.webdav_loading.cancel();
-        ctx.app.overlay = Overlay::None;
-        ctx.app.push_toast(
-            texts::tui_toast_s3_request_failed(&error.to_string()),
             ToastKind::Error,
         );
     }

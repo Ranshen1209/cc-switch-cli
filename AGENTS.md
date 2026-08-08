@@ -80,27 +80,11 @@ Commands that normally create startup state call `AppState::try_new_with_startup
 
 OpenClaw workspace helpers live under `src/commands/workspace.rs`, not the Clap command tree. They restrict file access to the OpenClaw workspace allowlist (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `MEMORY.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`, `BOOT.md`) and daily memory files, and deliberately reject symlinks/path traversal.
 
-## TUI interaction guidance
-
-- Keep primary TUI surfaces focused on fields, current values/status, and available actions.
-- Put feature explanations, behavioral caveats, validation rules, and other long-form hints in the contextual `?` help for the focused control.
-- Do not add persistent instruction or description panels when the same information can live in `?` help.
-
 ## Proxy architecture
 
 The proxy command surface is in `src/cli/commands/proxy.rs`, orchestration lives in `src/services/proxy.rs`, and the HTTP server is in `src/proxy/server.rs` and `src/proxy/handlers.rs`.
 
 Request handling flows through `HandlerContext`, `ProviderRouter`, `RequestForwarder`, provider adapters in `src/proxy/providers/`, and response builders/handlers in `src/proxy/response*.rs`. Claude `/v1/messages` traffic may be transformed between Anthropic and OpenAI-compatible formats; Codex/OpenAI, Gemini, Copilot, and streaming-response routes are handled by provider-specific adapters. Proxy tests are split across focused integration targets such as `proxy_claude_streaming`, `proxy_claude_openai_chat`, `proxy_claude_response_parity`, `proxy_claude_forwarder_alignment`, `proxy_multi_app_passthrough`, `proxy_takeover`, `proxy_service`, and `proxy_daemon`.
-
-## Blind review protocol
-
-- After implementation and local validation are complete, send the full change set to two independent subagents for blind review.
-- For every reviewer in every round, including a later round reduced to one reviewer, provide the user's goal, intended behavior, acceptance criteria, and relevant constraints so they can judge whether the change actually satisfies the request. Do not disclose the implementation approach, fixes already made, or findings from any prior reviewer or round. Ask each reviewer to inspect all current modifications and report correctness, regression, security, performance, UX, and test-coverage issues.
-- Keep the two reviews independent. Reviewers must not receive or infer the other reviewer's findings before producing their own report.
-- Validate every finding against the code. Fix confirmed issues, then start a fresh two-reviewer blind round with new subagents under the same reviewer-context rules above.
-- When the findings have clearly converged and remaining work is only small, local patch refinement, reduce subsequent rounds to one fresh blind reviewer.
-- If review and repair keep cycling without convergence, stop patching and reconsider the design as a whole: re-check boundaries, invariants, state flow, ownership, and whether the current abstraction is the real source of the repeated defects.
-- If a design-level reconsideration still cannot produce a sound resolution, stop changing code and report the unresolved issues, tradeoffs, and evidence to the user.
 
 ## Testing requirements
 

@@ -8,6 +8,7 @@ mod app_config {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum AppType {
         Claude,
+        ClaudeDesktop,
         Codex,
         Gemini,
         OpenCode,
@@ -19,6 +20,7 @@ mod app_config {
         pub fn as_str(&self) -> &'static str {
             match self {
                 AppType::Claude => "claude",
+                AppType::ClaudeDesktop => "claude-desktop",
                 AppType::Codex => "codex",
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",

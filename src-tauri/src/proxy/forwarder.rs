@@ -1,6 +1,5 @@
 use axum::http::HeaderMap;
 use bytes::Bytes;
-use futures::{stream::BoxStream, StreamExt};
 use serde_json::Value;
 use std::{
     sync::Arc,
@@ -67,61 +66,9 @@ impl ForwardFailure {
     }
 }
 
-pub struct LiveResponse {
-    status: reqwest::StatusCode,
-    headers: reqwest::header::HeaderMap,
-    stream: BoxStream<'static, Result<Bytes, reqwest::Error>>,
-}
-
-impl std::fmt::Debug for LiveResponse {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LiveResponse")
-            .field("status", &self.status)
-            .field("headers", &self.headers)
-            .finish_non_exhaustive()
-    }
-}
-
-impl LiveResponse {
-    fn from_reqwest(response: reqwest::Response) -> Self {
-        let status = response.status();
-        let headers = response.headers().clone();
-        Self {
-            status,
-            headers,
-            stream: response.bytes_stream().boxed(),
-        }
-    }
-
-    fn from_stream(
-        status: reqwest::StatusCode,
-        headers: reqwest::header::HeaderMap,
-        stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
-    ) -> Self {
-        Self {
-            status,
-            headers,
-            stream: stream.boxed(),
-        }
-    }
-
-    pub fn status(&self) -> reqwest::StatusCode {
-        self.status
-    }
-
-    pub fn headers(&self) -> &reqwest::header::HeaderMap {
-        &self.headers
-    }
-
-    pub fn bytes_stream(self) -> BoxStream<'static, Result<Bytes, reqwest::Error>> {
-        self.stream
-    }
-}
-
 #[derive(Debug)]
 pub enum StreamingResponse {
-    Live(LiveResponse),
+    Live(reqwest::Response),
     Buffered(BufferedResponse),
 }
 
@@ -172,12 +119,6 @@ impl RequestForwarder {
             codex_chat_history: None,
             gemini_shadow: None,
         })
-    }
-
-    pub(super) fn prewarm_provider_clients(&self, app_type: &AppType, providers: &[Provider]) {
-        for provider in providers {
-            let _ = self.client_for_provider(app_type, provider);
-        }
     }
 
     pub fn with_optimizer_config(mut self, optimizer_config: OptimizerConfig) -> Self {
@@ -255,19 +196,13 @@ impl RequestForwarder {
             return Err(ForwardFailure::new(None, ProxyError::NoAvailableProvider));
         }
 
-        let claude_error_path = matches!(app_type, AppType::Claude);
+        let claude_error_path = matches!(app_type, AppType::Claude | AppType::ClaudeDesktop);
         let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
-        let mut attempted_providers = 0usize;
         let mut pending_upstream_response = None;
-        let max_attempts = (options.max_retries as usize).saturating_add(1);
 
         for provider in providers {
-            if attempted_providers >= max_attempts {
-                break;
-            }
-
             let permit = if bypass_circuit_breaker {
                 super::circuit_breaker::AllowResult {
                     allowed: true,
@@ -284,10 +219,10 @@ impl RequestForwarder {
             }
 
             attempted_provider = true;
-            attempted_providers += 1;
             pending_upstream_response = None;
-            let provider_needs_transform = matches!(app_type, AppType::Claude)
-                && get_adapter(app_type).needs_transform(&provider);
+            let provider_needs_transform =
+                matches!(app_type, AppType::Claude | AppType::ClaudeDesktop)
+                    && get_adapter(app_type).needs_transform(&provider);
 
             match self
                 .send_streaming_request(
@@ -296,10 +231,7 @@ impl RequestForwarder {
                     endpoint,
                     &body,
                     headers,
-                    ForwardOptions {
-                        max_retries: 0,
-                        ..options
-                    },
+                    options,
                     &rectifier_config,
                 )
                 .await
@@ -407,9 +339,20 @@ impl RequestForwarder {
                         }
                     }
                 }
-                Err(StreamingRequestError::BeforeResponse(error))
-                | Err(StreamingRequestError::AfterResponse(error)) => {
-                    match classify_attempt_error(&error, app_type, &provider) {
+                Err(StreamingRequestError::AfterResponse(error)) => {
+                    if !bypass_circuit_breaker {
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type.as_str(),
+                                permit.used_half_open_permit,
+                            )
+                            .await;
+                    }
+                    return Err(ForwardFailure::new(Some(provider), error));
+                }
+                Err(StreamingRequestError::BeforeResponse(error)) => {
+                    match classify_attempt_error(&error) {
                         AttemptDecision::ProviderFailure => {
                             if !bypass_circuit_breaker {
                                 let _ = self
@@ -500,19 +443,13 @@ impl RequestForwarder {
             return Err(ForwardFailure::new(None, ProxyError::NoAvailableProvider));
         }
 
-        let claude_error_path = matches!(app_type, AppType::Claude);
+        let claude_error_path = matches!(app_type, AppType::Claude | AppType::ClaudeDesktop);
         let bypass_circuit_breaker = options.bypass_circuit_breaker;
         let mut last_error = None;
         let mut attempted_provider = false;
-        let mut attempted_providers = 0usize;
         let mut pending_upstream_response = None;
-        let max_attempts = (options.max_retries as usize).saturating_add(1);
 
         for provider in providers {
-            if attempted_providers >= max_attempts {
-                break;
-            }
-
             let permit = if bypass_circuit_breaker {
                 super::circuit_breaker::AllowResult {
                     allowed: true,
@@ -529,10 +466,10 @@ impl RequestForwarder {
             }
 
             attempted_provider = true;
-            attempted_providers += 1;
             pending_upstream_response = None;
-            let provider_needs_transform = matches!(app_type, AppType::Claude)
-                && get_adapter(app_type).needs_transform(&provider);
+            let provider_needs_transform =
+                matches!(app_type, AppType::Claude | AppType::ClaudeDesktop)
+                    && get_adapter(app_type).needs_transform(&provider);
 
             match self
                 .send_buffered_request(
@@ -541,10 +478,7 @@ impl RequestForwarder {
                     endpoint,
                     &body,
                     headers,
-                    ForwardOptions {
-                        max_retries: 0,
-                        ..options
-                    },
+                    options,
                     &rectifier_config,
                 )
                 .await
@@ -652,9 +586,20 @@ impl RequestForwarder {
                         }
                     }
                 }
-                Err(BufferedRequestError::BeforeResponse(error))
-                | Err(BufferedRequestError::AfterResponse(error)) => {
-                    match classify_attempt_error(&error, app_type, &provider) {
+                Err(BufferedRequestError::AfterResponse(error)) => {
+                    if !bypass_circuit_breaker {
+                        self.router
+                            .release_permit_neutral(
+                                &provider.id,
+                                app_type.as_str(),
+                                permit.used_half_open_permit,
+                            )
+                            .await;
+                    }
+                    return Err(ForwardFailure::new(Some(provider), error));
+                }
+                Err(BufferedRequestError::BeforeResponse(error)) => {
+                    match classify_attempt_error(&error) {
                         AttemptDecision::ProviderFailure => {
                             if !bypass_circuit_breaker {
                                 let _ = self
@@ -713,9 +658,6 @@ impl RequestForwarder {
         options: ForwardOptions,
         rectifier_config: &RectifierConfig,
     ) -> Result<StreamingAttemptOutcome, StreamingRequestError> {
-        // Provider-specific clients may need to load native roots. Build and
-        // retain this one before the upstream request timeout starts.
-        let client = self.client_for_provider(app_type, provider);
         let started_at = Instant::now();
         let allow_transport_retry = uses_internal_transport_retry(app_type);
         let mut request_body = body.clone();
@@ -723,10 +665,9 @@ impl RequestForwarder {
 
         'request_loop: loop {
             let base_request = self
-                .prepare_request_with_client(
+                .prepare_request(
                     app_type,
                     provider,
-                    &client,
                     endpoint,
                     &request_body,
                     headers,
@@ -772,43 +713,6 @@ impl RequestForwarder {
                 } {
                     Ok(Ok(response)) => {
                         if response.status().is_success() {
-                            if uses_codex_anthropic_protocol(app_type, provider, endpoint)
-                                && response_is_json(&response)
-                            {
-                                let buffered_response = read_streaming_error_response(
-                                    response,
-                                    attempt_started_at,
-                                    options.request_timeout,
-                                )
-                                .await
-                                .map_err(StreamingRequestError::AfterResponse)?;
-                                validate_codex_anthropic_success_body(&buffered_response.body)
-                                    .map_err(|error| {
-                                        if rectifier_retried {
-                                            StreamingRequestError::AfterResponse(error)
-                                        } else {
-                                            StreamingRequestError::BeforeResponse(error)
-                                        }
-                                    })?;
-                                return Ok(StreamingAttemptOutcome {
-                                    response: StreamingResponse::Buffered(buffered_response),
-                                    attempt_decision: AttemptDecision::FatalStop,
-                                });
-                            }
-                            let response = prepare_success_streaming_response(
-                                response,
-                                attempt_started_at,
-                                options.request_timeout,
-                                uses_responses_protocol(app_type, provider, endpoint),
-                            )
-                            .await
-                            .map_err(|error| {
-                                if rectifier_retried {
-                                    StreamingRequestError::AfterResponse(error)
-                                } else {
-                                    StreamingRequestError::BeforeResponse(error)
-                                }
-                            })?;
                             return Ok(StreamingAttemptOutcome {
                                 response: StreamingResponse::Live(response),
                                 attempt_decision: AttemptDecision::FatalStop,
@@ -841,8 +745,6 @@ impl RequestForwarder {
                                 attempt_decision: classify_upstream_response(
                                     buffered_response.status,
                                     rectifier_retried,
-                                    app_type,
-                                    provider,
                                 ),
                                 response: StreamingResponse::Buffered(buffered_response),
                             });
@@ -852,10 +754,8 @@ impl RequestForwarder {
                             attempt_decision: classify_upstream_response(
                                 response.status(),
                                 rectifier_retried,
-                                app_type,
-                                provider,
                             ),
-                            response: StreamingResponse::Live(LiveResponse::from_reqwest(response)),
+                            response: StreamingResponse::Live(response),
                         });
                     }
                     Ok(Err(error)) => {
@@ -910,9 +810,6 @@ impl RequestForwarder {
         options: ForwardOptions,
         rectifier_config: &RectifierConfig,
     ) -> Result<BufferedAttemptOutcome, BufferedRequestError> {
-        // Keep provider proxy client construction outside the shared request
-        // timeout and retain it for rectifier retries.
-        let client = self.client_for_provider(app_type, provider);
         let mut request_body = body.clone();
         let mut rectifier_retried = false;
         let request_started_at = Instant::now();
@@ -920,10 +817,9 @@ impl RequestForwarder {
 
         'request_loop: loop {
             let base_request = self
-                .prepare_request_with_client(
+                .prepare_request(
                     app_type,
                     provider,
-                    &client,
                     endpoint,
                     &request_body,
                     headers,
@@ -1008,31 +904,6 @@ impl RequestForwarder {
                             body: response_body,
                         };
 
-                        if buffered_response.status.is_success()
-                            && uses_codex_anthropic_protocol(app_type, provider, endpoint)
-                        {
-                            validate_codex_anthropic_success_body(&buffered_response.body)
-                                .map_err(|error| {
-                                    if rectifier_retried {
-                                        BufferedRequestError::AfterResponse(error)
-                                    } else {
-                                        BufferedRequestError::BeforeResponse(error)
-                                    }
-                                })?;
-                        } else if buffered_response.status.is_success()
-                            && uses_responses_protocol(app_type, provider, endpoint)
-                        {
-                            validate_responses_success_body(&buffered_response.body).map_err(
-                                |error| {
-                                    if rectifier_retried {
-                                        BufferedRequestError::AfterResponse(error)
-                                    } else {
-                                        BufferedRequestError::BeforeResponse(error)
-                                    }
-                                },
-                            )?;
-                        }
-
                         if !rectifier_retried {
                             if let Some(rectified_body) = maybe_rectify_claude_buffered_request(
                                 app_type,
@@ -1050,8 +921,6 @@ impl RequestForwarder {
                             attempt_decision: classify_upstream_response(
                                 buffered_response.status,
                                 rectifier_retried,
-                                app_type,
-                                provider,
                             ),
                             response: buffered_response,
                         });
@@ -1095,29 +964,10 @@ impl RequestForwarder {
     }
 }
 
-fn classify_attempt_error(
-    error: &ProxyError,
-    app_type: &AppType,
-    provider: &Provider,
-) -> AttemptDecision {
-    if matches!(app_type, AppType::Codex)
-        && provider.is_codex_official()
-        && (matches!(error, ProxyError::AuthError(_))
-            || matches!(
-                error,
-                ProxyError::UpstreamError {
-                    status: 401 | 403,
-                    ..
-                }
-            ))
-    {
-        return AttemptDecision::NeutralRelease;
-    }
-
+fn classify_attempt_error(error: &ProxyError) -> AttemptDecision {
     match error {
         ProxyError::UpstreamError {
-            status: 400 | 405 | 406 | 413 | 414 | 415 | 422 | 501,
-            ..
+            status: 400 | 422, ..
         } => AttemptDecision::NeutralRelease,
         ProxyError::AlreadyRunning
         | ProxyError::NotRunning
@@ -1140,7 +990,7 @@ fn maybe_rectify_claude_buffered_request(
     request_body: &Value,
     rectifier_config: &RectifierConfig,
 ) -> Option<Value> {
-    if *app_type != AppType::Claude {
+    if !matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) {
         return None;
     }
 
@@ -1170,301 +1020,7 @@ fn maybe_rectify_claude_buffered_request(
 }
 
 fn should_buffer_streaming_error_response(app_type: &AppType, status: reqwest::StatusCode) -> bool {
-    *app_type == AppType::Claude && !status.is_success()
-}
-
-fn uses_responses_protocol(app_type: &AppType, provider: &Provider, endpoint: &str) -> bool {
-    if matches!(app_type, AppType::Claude) {
-        return super::providers::get_claude_api_format(provider) == "openai_responses";
-    }
-
-    let path = endpoint.split_once('?').map_or(endpoint, |(path, _)| path);
-    matches!(
-        path,
-        "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
-    ) && !super::providers::should_convert_codex_responses_to_chat(provider, endpoint)
-        && !super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
-}
-
-fn uses_codex_anthropic_protocol(app_type: &AppType, provider: &Provider, endpoint: &str) -> bool {
-    matches!(app_type, AppType::Codex)
-        && super::providers::should_convert_codex_responses_to_anthropic(provider, endpoint)
-}
-
-fn response_is_json(response: &reqwest::Response) -> bool {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|content_type| {
-            let media_type = content_type
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase();
-            media_type == "application/json" || media_type.ends_with("+json")
-        })
-}
-
-async fn prepare_success_streaming_response(
-    response: reqwest::Response,
-    started_at: Instant,
-    request_timeout: Option<Duration>,
-    validate_responses_semantics: bool,
-) -> Result<LiveResponse, ProxyError> {
-    if validate_responses_semantics {
-        return validate_responses_stream_start(response, started_at, request_timeout).await;
-    }
-
-    let Some(request_timeout) = request_timeout else {
-        return Ok(LiveResponse::from_reqwest(response));
-    };
-
-    let status = response.status();
-    let headers = response.headers().clone();
-    let mut stream = response.bytes_stream().boxed();
-    let remaining_timeout = request_timeout.saturating_sub(started_at.elapsed());
-    if remaining_timeout.is_zero() {
-        return Err(stream_first_byte_timeout_error(request_timeout));
-    }
-
-    let first = tokio::time::timeout(remaining_timeout, stream.next())
-        .await
-        .map_err(|_| stream_first_byte_timeout_error(request_timeout))?;
-    let Some(first) = first else {
-        return Err(ProxyError::ForwardFailed(
-            "stream ended before the first response chunk".to_string(),
-        ));
-    };
-    let first = first.map_err(|error| {
-        ProxyError::ForwardFailed(format!("read first response chunk failed: {error}"))
-    })?;
-
-    let replay = futures::stream::once(async move { Ok(first) }).chain(stream);
-    Ok(LiveResponse::from_stream(status, headers, replay))
-}
-
-async fn validate_responses_stream_start(
-    response: reqwest::Response,
-    started_at: Instant,
-    request_timeout: Option<Duration>,
-) -> Result<LiveResponse, ProxyError> {
-    const MAX_PRIME_BYTES: usize = 256 * 1024;
-
-    let status = response.status();
-    let headers = response.headers().clone();
-    let mut stream = response.bytes_stream().boxed();
-    let mut replay_chunks = Vec::new();
-    let mut replay_bytes = 0usize;
-    let mut parse_buffer = String::new();
-    let mut utf8_remainder = Vec::new();
-
-    loop {
-        let next = match request_timeout {
-            Some(request_timeout) => {
-                let remaining_timeout = request_timeout.saturating_sub(started_at.elapsed());
-                if remaining_timeout.is_zero() {
-                    return Err(stream_first_byte_timeout_error(request_timeout));
-                }
-                tokio::time::timeout(remaining_timeout, stream.next())
-                    .await
-                    .map_err(|_| stream_first_byte_timeout_error(request_timeout))?
-            }
-            None => stream.next().await,
-        };
-
-        let Some(chunk) = next else {
-            if let Some(outcome) = inspect_responses_json_document(&parse_buffer) {
-                outcome?;
-                return Ok(LiveResponse::from_stream(
-                    status,
-                    headers,
-                    futures::stream::iter(replay_chunks.into_iter().map(Ok)),
-                ));
-            }
-            if !parse_buffer.trim().is_empty() {
-                if let Some(outcome) = inspect_responses_start_event(parse_buffer.trim()) {
-                    outcome?;
-                    return Ok(LiveResponse::from_stream(
-                        status,
-                        headers,
-                        futures::stream::iter(replay_chunks.into_iter().map(Ok)),
-                    ));
-                }
-            }
-            return Err(ProxyError::ForwardFailed(
-                "Responses stream ended before producing output or a terminal event".to_string(),
-            ));
-        };
-        let chunk = chunk.map_err(|error| {
-            ProxyError::ForwardFailed(format!(
-                "failed while validating Responses stream start: {error}"
-            ))
-        })?;
-        super::sse::append_utf8_safe(&mut parse_buffer, &mut utf8_remainder, &chunk);
-        replay_bytes = replay_bytes.saturating_add(chunk.len());
-        replay_chunks.push(chunk);
-
-        if let Some(outcome) = inspect_responses_json_document(&parse_buffer) {
-            outcome?;
-            let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
-            return Ok(LiveResponse::from_stream(status, headers, replay));
-        }
-
-        while let Some(block) = super::sse::take_sse_block(&mut parse_buffer) {
-            if let Some(outcome) = inspect_responses_start_event(&block) {
-                outcome?;
-                let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
-                return Ok(LiveResponse::from_stream(status, headers, replay));
-            }
-        }
-
-        if replay_bytes >= MAX_PRIME_BYTES {
-            log::warn!(
-                "Responses semantic stream priming exceeded {MAX_PRIME_BYTES} bytes; committing stream"
-            );
-            let replay = futures::stream::iter(replay_chunks.into_iter().map(Ok)).chain(stream);
-            return Ok(LiveResponse::from_stream(status, headers, replay));
-        }
-    }
-}
-
-fn validate_responses_success_body(body: &[u8]) -> Result<(), ProxyError> {
-    if let Some(message) = responses_error_envelope_message(body) {
-        return Err(ProxyError::TransformError(format!(
-            "Responses upstream returned a 2xx failure: {message}"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_codex_anthropic_success_body(body: &[u8]) -> Result<(), ProxyError> {
-    if let Some(message) = codex_anthropic_error_envelope_message(body) {
-        return Err(ProxyError::TransformError(format!(
-            "Anthropic upstream returned a 2xx error envelope: {message}"
-        )));
-    }
-    Ok(())
-}
-
-fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("error") && value.get("error").is_none() {
-        return None;
-    }
-    let error = value.get("error").unwrap_or(&value);
-    let error_type = error.get("type").and_then(Value::as_str).unwrap_or("error");
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| error.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| error.to_string());
-    Some(format!("{error_type}: {message}"))
-}
-
-fn responses_error_envelope_message(body: &[u8]) -> Option<String> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    let status = value.get("status").and_then(Value::as_str);
-    let has_error = value.get("error").is_some_and(|error| !error.is_null());
-    if !matches!(status, Some("failed" | "cancelled")) && !has_error {
-        return None;
-    }
-
-    let error = value.get("error").unwrap_or(&value);
-    let error_type = error
-        .get("type")
-        .and_then(Value::as_str)
-        .or_else(|| error.get("code").and_then(Value::as_str))
-        .unwrap_or_else(|| status.unwrap_or("error"));
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .or_else(|| error.as_str())
-        .filter(|message| !message.trim().is_empty())
-        .unwrap_or(match status {
-            Some("cancelled") => "response generation was cancelled",
-            _ => "response generation failed",
-        });
-    Some(format!("{error_type}: {message}"))
-}
-
-fn inspect_responses_json_document(buffer: &str) -> Option<Result<(), ProxyError>> {
-    let trimmed = buffer.trim();
-    if !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
-        return None;
-    }
-    let _: Value = serde_json::from_str(trimmed).ok()?;
-    Some(validate_responses_success_body(trimmed.as_bytes()))
-}
-
-fn inspect_responses_start_event(block: &str) -> Option<Result<(), ProxyError>> {
-    let mut named_event = None;
-    let mut data_lines = Vec::new();
-    for line in block.lines() {
-        if let Some(event) = super::sse::strip_sse_field(line, "event") {
-            named_event = Some(event.trim().to_string());
-        } else if let Some(data) = super::sse::strip_sse_field(line, "data") {
-            data_lines.push(data);
-        }
-    }
-    if data_lines.is_empty() {
-        return None;
-    }
-    let value: Value = match serde_json::from_str(&data_lines.join("\n")) {
-        Ok(value) => value,
-        Err(_) => return None,
-    };
-    let event = named_event
-        .as_deref()
-        .filter(|event| !event.is_empty())
-        .or_else(|| value.get("type").and_then(Value::as_str))
-        .unwrap_or("");
-
-    let response = value.get("response").unwrap_or(&value);
-    if matches!(
-        response.get("status").and_then(Value::as_str),
-        Some("failed" | "cancelled")
-    ) || response.get("error").is_some_and(|error| !error.is_null())
-    {
-        let error = response.get("error").unwrap_or(response);
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .or_else(|| error.as_str())
-            .unwrap_or("Responses upstream failed before output");
-        let error_type = error
-            .get("type")
-            .and_then(Value::as_str)
-            .or_else(|| error.get("code").and_then(Value::as_str))
-            .or_else(|| response.get("status").and_then(Value::as_str))
-            .unwrap_or("upstream_error");
-        return Some(Err(ProxyError::TransformError(format!(
-            "Responses upstream {error_type}: {message}"
-        ))));
-    }
-
-    match event {
-        "response.failed" | "error" => {
-            let error = response.get("error").unwrap_or(response);
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .or_else(|| error.as_str())
-                .unwrap_or("Responses upstream emitted an error before output");
-            let error_type = error
-                .get("type")
-                .and_then(Value::as_str)
-                .or_else(|| error.get("code").and_then(Value::as_str))
-                .unwrap_or("upstream_error");
-            Some(Err(ProxyError::TransformError(format!(
-                "Responses upstream {error_type}: {message}"
-            ))))
-        }
-        "response.created" | "response.in_progress" | "response.queued" | "" => None,
-        _ => Some(Ok(())),
-    }
+    matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) && !status.is_success()
 }
 
 async fn read_streaming_error_response(
@@ -1554,7 +1110,7 @@ fn clone_request(
 }
 
 fn uses_internal_transport_retry(app_type: &AppType) -> bool {
-    !matches!(app_type, AppType::Claude)
+    !matches!(app_type, AppType::Claude | AppType::ClaudeDesktop)
 }
 
 fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
@@ -1593,19 +1149,10 @@ fn stream_first_byte_timeout_error(request_timeout: Duration) -> ProxyError {
 fn classify_upstream_response(
     status: reqwest::StatusCode,
     rectifier_retried: bool,
-    app_type: &AppType,
-    provider: &Provider,
 ) -> AttemptDecision {
-    if matches!(app_type, AppType::Codex)
-        && provider.is_codex_official()
-        && matches!(status.as_u16(), 401 | 403)
-    {
-        return AttemptDecision::NeutralRelease;
-    }
-
     match status.as_u16() {
         400 | 422 if rectifier_retried => AttemptDecision::NeutralRelease,
-        400 | 405 | 406 | 413 | 414 | 415 | 422 | 501 => AttemptDecision::NeutralRelease,
+        400 | 422 => AttemptDecision::ProviderFailure,
         _ => AttemptDecision::ProviderFailure,
     }
 }

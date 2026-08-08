@@ -5,61 +5,20 @@
 use super::{create_secure_dir_all, lock_conn, Database, DB_BACKUP_RETAIN};
 use crate::error::AppError;
 use chrono::Utc;
-use rusqlite::backup::{Backup, StepResult};
+use rusqlite::backup::Backup;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
-const INSERT_BATCH_MAX_ROWS: usize = 200;
-const INSERT_BATCH_MAX_BYTES: usize = 1024 * 1024;
-
-// A full-copy step keeps one source snapshot stable for the entire copy. The
-// connection's busy handler already performs bounded lock retries, so adding
-// another retry loop here would multiply `busy_timeout` and reintroduce long
-// startup stalls.
-pub(crate) fn run_sqlite_backup_to_completion(backup: &Backup<'_, '_>) -> Result<(), AppError> {
-    run_full_backup_step(|pages| {
-        backup
-            .step(pages)
-            .map_err(|e| AppError::Database(e.to_string()))
-    })
-}
-
-fn run_full_backup_step<Step>(mut step: Step) -> Result<(), AppError>
-where
-    Step: FnMut(i32) -> Result<StepResult, AppError>,
-{
-    match step(-1)? {
-        StepResult::Done => Ok(()),
-        StepResult::Busy => Err(AppError::Database(
-            "SQLite backup could not acquire a required lock before busy_timeout elapsed"
-                .to_string(),
-        )),
-        StepResult::Locked => Err(AppError::Database(
-            "SQLite backup source connection is locked by an active write".to_string(),
-        )),
-        StepResult::More => Err(AppError::Database(
-            "SQLite backup did not complete a full-copy step".to_string(),
-        )),
-        _ => Err(AppError::Database(
-            "SQLite backup returned an unsupported step result".to_string(),
-        )),
-    }
-}
 
 const SYNC_IMPORT_RESTORE_TABLES: &[&str] = &[
     "proxy_request_logs",
-    // This cursor describes files on the current device. Cost projection does
-    // not read it, but importing another device's cursor could still skip
-    // local usage lines permanently.
-    "session_log_sync",
     "stream_check_logs",
     "proxy_live_backup",
     "proxy_failover_live_snapshots",
@@ -151,30 +110,6 @@ const SYNC_PRESERVATION_POLICY: SyncPreservationPolicy = SyncPreservationPolicy 
 };
 
 impl Database {
-    /// Create the normal SQLite snapshot before a schema migration has
-    /// quiesced an older daemon. SQLite's online backup API gives us a
-    /// consistent source snapshot while the daemon remains available; if the
-    /// backup directory is unwritable or the disk is full, initialization can
-    /// fail without taking a working proxy offline.
-    pub(crate) fn backup_database_path(database_path: &Path) -> Result<Option<PathBuf>, AppError> {
-        if !database_path.exists() {
-            return Ok(None);
-        }
-
-        let conn =
-            Connection::open_with_flags(database_path, super::readonly_database_open_flags())
-                .map_err(|error| AppError::Database(error.to_string()))?;
-        conn.busy_timeout(Duration::from_secs(5))
-            .map_err(|error| AppError::Database(error.to_string()))?;
-
-        let snapshot_source = Self {
-            conn: Mutex::new(conn),
-            runtime_key: format!("file:{}", database_path.display()),
-            db_path: Some(database_path.to_path_buf()),
-        };
-        snapshot_source.backup_database_file()
-    }
-
     /// 导出为 SQL 字符串（内存操作，不写文件）
     pub fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
@@ -254,7 +189,9 @@ impl Database {
             let mut main_conn = lock_conn!(self.conn);
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
-            run_sqlite_backup_to_completion(&backup)?;
+            backup
+                .run_to_completion(5, Duration::from_millis(25), None)
+                .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
         let backup_id = backup_path
@@ -286,7 +223,9 @@ impl Database {
         {
             let backup =
                 Backup::new(&conn, &mut snapshot).map_err(|e| AppError::Database(e.to_string()))?;
-            run_sqlite_backup_to_completion(&backup)?;
+            backup
+                .run_to_completion(5, Duration::from_millis(25), None)
+                .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
         Ok(snapshot)
@@ -310,12 +249,9 @@ impl Database {
         target_conn: &Connection,
         tables: &[&str],
     ) -> Result<(), AppError> {
-        let tx = target_conn
-            .unchecked_transaction()
-            .map_err(|e| AppError::Database(format!("开启恢复事务失败: {e}")))?;
-
         for table in tables {
-            if !Self::table_exists(source_conn, table)? || !Self::table_exists(&tx, table)? {
+            if !Self::table_exists(source_conn, table)? || !Self::table_exists(target_conn, table)?
+            {
                 continue;
             }
 
@@ -324,28 +260,23 @@ impl Database {
                 continue;
             }
 
-            let quoted_table = Self::quote_ident(table);
-            let quoted_columns = columns
-                .iter()
-                .map(|column| Self::quote_ident(column))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            tx.execute(&format!("DELETE FROM {quoted_table}"), [])
+            target_conn
+                .execute(&format!("DELETE FROM \"{table}\""), [])
                 .map_err(|e| AppError::Database(format!("清空表 {table} 失败: {e}")))?;
 
             let placeholders = (1..=columns.len())
                 .map(|idx| format!("?{idx}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let insert_sql =
-                format!("INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})");
-            let mut insert_stmt = tx
-                .prepare(&insert_sql)
-                .map_err(|e| AppError::Database(format!("准备表 {table} 插入语句失败: {e}")))?;
+            let cols = columns
+                .iter()
+                .map(|column| format!("\"{column}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_sql = format!("INSERT INTO \"{table}\" ({cols}) VALUES ({placeholders})");
 
             let mut stmt = source_conn
-                .prepare(&format!("SELECT {quoted_columns} FROM {quoted_table}"))
+                .prepare(&format!("SELECT * FROM \"{table}\""))
                 .map_err(|e| AppError::Database(format!("读取表 {table} 失败: {e}")))?;
             let mut rows = stmt
                 .query([])
@@ -360,14 +291,12 @@ impl Database {
                     );
                 }
 
-                insert_stmt
-                    .execute(rusqlite::params_from_iter(values.iter()))
+                target_conn
+                    .execute(&insert_sql, rusqlite::params_from_iter(values.iter()))
                     .map_err(|e| AppError::Database(format!("恢复表 {table} 数据失败: {e}")))?;
             }
         }
 
-        tx.commit()
-            .map_err(|e| AppError::Database(format!("提交恢复事务失败: {e}")))?;
         Ok(())
     }
 
@@ -564,59 +493,24 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        // The migration coordinator can supply a database outside the
-        // process-wide config root, so always create the sibling directory.
         create_secure_dir_all(&backup_dir)?;
-        // For the normal CC-Switch database, also reject an existing managed
-        // backup directory with unsafe permissions.
-        if super::database_path()
-            .is_ok_and(|managed_database_path| managed_database_path == db_path)
-        {
-            crate::config::create_managed_config_dir_all(
-                &crate::config::get_app_config_dir().join("backups"),
-            )?;
-        }
 
         let backup_path = {
             let conn = lock_conn!(self.conn);
             let (backup_path, mut dest_conn) =
                 Self::create_unique_backup_db_connection(&backup_dir)?;
-            let backup_result = match Backup::new(&conn, &mut dest_conn) {
-                Ok(backup) => run_sqlite_backup_to_completion(&backup),
-                Err(err) => Err(AppError::Database(err.to_string())),
-            };
-            drop(dest_conn);
-            drop(conn);
-
-            if let Err(err) = backup_result {
-                Self::remove_incomplete_backup(&backup_path);
-                return Err(err);
+            {
+                let backup = Backup::new(&conn, &mut dest_conn)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                backup
+                    .run_to_completion(5, Duration::from_millis(25), None)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
             }
             backup_path
         };
 
         Self::cleanup_db_backups(&backup_dir)?;
         Ok(Some(backup_path))
-    }
-
-    fn remove_incomplete_backup(backup_path: &Path) {
-        let mut artifacts = vec![backup_path.to_path_buf()];
-        for suffix in ["-journal", "-wal", "-shm"] {
-            let mut artifact = backup_path.as_os_str().to_os_string();
-            artifact.push(suffix);
-            artifacts.push(PathBuf::from(artifact));
-        }
-
-        for artifact in artifacts {
-            match fs::remove_file(&artifact) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => log::warn!(
-                    "Failed to remove incomplete database backup {}: {err}",
-                    artifact.display()
-                ),
-            }
-        }
     }
 
     fn create_unique_backup_db_connection(
@@ -694,22 +588,14 @@ impl Database {
                 Err(err) => return Err(AppError::io(backup_path, err)),
             }
 
-            let open_result = (|| {
-                let open_path = Self::canonicalize_existing_parent(backup_path)?;
-                let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-                Connection::open_with_flags(&open_path, flags)
-                    .map_err(|e| AppError::Database(e.to_string()))
-            })();
-
-            match open_result {
-                Ok(conn) => Ok(Some(conn)),
-                Err(err) => {
-                    Self::remove_incomplete_backup(backup_path);
-                    Err(err)
-                }
-            }
+            let open_path = Self::canonicalize_existing_parent(backup_path)?;
+            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+            Connection::open_with_flags(&open_path, flags)
+                .map(Some)
+                .map_err(|e| AppError::Database(e.to_string()))
         }
 
         #[cfg(not(unix))]
@@ -723,18 +609,9 @@ impl Database {
                 Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(None),
                 Err(err) => return Err(AppError::io(backup_path, err)),
             }
-            let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-            match Connection::open_with_flags(backup_path, flags)
+            Connection::open(backup_path)
+                .map(Some)
                 .map_err(|e| AppError::Database(e.to_string()))
-            {
-                Ok(conn) => Ok(Some(conn)),
-                Err(err) => {
-                    Self::remove_incomplete_backup(backup_path);
-                    Err(err)
-                }
-            }
         }
     }
 
@@ -830,7 +707,6 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut tables = Vec::new();
-        let mut triggers = Vec::new();
         let mut rows = stmt
             .query([])
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -844,15 +720,10 @@ impl Database {
                 continue;
             }
 
-            if obj_type == "trigger" {
-                triggers.push(sql);
-                continue;
-            }
-
             output.push_str(&sql);
             output.push_str(";\n");
 
-            if obj_type == "table" {
+            if obj_type == "table" && !name.starts_with("sqlite_") {
                 tables.push(name);
             }
         }
@@ -877,23 +748,13 @@ impl Database {
                 continue;
             }
 
-            let quoted_table = Self::quote_ident(&table);
-            let quoted_columns = columns
-                .iter()
-                .map(|column| Self::quote_ident(column))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let insert_prefix = format!("INSERT INTO {quoted_table} ({quoted_columns}) VALUES ");
-
             let mut stmt = conn
-                .prepare(&format!("SELECT {quoted_columns} FROM {quoted_table}"))
+                .prepare(&format!("SELECT * FROM \"{table}\""))
                 .map_err(|e| AppError::Database(e.to_string()))?;
             let mut rows = stmt
                 .query([])
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
-            let mut pending_rows = 0;
-            let mut batch = String::new();
             while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
                 let mut values = Vec::with_capacity(columns.len());
                 for idx in 0..columns.len() {
@@ -910,47 +771,20 @@ impl Database {
                     Self::neutralize_export_row(&table, &columns, &mut values, policy);
                 }
 
-                let row_sql = format!(
-                    "({})",
+                let cols = columns
+                    .iter()
+                    .map(|c| format!("\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                output.push_str(&format!(
+                    "INSERT INTO \"{table}\" ({cols}) VALUES ({});\n",
                     values
                         .iter()
                         .map(Self::format_owned_sql_value)
                         .collect::<Result<Vec<_>, _>>()?
                         .join(", ")
-                );
-                let separator_bytes = usize::from(pending_rows > 0);
-                if pending_rows > 0
-                    && batch.len() + separator_bytes + row_sql.len() + 2 > INSERT_BATCH_MAX_BYTES
-                {
-                    batch.push_str(";\n");
-                    output.push_str(&batch);
-                    pending_rows = 0;
-                }
-
-                if pending_rows == 0 {
-                    batch.clear();
-                    batch.push_str(&insert_prefix);
-                } else {
-                    batch.push(',');
-                }
-                batch.push_str(&row_sql);
-                pending_rows += 1;
-
-                if pending_rows >= INSERT_BATCH_MAX_ROWS {
-                    batch.push_str(";\n");
-                    output.push_str(&batch);
-                    pending_rows = 0;
-                }
+                ));
             }
-            if pending_rows > 0 {
-                batch.push_str(";\n");
-                output.push_str(&batch);
-            }
-        }
-
-        for sql in triggers {
-            output.push_str(&sql);
-            output.push_str(";\n");
         }
 
         output.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
@@ -959,9 +793,8 @@ impl Database {
 
     /// 获取表的列名列表
     fn get_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, AppError> {
-        let quoted_table = Self::quote_ident(table);
         let mut stmt = conn
-            .prepare(&format!("PRAGMA table_info({quoted_table})"))
+            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
             .map_err(|e| AppError::Database(e.to_string()))?;
         let iter = stmt
             .query_map([], |row| row.get::<_, String>(1))
@@ -1047,11 +880,9 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_full_backup_step, Database};
+    use super::Database;
     use crate::error::AppError;
-    use rusqlite::{backup::StepResult, Connection};
-    use std::fs;
-    use std::time::{Duration, Instant};
+    use rusqlite::Connection;
 
     fn seed_provider(conn: &Connection, id: &str) -> Result<(), AppError> {
         conn.execute(
@@ -1120,245 +951,6 @@ mod tests {
     }
 
     #[test]
-    fn full_backup_requests_all_remaining_pages_in_one_step() {
-        let mut requested_pages = Vec::new();
-
-        run_full_backup_step(|pages| {
-            requested_pages.push(pages);
-            Ok(StepResult::Done)
-        })
-        .expect("a completed full-copy step should succeed");
-
-        assert_eq!(requested_pages, vec![-1]);
-    }
-
-    #[test]
-    fn full_backup_does_not_multiply_the_connection_busy_timeout() {
-        let mut calls = 0usize;
-        let error = run_full_backup_step(|pages| {
-            assert_eq!(pages, -1);
-            calls += 1;
-            Ok(StepResult::Busy)
-        })
-        .expect_err("a busy result must be returned after the connection timeout");
-
-        assert!(error.to_string().contains("busy_timeout"));
-        assert_eq!(calls, 1, "the outer layer must not retry a timed-out step");
-    }
-
-    #[test]
-    fn full_backup_rejects_locked_or_incomplete_steps() {
-        let locked = run_full_backup_step(|_| Ok(StepResult::Locked))
-            .expect_err("an actively written source connection must fail");
-        assert!(locked.to_string().contains("active write"));
-
-        let incomplete = run_full_backup_step(|pages| {
-            assert_eq!(pages, -1);
-            Ok(StepResult::More)
-        })
-        .expect_err("an unbounded SQLite backup step should complete atomically");
-        assert!(incomplete.to_string().contains("full-copy step"));
-    }
-
-    #[test]
-    fn dump_sql_batches_rows_into_multi_row_inserts() -> Result<(), AppError> {
-        let source = Connection::open_in_memory()?;
-        source.execute_batch(
-            "CREATE TABLE batch_rows (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
-             WITH RECURSIVE rows(id) AS (
-                 VALUES(1) UNION ALL SELECT id + 1 FROM rows WHERE id < 450
-             )
-             INSERT INTO batch_rows SELECT id, printf('value-%d', id) FROM rows;",
-        )?;
-
-        let sql = Database::dump_sql(&source, None)?;
-        assert_eq!(sql.matches("INSERT INTO \"batch_rows\"").count(), 3);
-
-        let target = Connection::open_in_memory()?;
-        target.execute_batch(&sql)?;
-        let count: i64 =
-            target.query_row("SELECT COUNT(*) FROM batch_rows", [], |row| row.get(0))?;
-        assert_eq!(count, 450);
-        Ok(())
-    }
-
-    #[test]
-    fn dump_sql_round_trips_special_values_before_creating_triggers() -> Result<(), AppError> {
-        let source = Connection::open_in_memory()?;
-        source.execute_batch(
-            r#"CREATE TABLE "special""rows" (
-                 id INTEGER PRIMARY KEY,
-                 "text""value" TEXT NOT NULL,
-                 blob_value BLOB NOT NULL,
-                 nullable TEXT,
-                 generated TEXT GENERATED ALWAYS AS ("text""value" || '-generated') STORED
-             );
-             INSERT INTO "special""rows" (id, "text""value", blob_value, nullable) VALUES
-                 (1, 'O''Brien,
-第二行 😀', X'00FF10', NULL),
-                 (2, 'kept', X'', 'value');
-             CREATE TRIGGER ignore_second_row
-             BEFORE INSERT ON "special""rows" WHEN NEW.id = 2
-             BEGIN SELECT RAISE(IGNORE); END;"#,
-        )?;
-
-        let sql = Database::dump_sql(&source, None)?;
-        assert!(
-            sql.find("INSERT INTO \"special\"\"rows\"").unwrap()
-                < sql.find("CREATE TRIGGER ignore_second_row").unwrap()
-        );
-
-        let target = Connection::open_in_memory()?;
-        target.execute_batch(&sql)?;
-        target.execute(
-            r#"INSERT INTO "special""rows" (id, "text""value", blob_value)
-               VALUES (2, 'ignored', X'01')"#,
-            [],
-        )?;
-        let values: (String, String, Option<String>, String, i64) = target.query_row(
-            r#"SELECT "text""value", hex(blob_value), nullable, generated,
-                      (SELECT COUNT(*) FROM "special""rows")
-               FROM "special""rows" WHERE id = 1"#,
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
-        assert_eq!(
-            values,
-            (
-                "O'Brien,\n第二行 😀".into(),
-                "00FF10".into(),
-                None,
-                "O'Brien,\n第二行 😀-generated".into(),
-                2
-            )
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn dump_sql_splits_batches_by_statement_size() -> Result<(), AppError> {
-        let source = Connection::open_in_memory()?;
-        source.execute(
-            "CREATE TABLE large_rows (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)",
-            [],
-        )?;
-        let payload = "x".repeat(super::INSERT_BATCH_MAX_BYTES / 2 + 1024);
-        for id in 1..=3 {
-            source.execute(
-                "INSERT INTO large_rows VALUES (?1, ?2)",
-                rusqlite::params![id, payload],
-            )?;
-        }
-
-        let sql = Database::dump_sql(&source, None)?;
-        let inserts = sql
-            .lines()
-            .filter(|line| line.starts_with("INSERT INTO \"large_rows\""))
-            .collect::<Vec<_>>();
-        assert_eq!(inserts.len(), 3);
-        assert!(inserts
-            .iter()
-            .all(|statement| statement.len() <= super::INSERT_BATCH_MAX_BYTES));
-        Ok(())
-    }
-
-    #[test]
-    fn restore_tables_rolls_back_all_tables_on_failure() -> Result<(), AppError> {
-        let source = Connection::open_in_memory()?;
-        source.execute_batch(
-            r#"CREATE TABLE first_table (
-                 value TEXT NOT NULL,
-                 generated TEXT GENERATED ALWAYS AS (value || '-generated') STORED
-             );
-             CREATE TABLE second_table (value INTEGER NOT NULL);
-             INSERT INTO first_table (value) VALUES ('replacement');
-             INSERT INTO second_table VALUES (-1);"#,
-        )?;
-        let target = Connection::open_in_memory()?;
-        target.execute_batch(
-            r#"CREATE TABLE first_table (
-                 value TEXT NOT NULL,
-                 generated TEXT GENERATED ALWAYS AS (value || '-generated') STORED
-             );
-             CREATE TABLE second_table (value INTEGER NOT NULL CHECK (value >= 0));
-             INSERT INTO first_table (value) VALUES ('sentinel');
-             INSERT INTO second_table VALUES (7);"#,
-        )?;
-
-        let error = Database::restore_tables(&source, &target, &["first_table", "second_table"])
-            .expect_err("the second table must fail its constraint");
-        assert!(error.to_string().contains("second_table"), "{error}");
-
-        let first: (String, String) =
-            target.query_row("SELECT value, generated FROM first_table", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
-        let second: i64 =
-            target.query_row("SELECT value FROM second_table", [], |row| row.get(0))?;
-        assert_eq!(
-            (first.0.as_str(), first.1.as_str(), second),
-            ("sentinel", "sentinel-generated", 7)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn file_backup_does_not_retry_after_a_real_busy_timeout() -> Result<(), AppError> {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
-
-        let db = Database::init()?;
-        let db_path = crate::database::database_path()?;
-        {
-            let conn = crate::database::lock_conn!(db.conn);
-            conn.pragma_update(None, "journal_mode", "DELETE")
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            conn.busy_timeout(Duration::from_millis(50))
-                .map_err(|e| AppError::Database(e.to_string()))?;
-        }
-
-        let locker = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
-        locker
-            .execute_batch("BEGIN EXCLUSIVE;")
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let started = Instant::now();
-        let error = db
-            .backup_database_file()
-            .expect_err("an exclusive source lock should make the backup fail");
-        let elapsed = started.elapsed();
-        locker
-            .execute_batch("ROLLBACK;")
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "the outer backup layer must not multiply the 50ms busy timeout: {elapsed:?}"
-        );
-        assert!(error.to_string().contains("busy_timeout"));
-
-        let backup_dir = db_path.parent().expect("database parent").join("backups");
-        let artifacts = fs::read_dir(&backup_dir)
-            .map_err(|e| AppError::io(&backup_dir, e))?
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
-        assert!(
-            artifacts.is_empty(),
-            "failed backups must not leave database or journal artifacts: {artifacts:?}"
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {
         let remote_db = Database::memory()?;
         {
@@ -1366,22 +958,6 @@ mod tests {
             conn.execute(
                 "INSERT INTO providers (id, app_type, name, settings_config, meta)
                  VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO profiles (id, name, payload, sort_order, created_at, updated_at)
-                 VALUES ('remote-profile', 'Remote Project', ?1, 1, 100, 200)",
-                [r#"{"providers":{"claude-desktop":"desktop-provider"}}"#],
-            )?;
-            conn.execute(
-                "INSERT INTO settings (key, value)
-                 VALUES ('current_profile_id_claude-desktop', 'remote-profile')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO session_log_sync
-                    (file_path, last_modified, last_line_offset, last_synced_at)
-                 VALUES ('/shared/session.jsonl', 999, 999, 999)",
                 [],
             )?;
         }
@@ -1398,17 +974,17 @@ mod tests {
             conn.execute(
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model,
-                    input_tokens, output_tokens, input_token_semantics, total_cost_usd,
+                    input_tokens, output_tokens, total_cost_usd,
                     latency_ms, status_code, created_at
-                ) VALUES ('req-1', 'local-provider', 'claude', 'claude-3', 100, 50, 2, '0.01', 120, 200, 1000)",
+                ) VALUES ('req-1', 'local-provider', 'claude', 'claude-3', 100, 50, '0.01', 120, 200, 1000)",
                 [],
             )?;
             conn.execute(
                 "INSERT INTO usage_daily_rollups (
                     date, app_type, provider_id, model, request_count, success_count,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    input_token_semantics, total_cost_usd, avg_latency_ms
-                ) VALUES ('2026-03-01', 'claude', 'local-provider', 'claude-3', 7, 7, 700, 350, 0, 0, 2, '0.07', 120)",
+                    total_cost_usd, avg_latency_ms
+                ) VALUES ('2026-03-01', 'claude', 'local-provider', 'claude-3', 7, 7, 700, 350, 0, 0, '0.07', 120)",
                 [],
             )?;
             conn.execute(
@@ -1416,12 +992,6 @@ mod tests {
                     provider_id, provider_name, app_type, status, success, message,
                     response_time_ms, http_status, model_used, retry_count, tested_at
                 ) VALUES ('local-provider', 'Local Provider', 'claude', 'operational', 1, 'ok', 42, 200, 'claude-3', 0, 1000)",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO session_log_sync
-                    (file_path, last_modified, last_line_offset, last_synced_at)
-                 VALUES ('/shared/session.jsonl', 123, 12, 1000)",
                 [],
             )?;
         }
@@ -1440,26 +1010,6 @@ mod tests {
             remote_provider_exists, 1,
             "remote config should be imported"
         );
-
-        let (profile_payload, current_profile): (String, String) = {
-            let conn = crate::database::lock_conn!(local_db.conn);
-            let payload = conn.query_row(
-                "SELECT payload FROM profiles WHERE id = 'remote-profile'",
-                [],
-                |row| row.get(0),
-            )?;
-            let current = conn.query_row(
-                "SELECT value FROM settings WHERE key = 'current_profile_id_claude-desktop'",
-                [],
-                |row| row.get(0),
-            )?;
-            (payload, current)
-        };
-        assert_eq!(
-            profile_payload,
-            r#"{"providers":{"claude-desktop":"desktop-provider"}}"#
-        );
-        assert_eq!(current_profile, "remote-profile");
 
         let (request_logs, rollups, stream_logs): (i64, i64, i64) = {
             let conn = crate::database::lock_conn!(local_db.conn);
@@ -1483,32 +1033,6 @@ mod tests {
             stream_logs, 1,
             "local stream check logs should be preserved"
         );
-        let local_sync: (i64, i64, i64) = {
-            let conn = crate::database::lock_conn!(local_db.conn);
-            conn.query_row(
-                "SELECT last_modified, last_line_offset, last_synced_at
-                 FROM session_log_sync
-                 WHERE file_path = '/shared/session.jsonl'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?
-        };
-        assert_eq!(
-            local_sync,
-            (123, 12, 1000),
-            "WebDAV restore must not replace local file progress with a remote device's cursor"
-        );
-        let semantics: (i64, i64) = {
-            let conn = crate::database::lock_conn!(local_db.conn);
-            conn.query_row(
-                "SELECT
-                    (SELECT input_token_semantics FROM proxy_request_logs WHERE request_id = 'req-1'),
-                    (SELECT input_token_semantics FROM usage_daily_rollups WHERE date = '2026-03-01')",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?
-        };
-        assert_eq!(semantics, (2, 2));
 
         Ok(())
     }
@@ -1611,62 +1135,6 @@ mod tests {
         assert_ne!(first, second, "backup paths should not collide");
         assert!(first.exists(), "first backup should exist");
         assert!(second.exists(), "second backup should exist");
-
-        Ok(())
-    }
-
-    #[test]
-    fn backup_database_path_creates_backup_beside_supplied_database() -> Result<(), AppError> {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let canonical_temp =
-            std::fs::canonicalize(temp.path()).expect("canonicalize temp directory");
-        let db_path = canonical_temp.join("custom.db");
-        let conn = Connection::open(&db_path).expect("create source database");
-        conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)", [])
-            .expect("create source table");
-        drop(conn);
-
-        let backup_path = Database::backup_database_path(&db_path)?
-            .expect("backup should be created for supplied database");
-        let expected_dir = canonical_temp.join("backups");
-
-        assert_eq!(backup_path.parent(), Some(expected_dir.as_path()));
-        assert!(backup_path.exists(), "backup file should exist");
-
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn file_database_backup_rejects_other_user_writable_backup_dir() -> Result<(), AppError> {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
-        let db = Database::init()?;
-        let backup_dir = crate::config::get_app_config_dir().join("backups");
-        std::fs::create_dir(&backup_dir).expect("create backup dir");
-        std::fs::set_permissions(&backup_dir, std::fs::Permissions::from_mode(0o777))
-            .expect("set backup dir permissions");
-
-        let err = db
-            .backup_database_file()
-            .expect_err("other-user-writable backup dir must be rejected");
-
-        assert!(err.to_string().contains("不能允许组或其他用户写入"));
-        assert!(
-            std::fs::read_dir(&backup_dir)
-                .expect("read backup dir")
-                .next()
-                .is_none(),
-            "rejected backup must not create artifacts"
-        );
-        let mode = std::fs::metadata(&backup_dir)
-            .expect("metadata backup dir")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o777, "validation must not chmod the directory");
 
         Ok(())
     }

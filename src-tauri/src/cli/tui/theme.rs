@@ -94,18 +94,6 @@ pub struct Theme {
     /// Foreground for text sitting on an accent background.
     pub on_accent: Color,
     pub no_color: bool,
-    color_mode: ColorMode,
-}
-
-impl Theme {
-    /// Quantize an arbitrary RGB triple through the active color mode.
-    ///
-    /// Widgets that carry their own ramp (the usage chart series palette)
-    /// route through this so they degrade the same way the palette fields do
-    /// instead of hard-coding truecolor.
-    pub fn shade(&self, rgb: (u8, u8, u8)) -> Color {
-        terminal_color(self.color_mode, rgb)
-    }
 }
 
 pub fn no_color() -> bool {
@@ -248,6 +236,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
         return match app {
             AppType::Codex => LIGHT_GREEN,
             AppType::Claude => LIGHT_CYAN,
+            AppType::ClaudeDesktop => LIGHT_CYAN,
             AppType::Gemini => LIGHT_PINK,
             AppType::OpenCode => LIGHT_ORANGE,
             AppType::Hermes => LIGHT_YELLOW,
@@ -258,6 +247,7 @@ fn accent_rgb(app: &AppType, light: bool) -> (u8, u8, u8) {
     match app {
         AppType::Codex => DRACULA_GREEN,
         AppType::Claude => DRACULA_CYAN,
+        AppType::ClaudeDesktop => DRACULA_CYAN,
         AppType::Gemini => DRACULA_PINK,
         AppType::OpenCode => DRACULA_ORANGE,
         AppType::Hermes => DRACULA_YELLOW,
@@ -345,7 +335,6 @@ pub fn theme_for_mode(app: &AppType, mode: ThemeMode) -> Theme {
             if light { (255, 255, 255) } else { (10, 10, 10) },
         ),
         no_color,
-        color_mode,
     }
 }
 

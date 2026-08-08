@@ -1,10 +1,7 @@
 use indexmap::IndexMap;
-use reqwest::header::{HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-
-use crate::app_config::AppType;
 
 pub const CLAUDE_AUTH_TOKEN_ENV_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
 pub const CLAUDE_API_KEY_ENV_KEY: &str = "ANTHROPIC_API_KEY";
@@ -121,78 +118,6 @@ impl Provider {
         }
     }
 
-    /// Return the API key accepted by this provider's runtime configuration.
-    ///
-    /// Claude can persist either Anthropic credential field; its metadata is
-    /// authoritative when both are present. Codex keeps its current canonical
-    /// key under `auth`, while retaining the compatibility shapes accepted by
-    /// its runtime adapter.
-    pub(crate) fn configured_api_key(&self, app_type: &AppType) -> Option<String> {
-        let value = match app_type {
-            AppType::Claude => {
-                let env = self.settings_config.get("env")?;
-                let field = ClaudeApiKeyField::from_meta_and_settings(
-                    self.meta.as_ref(),
-                    &self.settings_config,
-                );
-                env.get(field.as_env_key())
-                    .or_else(|| env.get(field.alternate_env_key()))
-            }
-            AppType::Codex => return self.configured_codex_api_key(),
-            AppType::Gemini => self.settings_config.pointer("/env/GEMINI_API_KEY"),
-            AppType::OpenCode => self.settings_config.pointer("/options/apiKey"),
-            AppType::Hermes => self
-                .settings_config
-                .get("apiKey")
-                .or_else(|| self.settings_config.get("api_key")),
-            AppType::OpenClaw => self.settings_config.get("apiKey"),
-        };
-
-        value
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
-
-    fn configured_codex_api_key(&self) -> Option<String> {
-        let non_empty = |value: Option<&Value>| {
-            value
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        };
-
-        non_empty(self.settings_config.pointer("/env/OPENAI_API_KEY"))
-            .or_else(|| {
-                self.settings_config
-                    .get("auth")
-                    .and_then(crate::codex_config::extract_codex_auth_api_key)
-            })
-            .or_else(|| {
-                non_empty(
-                    self.settings_config
-                        .get("apiKey")
-                        .or_else(|| self.settings_config.get("api_key")),
-                )
-            })
-            .or_else(|| {
-                self.settings_config
-                    .get("config")
-                    .filter(|config| config.is_object())
-                    .and_then(|config| {
-                        non_empty(config.get("api_key").or_else(|| config.get("apiKey")))
-                    })
-            })
-            .or_else(|| {
-                self.settings_config
-                    .get("config")
-                    .and_then(Value::as_str)
-                    .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
-            })
-    }
-
     pub fn is_codex_oauth(&self) -> bool {
         self.provider_type() == Some("codex_oauth")
     }
@@ -244,59 +169,6 @@ impl Provider {
             .map(|meta| meta.codex_fast_mode_enabled())
             .unwrap_or(false)
     }
-
-    /// Return the official subscription tool when this provider matches the
-    /// desktop application's Claude/Codex/Gemini OAuth-provider rules.
-    pub(crate) fn official_subscription_tool(&self, app_type: &AppType) -> Option<&'static str> {
-        let tool = match app_type {
-            AppType::Claude => "claude",
-            AppType::Codex => "codex",
-            AppType::Gemini => "gemini",
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => return None,
-        };
-
-        if self.category.as_deref() == Some("official") {
-            return Some(tool);
-        }
-
-        let is_official = match app_type {
-            AppType::Claude => self
-                .settings_config
-                .pointer("/env/ANTHROPIC_BASE_URL")
-                .and_then(Value::as_str)
-                .is_none_or(|value| value.trim().is_empty()),
-            AppType::Codex => {
-                let api_key_missing = self
-                    .settings_config
-                    .pointer("/auth/OPENAI_API_KEY")
-                    .and_then(Value::as_str)
-                    .is_none_or(|value| value.trim().is_empty());
-                let bearer_token_missing = self
-                    .settings_config
-                    .get("config")
-                    .and_then(Value::as_str)
-                    .and_then(crate::codex_config::extract_codex_experimental_bearer_token)
-                    .is_none_or(|value| value.trim().is_empty());
-                api_key_missing && bearer_token_missing
-            }
-            AppType::Gemini => {
-                let api_key_missing = self
-                    .settings_config
-                    .pointer("/env/GEMINI_API_KEY")
-                    .and_then(Value::as_str)
-                    .is_none_or(|value| value.trim().is_empty());
-                let base_url_missing = self
-                    .settings_config
-                    .pointer("/env/GOOGLE_GEMINI_BASE_URL")
-                    .and_then(Value::as_str)
-                    .is_none_or(|value| value.trim().is_empty());
-                api_key_missing && base_url_missing
-            }
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
-        };
-
-        is_official.then_some(tool)
-    }
 }
 
 /// 供应商管理器
@@ -342,6 +214,14 @@ pub struct UsageScript {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "codingPlanProvider")]
     pub coding_plan_provider: Option<String>,
+    /// 智谱团队套餐组织 ID。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "teamOrganizationId")]
+    pub team_organization_id: Option<String>,
+    /// 智谱团队套餐项目 ID。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "teamProjectId")]
+    pub team_project_id: Option<String>,
 }
 
 /// 用量数据
@@ -452,6 +332,23 @@ pub struct AuthBinding {
     pub account_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeDesktopMode {
+    Direct,
+    Proxy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeDesktopModelRoute {
+    pub model: String,
+    #[serde(rename = "labelOverride", skip_serializing_if = "Option::is_none")]
+    pub label_override: Option<String>,
+    #[serde(rename = "supports1m", skip_serializing_if = "Option::is_none")]
+    pub supports_1m: Option<bool>,
+}
+
 /// Codex Responses -> Chat Completions 的 reasoning 能力描述。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CodexChatReasoningConfig {
@@ -471,21 +368,6 @@ pub struct CodexChatReasoningConfig {
     pub output_format: Option<String>,
 }
 
-/// Local proxy request overrides applied after route/protocol transforms.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LocalProxyRequestOverrides {
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub headers: HashMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<Value>,
-}
-
-impl LocalProxyRequestOverrides {
-    pub fn is_empty(&self) -> bool {
-        self.headers.is_empty() && self.body.is_none()
-    }
-}
-
 /// 供应商元数据
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
@@ -496,6 +378,14 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub apply_common_config: Option<bool>,
+    #[serde(rename = "claudeDesktopMode", skip_serializing_if = "Option::is_none")]
+    pub claude_desktop_mode: Option<ClaudeDesktopMode>,
+    #[serde(
+        default,
+        rename = "claudeDesktopModelRoutes",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub claude_desktop_model_routes: HashMap<String, ClaudeDesktopModelRoute>,
     /// Codex 官方供应商标记（官方无需填写 API Key，使用 codex login 凭证）
     #[serde(rename = "codexOfficial", skip_serializing_if = "Option::is_none")]
     pub codex_official: Option<bool>,
@@ -544,41 +434,21 @@ pub struct ProviderMeta {
     /// Codex Responses -> Chat Completions reasoning 能力描述。
     #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
     pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
-    /// Codex → Anthropic path: whether to emulate the Claude Code client
-    /// (User-Agent / anthropic-beta / x-app + injecting the Claude Code system
-    /// prompt first line). Disabled by default; only an explicit `true` enables it.
+    /// Codex -> Anthropic 路径是否模拟 Claude Code 客户端指纹。
     #[serde(
         rename = "impersonateClaudeCode",
         skip_serializing_if = "Option::is_none"
     )]
     pub impersonate_claude_code: Option<bool>,
-    /// Codex → Anthropic path: override the Anthropic `max_tokens` output ceiling.
-    ///
-    /// Codex does not forward `model_max_output_tokens` in the Responses request,
-    /// so this per-provider value takes precedence over the request and the bridge
-    /// fallback. Keeping it per provider avoids hard failures on lower-ceiling
-    /// models and gateways.
+    /// Codex -> Anthropic 路径的 Anthropic `max_tokens` 上限覆盖。
     #[serde(rename = "maxOutputTokens", skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
     /// OpenAI 兼容端点使用的 prompt cache key。
     #[serde(rename = "promptCacheKey", skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
-    /// Session-based prompt-cache routing for Codex Responses -> Chat conversions.
-    /// "auto" enables known-compatible upstreams; "enabled" / "disabled" are overrides.
-    #[serde(rename = "promptCacheRouting", skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_routing: Option<String>,
     /// Codex OAuth FAST mode: inject `service_tier = "priority"` for ChatGPT Codex requests.
     #[serde(rename = "codexFastMode", skip_serializing_if = "Option::is_none")]
     pub codex_fast_mode: Option<bool>,
-    /// Custom User-Agent for local proxy routing.
-    #[serde(rename = "customUserAgent", skip_serializing_if = "Option::is_none")]
-    pub custom_user_agent: Option<String>,
-    /// Local proxy request overrides applied to the transformed upstream request.
-    #[serde(
-        rename = "localProxyRequestOverrides",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub local_proxy_request_overrides: Option<LocalProxyRequestOverrides>,
     /// 通用认证绑定（provider_config / managed_account）
     #[serde(rename = "authBinding", skip_serializing_if = "Option::is_none")]
     pub auth_binding: Option<AuthBinding>,
@@ -602,23 +472,9 @@ pub struct ProviderMeta {
     pub github_account_id: Option<String>,
 }
 
-/// Parse the provider-level User-Agent used by proxy-related requests.
-pub fn parse_custom_user_agent(
-    raw: Option<&str>,
-) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
-    match raw.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => value.parse::<HeaderValue>().map(Some),
-        None => Ok(None),
-    }
-}
-
 impl ProviderMeta {
     pub fn codex_fast_mode_enabled(&self) -> bool {
         self.codex_fast_mode.unwrap_or(false)
-    }
-
-    pub fn custom_user_agent_header(&self) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
-        parse_custom_user_agent(self.custom_user_agent.as_deref())
     }
 
     pub fn managed_account_id_for(&self, auth_provider: &str) -> Option<String> {
@@ -748,108 +604,7 @@ pub struct OpenClawModelCost {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_custom_user_agent, AuthBinding, AuthBindingSource, LocalProxyRequestOverrides,
-        OpenCodeProviderConfig, Provider, ProviderMeta,
-    };
-    use crate::app_config::AppType;
-    use std::collections::HashMap;
-
-    #[test]
-    fn configured_api_key_uses_each_apps_canonical_field() {
-        let mut provider = Provider::with_id(
-            "all-apps".to_string(),
-            "All Apps".to_string(),
-            serde_json::json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "stale-claude-token",
-                    "ANTHROPIC_API_KEY": "claude-api-key",
-                    "GEMINI_API_KEY": "gemini-api-key"
-                },
-                "auth": {
-                    "OPENAI_API_KEY": "codex-api-key"
-                },
-                "options": {
-                    "apiKey": "opencode-api-key"
-                },
-                "apiKey": "shared-top-level-key",
-                "api_key": "hermes-legacy-key"
-            }),
-            None,
-        );
-        provider.meta = Some(ProviderMeta {
-            api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
-            ..Default::default()
-        });
-
-        assert_eq!(
-            provider.configured_api_key(&AppType::Claude).as_deref(),
-            Some("claude-api-key")
-        );
-        assert_eq!(
-            provider.configured_api_key(&AppType::Codex).as_deref(),
-            Some("codex-api-key")
-        );
-        assert_eq!(
-            provider.configured_api_key(&AppType::Gemini).as_deref(),
-            Some("gemini-api-key")
-        );
-        assert_eq!(
-            provider.configured_api_key(&AppType::OpenCode).as_deref(),
-            Some("opencode-api-key")
-        );
-        assert_eq!(
-            provider.configured_api_key(&AppType::Hermes).as_deref(),
-            Some("shared-top-level-key")
-        );
-        assert_eq!(
-            provider.configured_api_key(&AppType::OpenClaw).as_deref(),
-            Some("shared-top-level-key")
-        );
-    }
-
-    #[test]
-    fn configured_codex_api_key_matches_runtime_compatibility_sources() {
-        let cases = [
-            (
-                serde_json::json!({
-                    "env": {"OPENAI_API_KEY": "env-key"},
-                    "auth": {"OPENAI_API_KEY": "auth-key"}
-                }),
-                "env-key",
-            ),
-            (
-                serde_json::json!({"auth": {"OPENAI_API_KEY": "auth-key"}}),
-                "auth-key",
-            ),
-            (
-                serde_json::json!({"apiKey": "top-level-key"}),
-                "top-level-key",
-            ),
-            (
-                serde_json::json!({"config": {"api_key": "object-key"}}),
-                "object-key",
-            ),
-            (
-                serde_json::json!({
-                    "config": r#"model_provider = "custom"
-
-[model_providers.custom]
-experimental_bearer_token = "toml-key"
-"#
-                }),
-                "toml-key",
-            ),
-        ];
-
-        for (settings, expected) in cases {
-            let provider = Provider::with_id("codex".into(), "Codex".into(), settings, None);
-            assert_eq!(
-                provider.configured_api_key(&AppType::Codex).as_deref(),
-                Some(expected)
-            );
-        }
-    }
+    use super::{AuthBinding, AuthBindingSource, OpenCodeProviderConfig, Provider, ProviderMeta};
 
     #[test]
     fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
@@ -882,106 +637,6 @@ experimental_bearer_token = "toml-key"
         assert_eq!(meta.is_full_url, Some(true));
         let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
         assert_eq!(serialized["isFullUrl"], true);
-    }
-
-    #[test]
-    fn provider_meta_round_trips_codex_anthropic_options() {
-        let meta = ProviderMeta {
-            impersonate_claude_code: Some(true),
-            max_output_tokens: Some(64_000),
-            ..Default::default()
-        };
-
-        let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
-        assert_eq!(serialized["impersonateClaudeCode"], true);
-        assert_eq!(serialized["maxOutputTokens"], 64_000);
-        assert!(serialized.get("max_output_tokens").is_none());
-
-        let parsed: ProviderMeta =
-            serde_json::from_value(serialized).expect("deserialize provider meta");
-        assert_eq!(parsed.impersonate_claude_code, Some(true));
-        assert_eq!(parsed.max_output_tokens, Some(64_000));
-    }
-
-    #[test]
-    fn provider_meta_round_trips_local_proxy_request_metadata_exactly() {
-        let value = serde_json::json!({
-            "customUserAgent": "Mozilla/5.0 (compatible; CC-Switch/1.0)",
-            "localProxyRequestOverrides": {
-                "headers": {
-                    "x-tenant": "tenant-a",
-                    "x-trace-mode": "verbose"
-                },
-                "body": {
-                    "metadata": {
-                        "source": "cc-switch"
-                    },
-                    "temperature": 0.2
-                }
-            }
-        });
-
-        let meta: ProviderMeta =
-            serde_json::from_value(value.clone()).expect("deserialize proxy request metadata");
-        assert_eq!(
-            meta.custom_user_agent.as_deref(),
-            Some("Mozilla/5.0 (compatible; CC-Switch/1.0)")
-        );
-        assert!(!meta
-            .local_proxy_request_overrides
-            .as_ref()
-            .expect("local proxy request overrides")
-            .is_empty());
-
-        let serialized = serde_json::to_value(&meta).expect("serialize proxy request metadata");
-        assert_eq!(serialized, value);
-    }
-
-    #[test]
-    fn proxy_request_metadata_omits_empty_fields_exactly() {
-        let empty_overrides = LocalProxyRequestOverrides::default();
-        assert!(empty_overrides.is_empty());
-        assert_eq!(
-            serde_json::to_value(&empty_overrides).expect("serialize empty overrides"),
-            serde_json::json!({})
-        );
-
-        let empty_meta = ProviderMeta::default();
-        assert_eq!(
-            serde_json::to_value(&empty_meta).expect("serialize empty provider meta"),
-            serde_json::json!({})
-        );
-
-        let headers_only = LocalProxyRequestOverrides {
-            headers: HashMap::from([("x-feature".to_string(), "enabled".to_string())]),
-            body: None,
-        };
-        assert_eq!(
-            serde_json::to_value(headers_only).expect("serialize headers-only overrides"),
-            serde_json::json!({
-                "headers": {
-                    "x-feature": "enabled"
-                }
-            })
-        );
-    }
-
-    #[test]
-    fn custom_user_agent_parser_trims_and_validates_header_values() {
-        assert!(parse_custom_user_agent(None)
-            .expect("missing user agent")
-            .is_none());
-        assert!(parse_custom_user_agent(Some("   "))
-            .expect("blank user agent")
-            .is_none());
-        assert_eq!(
-            parse_custom_user_agent(Some("  cc-switch-cli/1.0  "))
-                .expect("valid user agent")
-                .and_then(|value| value.to_str().ok().map(str::to_string))
-                .as_deref(),
-            Some("cc-switch-cli/1.0")
-        );
-        assert!(parse_custom_user_agent(Some("invalid\nuser-agent")).is_err());
     }
 
     #[test]
@@ -1254,85 +909,6 @@ mod issue_71_tests {
         assert_eq!(
             meta.get("githubAccountId").and_then(|value| value.as_str()),
             Some("gh-123")
-        );
-    }
-
-    #[test]
-    fn official_subscription_tool_matches_desktop_provider_rules() {
-        let claude_oauth =
-            Provider::with_id("claude".into(), "Claude".into(), json!({"env": {}}), None);
-        assert_eq!(
-            claude_oauth.official_subscription_tool(&AppType::Claude),
-            Some("claude")
-        );
-
-        let claude_custom = Provider::with_id(
-            "claude-custom".into(),
-            "Claude Custom".into(),
-            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
-            None,
-        );
-        assert_eq!(
-            claude_custom.official_subscription_tool(&AppType::Claude),
-            None
-        );
-
-        let codex_oauth = Provider::with_id(
-            "codex".into(),
-            "Codex".into(),
-            json!({
-                "auth": {},
-                "config": "base_url = \"https://api.example.com/v1\""
-            }),
-            None,
-        );
-        assert_eq!(
-            codex_oauth.official_subscription_tool(&AppType::Codex),
-            Some("codex")
-        );
-
-        let codex_api_key = Provider::with_id(
-            "codex-key".into(),
-            "Codex Key".into(),
-            json!({"auth": {"OPENAI_API_KEY": "sk-custom"}}),
-            None,
-        );
-        assert_eq!(
-            codex_api_key.official_subscription_tool(&AppType::Codex),
-            None
-        );
-
-        let codex_bearer = Provider::with_id(
-            "codex-bearer".into(),
-            "Codex Bearer".into(),
-            json!({"config": "experimental_bearer_token = \"sk-custom\""}),
-            None,
-        );
-        assert_eq!(
-            codex_bearer.official_subscription_tool(&AppType::Codex),
-            None
-        );
-
-        let gemini_oauth =
-            Provider::with_id("gemini".into(), "Gemini".into(), json!({"env": {}}), None);
-        assert_eq!(
-            gemini_oauth.official_subscription_tool(&AppType::Gemini),
-            Some("gemini")
-        );
-
-        let gemini_custom = Provider::with_id(
-            "gemini-custom".into(),
-            "Gemini Custom".into(),
-            json!({"env": {"GOOGLE_GEMINI_BASE_URL": "https://api.example.com"}}),
-            None,
-        );
-        assert_eq!(
-            gemini_custom.official_subscription_tool(&AppType::Gemini),
-            None
-        );
-        assert_eq!(
-            gemini_oauth.official_subscription_tool(&AppType::OpenCode),
-            None
         );
     }
 }

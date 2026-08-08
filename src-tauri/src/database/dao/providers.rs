@@ -19,8 +19,8 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare(
             "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
-             FROM providers WHERE app_type = ?1
-             ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
+ FROM providers WHERE app_type = ?1
+ ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
         ).map_err(|e| AppError::Database(e.to_string()))?;
 
         let provider_iter = stmt
@@ -133,7 +133,7 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let result = conn.query_row(
             "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
-             FROM providers WHERE id = ?1 AND app_type = ?2",
+ FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
             |row| {
                 let name: String = row.get(0)?;
@@ -258,7 +258,7 @@ impl Database {
 
             self.save_provider(app_type, &provider)?;
             inserted += 1;
-            log::info!("✓ Seeded official provider: {} ({})", seed.name, app_type);
+            log::info!("OK Seeded official provider: {} ({})", seed.name, app_type);
         }
 
         self.set_setting("official_providers_seeded", "true")?;
@@ -296,19 +296,19 @@ impl Database {
             // 更新模式：使用 UPDATE 避免触发 ON DELETE CASCADE
             tx.execute(
                 "UPDATE providers SET
-                    name = ?1,
-                    settings_config = ?2,
-                    website_url = ?3,
-                    category = ?4,
-                    created_at = ?5,
-                    sort_index = ?6,
-                    notes = ?7,
-                    icon = ?8,
-                    icon_color = ?9,
-                    meta = ?10,
-                    is_current = ?11,
-                    in_failover_queue = ?12
-                WHERE id = ?13 AND app_type = ?14",
+ name = ?1,
+ settings_config = ?2,
+ website_url = ?3,
+ category = ?4,
+ created_at = ?5,
+ sort_index = ?6,
+ notes = ?7,
+ icon = ?8,
+ icon_color = ?9,
+ meta = ?10,
+ is_current = ?11,
+ in_failover_queue = ?12
+ WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
                     serde_json::to_string(&provider.settings_config).map_err(|e| {
@@ -335,15 +335,16 @@ impl Database {
             // 新增模式：使用 INSERT
             tx.execute(
                 "INSERT INTO providers (
-                    id, app_type, name, settings_config, website_url, category,
-                    created_at, sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+ id, app_type, name, settings_config, website_url, category,
+ created_at, sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue
+ ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
+                    serde_json::to_string(&provider.settings_config).map_err(|e| {
+                        AppError::Database(format!("Failed to serialize settings_config: {e}"))
+                    })?,
                     provider.website_url,
                     provider.category,
                     provider.created_at,
@@ -351,8 +352,9 @@ impl Database {
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
-                    serde_json::to_string(&meta_clone)
-                        .map_err(|e| AppError::Database(format!("Failed to serialize meta: {e}")))?,
+                    serde_json::to_string(&meta_clone).map_err(|e| AppError::Database(format!(
+                        "Failed to serialize meta: {e}"
+                    )))?,
                     is_current,
                     in_failover_queue,
                 ],
@@ -363,7 +365,7 @@ impl Database {
             for (url, endpoint) in endpoints {
                 tx.execute(
                     "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
-                     VALUES (?1, ?2, ?3, ?4)",
+ VALUES (?1, ?2, ?3, ?4)",
                     params![provider.id, app_type, url, endpoint.added_at],
                 )
                 .map_err(|e| AppError::Database(e.to_string()))?;
@@ -385,10 +387,10 @@ impl Database {
         ) = conn
             .query_row(
                 "SELECT
-                     COALESCE((SELECT enabled FROM proxy_config WHERE app_type = ?1), 0),
-                     COALESCE((SELECT auto_failover_enabled FROM proxy_config WHERE app_type = ?1), 0),
-                     (SELECT COUNT(*) FROM providers WHERE app_type = ?1 AND in_failover_queue = 1),
-                     COALESCE((SELECT in_failover_queue FROM providers WHERE app_type = ?1 AND id = ?2), 0)",
+ COALESCE((SELECT enabled FROM proxy_config WHERE app_type = ?1), 0),
+ COALESCE((SELECT auto_failover_enabled FROM proxy_config WHERE app_type = ?1), 0),
+ (SELECT COUNT(*) FROM providers WHERE app_type = ?1 AND in_failover_queue = 1),
+ COALESCE((SELECT in_failover_queue FROM providers WHERE app_type = ?1 AND id = ?2), 0)",
                 params![app_type, id],
                 |row| {
                     Ok((

@@ -343,6 +343,14 @@ impl ProxyServer {
             .route("/status", get(handlers::get_status))
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
+            .route(
+                "/claude-desktop/v1/models",
+                get(handlers::handle_claude_desktop_models),
+            )
+            .route(
+                "/claude-desktop/v1/messages",
+                post(handlers::handle_claude_desktop_messages),
+            )
             .route("/chat/completions", post(handlers::handle_chat_completions))
             .route(
                 "/v1/chat/completions",
@@ -356,8 +364,6 @@ impl ProxyServer {
                 "/codex/v1/chat/completions",
                 post(handlers::handle_chat_completions),
             )
-            .route("/models", get(handlers::handle_models))
-            .route("/v1/models", get(handlers::handle_models))
             .route("/responses", post(handlers::handle_responses))
             .route("/v1/responses", post(handlers::handle_responses))
             .route("/v1/v1/responses", post(handlers::handle_responses))
@@ -401,7 +407,6 @@ mod tests {
         original_home: Option<String>,
         original_userprofile: Option<String>,
         original_config_dir: Option<String>,
-        original_codex_home: Option<String>,
     }
 
     impl TempHome {
@@ -410,14 +415,10 @@ mod tests {
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
             let original_config_dir = env::var("CC_SWITCH_CONFIG_DIR").ok();
-            let original_codex_home = env::var("CODEX_HOME").ok();
-            let codex_home = dir.path().join(".codex");
-            std::fs::create_dir_all(&codex_home).expect("create temporary Codex home");
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
             env::set_var("CC_SWITCH_CONFIG_DIR", dir.path().join(".cc-switch"));
-            env::set_var("CODEX_HOME", codex_home);
             crate::settings::reload_test_settings();
 
             Self {
@@ -425,7 +426,6 @@ mod tests {
                 original_home,
                 original_userprofile,
                 original_config_dir,
-                original_codex_home,
             }
         }
     }
@@ -445,11 +445,6 @@ mod tests {
             match &self.original_config_dir {
                 Some(value) => env::set_var("CC_SWITCH_CONFIG_DIR", value),
                 None => env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
-
-            match &self.original_codex_home {
-                Some(value) => env::set_var("CODEX_HOME", value),
-                None => env::remove_var("CODEX_HOME"),
             }
 
             crate::settings::reload_test_settings();
@@ -516,161 +511,6 @@ mod tests {
         db.update_proxy_config_for_app(config)
             .await
             .expect("update app proxy config");
-    }
-
-    async fn start_models_test_server() -> (ProxyServer, ProxyServerInfo) {
-        let config = ProxyConfig {
-            listen_address: "127.0.0.1".to_string(),
-            listen_port: 0,
-            enable_logging: false,
-            ..ProxyConfig::default()
-        };
-        let server = ProxyServer::new(
-            config,
-            Arc::new(Database::memory().expect("create memory database")),
-        );
-        let info = server.start().await.expect("start proxy server");
-        (server, info)
-    }
-
-    async fn fetch_models(port: u16, path: &str) -> (reqwest::StatusCode, serde_json::Value) {
-        let response = reqwest::get(format!("http://127.0.0.1:{port}{path}"))
-            .await
-            .expect("request models endpoint");
-        let status = response.status();
-        let body = response.json().await.expect("parse models response");
-        (status, body)
-    }
-
-    #[tokio::test]
-    #[serial(home_settings)]
-    async fn models_endpoints_return_the_active_codex_catalog_without_caching() {
-        let _home = TempHome::new();
-        crate::config::write_text_file(
-            &crate::codex_config::get_codex_config_path(),
-            r#"model_catalog_json = "cc-switch-model-catalog.json"
-model = "deepseek-v4-flash"
-"#,
-        )
-        .expect("write Codex config.toml");
-        let first_catalog = json!({
-            "models": [
-                {
-                    "slug": "deepseek-v4-flash",
-                    "display_name": "DeepSeek V4 Flash"
-                }
-            ],
-            "metadata": {
-                "source": "first"
-            }
-        });
-        crate::config::write_json_file(
-            &crate::codex_config::get_codex_model_catalog_path(),
-            &first_catalog,
-        )
-        .expect("write first Codex model catalog");
-
-        let (server, info) = start_models_test_server().await;
-        let (models_status, models_body) = fetch_models(info.port, "/models").await;
-
-        let second_catalog = json!({
-            "models": [
-                {
-                    "slug": "deepseek-v4-pro",
-                    "display_name": "DeepSeek V4 Pro"
-                }
-            ],
-            "metadata": {
-                "source": "second"
-            }
-        });
-        crate::config::write_json_file(
-            &crate::codex_config::get_codex_model_catalog_path(),
-            &second_catalog,
-        )
-        .expect("replace Codex model catalog");
-        let (v1_status, v1_body) = fetch_models(info.port, "/v1/models").await;
-        server.stop().await.expect("stop proxy server");
-
-        assert_eq!(models_status, reqwest::StatusCode::OK);
-        assert_eq!(models_body, first_catalog);
-        assert_eq!(v1_status, reqwest::StatusCode::OK);
-        assert_eq!(
-            v1_body, second_catalog,
-            "the endpoint should read the active catalog on every request"
-        );
-        assert!(v1_body.get("data").is_none());
-    }
-
-    #[tokio::test]
-    #[serial(home_settings)]
-    async fn models_endpoint_rejects_stale_or_invalid_catalog_state() {
-        let _home = TempHome::new();
-        let generated_path = crate::codex_config::get_codex_model_catalog_path();
-        crate::config::write_json_file(
-            &generated_path,
-            &json!({
-                "models": [
-                    {
-                        "slug": "stale-model"
-                    }
-                ]
-            }),
-        )
-        .expect("write stale Codex model catalog");
-
-        let (server, info) = start_models_test_server().await;
-
-        crate::config::write_text_file(
-            &crate::codex_config::get_codex_config_path(),
-            r#"# model_catalog_json = "cc-switch-model-catalog.json"
-model = "gpt-5.4"
-"#,
-        )
-        .expect("write config with commented catalog pointer");
-        let (commented_pointer_status, commented_pointer_body) =
-            fetch_models(info.port, "/v1/models").await;
-
-        crate::config::write_text_file(
-            &crate::codex_config::get_codex_config_path(),
-            r#"model_catalog_json = "user-model-catalog.json"
-model = "gpt-5.4"
-"#,
-        )
-        .expect("write config with user-owned catalog pointer");
-        let (user_owned_pointer_status, user_owned_pointer_body) =
-            fetch_models(info.port, "/v1/models").await;
-
-        crate::config::write_text_file(
-            &crate::codex_config::get_codex_config_path(),
-            r#"model_catalog_json = "cc-switch-model-catalog.json"
-model = "gpt-5.4"
-"#,
-        )
-        .expect("write config with active catalog pointer");
-        std::fs::remove_file(&generated_path).expect("remove active catalog");
-        let (missing_catalog_status, missing_catalog_body) =
-            fetch_models(info.port, "/v1/models").await;
-
-        crate::config::write_text_file(&generated_path, "{not-json")
-            .expect("write malformed catalog");
-        let (malformed_catalog_status, malformed_catalog_body) =
-            fetch_models(info.port, "/v1/models").await;
-        server.stop().await.expect("stop proxy server");
-
-        let empty_catalog = json!({ "models": [] });
-        for status in [
-            commented_pointer_status,
-            user_owned_pointer_status,
-            missing_catalog_status,
-            malformed_catalog_status,
-        ] {
-            assert_eq!(status, reqwest::StatusCode::OK);
-        }
-        assert_eq!(commented_pointer_body, empty_catalog);
-        assert_eq!(user_owned_pointer_body, empty_catalog);
-        assert_eq!(missing_catalog_body, empty_catalog);
-        assert_eq!(malformed_catalog_body, empty_catalog);
     }
 
     #[tokio::test]

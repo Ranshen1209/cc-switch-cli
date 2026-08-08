@@ -6,10 +6,6 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
-        if let Some(action) = self.handle_codex_history_confirm_key(key) {
-            return Some(action);
-        }
-
         if let Some(action) = self.handle_confirm_overlay_key(key, data) {
             return Some(action);
         }
@@ -19,57 +15,6 @@ impl App {
         }
 
         None
-    }
-
-    fn handle_codex_history_confirm_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let Overlay::CodexHistoryConfirm(confirm) = &mut self.overlay else {
-            return None;
-        };
-
-        let action = match (confirm.mode, key.code) {
-            (CodexHistoryConfirmMode::Enable, KeyCode::Enter) => {
-                self.close_overlay();
-                Action::SetCodexUnifiedSessionHistory {
-                    enabled: true,
-                    migrate_existing: false,
-                    restore_after_disable: false,
-                }
-            }
-            (CodexHistoryConfirmMode::Enable, KeyCode::Char('y') | KeyCode::Char('Y')) => {
-                self.close_overlay();
-                Action::SetCodexUnifiedSessionHistory {
-                    enabled: true,
-                    migrate_existing: true,
-                    restore_after_disable: false,
-                }
-            }
-            (
-                CodexHistoryConfirmMode::Disable,
-                KeyCode::Char(' ') | KeyCode::Char('x') | KeyCode::Char('X'),
-            ) if confirm.show_restore_checkbox => {
-                confirm.restore_checked = !confirm.restore_checked;
-                Action::None
-            }
-            (
-                CodexHistoryConfirmMode::Disable,
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter,
-            ) => {
-                let restore = confirm.show_restore_checkbox && confirm.restore_checked;
-                self.close_overlay();
-                Action::SetCodexUnifiedSessionHistory {
-                    enabled: false,
-                    migrate_existing: false,
-                    restore_after_disable: restore,
-                }
-            }
-            (_, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) => {
-                self.close_overlay();
-                Action::None
-            }
-            _ => Action::None,
-        };
-
-        Some(action)
     }
 
     fn handle_confirm_overlay_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
@@ -131,6 +76,9 @@ impl App {
                     ConfirmAction::SettingsSetClaudePluginIntegration { enabled } => {
                         Action::SetClaudePluginIntegration { enabled: *enabled }
                     }
+                    ConfirmAction::SettingsSetCodexUnifiedSessionHistory { enabled } => {
+                        Action::SetCodexUnifiedSessionHistory { enabled: *enabled }
+                    }
                     ConfirmAction::VisibleAppsAutoDetection => {
                         Action::ConfirmVisibleAppsAutoDetection { use_auto: true }
                     }
@@ -143,7 +91,6 @@ impl App {
                     ConfirmAction::ProviderApiFormatProxyNotice => Action::None,
                     ConfirmAction::CommonConfigNotice => Action::ConfirmCommonConfigNotice,
                     ConfirmAction::UsageQueryNotice => Action::ConfirmUsageQueryNotice,
-                    ConfirmAction::RebuildCodexUsage => Action::UsageRebuildCodex,
                     ConfirmAction::ManagedAuthCancelLogin => {
                         self.cancel_managed_auth_login();
                         Action::None
@@ -177,34 +124,24 @@ impl App {
                         }
                     }
                     ConfirmAction::WebDavMigrateV1ToV2 => Action::ConfigWebDavMigrateV1ToV2,
-                    ConfirmAction::CloudSyncTransfer { backend, intent } => {
-                        match (backend, intent) {
-                            (CloudSyncBackend::WebDav, CloudSyncTransferIntent::Upload) => {
-                                Action::ConfigWebDavUpload
-                            }
-                            (CloudSyncBackend::WebDav, CloudSyncTransferIntent::Restore) => {
-                                Action::ConfigWebDavDownload
-                            }
-                            (CloudSyncBackend::S3Compatible, CloudSyncTransferIntent::Upload) => {
-                                Action::ConfigS3Upload
-                            }
-                            (CloudSyncBackend::S3Compatible, CloudSyncTransferIntent::Restore) => {
-                                Action::ConfigS3Download
-                            }
-                        }
-                    }
-                    ConfirmAction::CloudSyncReset { backend } => match backend {
-                        CloudSyncBackend::WebDav => Action::ConfigWebDavReset,
-                        CloudSyncBackend::S3Compatible => Action::ConfigS3Reset,
-                    },
                     ConfirmAction::ClaudeModelFillAll { source_idx } => {
                         let source_idx = *source_idx;
                         if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                            provider.fill_claude_models_from(source_idx);
+                            let value = provider
+                                .claude_model_input(source_idx)
+                                .map(|input| input.value.clone())
+                                .unwrap_or_default();
+                            for idx in 0..4 {
+                                if idx != source_idx {
+                                    if let Some(input) = provider.claude_model_input_mut(idx) {
+                                        input.set(value.clone());
+                                    }
+                                }
+                            }
+                            provider.mark_claude_model_config_touched();
                         }
                         self.overlay = Overlay::ClaudeModelPicker {
                             selected: source_idx,
-                            column: ClaudeModelPickerColumn::Model,
                             editing: false,
                         };
                         return Some(Action::None);
@@ -217,7 +154,6 @@ impl App {
                 if let ConfirmAction::ClaudeModelFillAll { source_idx } = confirm.action {
                     self.overlay = Overlay::ClaudeModelPicker {
                         selected: source_idx,
-                        column: ClaudeModelPickerColumn::Model,
                         editing: false,
                     };
                     return Some(Action::None);
@@ -271,7 +207,6 @@ impl App {
                     ConfirmAction::ClaudeModelFillAll { source_idx } => {
                         self.overlay = Overlay::ClaudeModelPicker {
                             selected: source_idx,
-                            column: ClaudeModelPickerColumn::Model,
                             editing: false,
                         };
                         Action::None
@@ -366,27 +301,6 @@ impl App {
                 };
                 Action::SetOpenClawConfigDir { path }
             }
-            TextSubmit::SettingsPreferredEditor => {
-                let trimmed = raw.trim().to_string();
-                let command = if trimmed.is_empty() {
-                    None
-                } else {
-                    if let Err(err) =
-                        crate::cli::editor::validate_preferred_editor_command(&trimmed)
-                    {
-                        self.overlay = Overlay::TextInput(TextInputState {
-                            title: texts::tui_settings_preferred_editor_label().to_string(),
-                            prompt: texts::tui_settings_preferred_editor_prompt().to_string(),
-                            input: TextInput::new(trimmed),
-                            submit: TextSubmit::SettingsPreferredEditor,
-                        });
-                        self.push_toast(err.to_string(), ToastKind::Error);
-                        return Action::None;
-                    }
-                    Some(trimmed)
-                };
-                Action::SetPreferredEditor { command }
-            }
             TextSubmit::SkillsInstallSpec => {
                 if raw.is_empty() {
                     self.push_toast(texts::tui_toast_skill_spec_empty(), ToastKind::Warning);
@@ -446,16 +360,11 @@ impl App {
                         },
                         input: TextInput::new(raw),
                         submit: TextSubmit::UsageCustomRange,
+                        secret: false,
                     });
                     Action::None
                 }
             },
-            TextSubmit::ProviderCustomUserAgent => {
-                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    provider.custom_user_agent.set(raw);
-                }
-                Action::None
-            }
             TextSubmit::CodexModelCatalogField { row, field } => {
                 self.handle_codex_model_catalog_field_submit(row, field, raw)
             }
@@ -481,6 +390,7 @@ impl App {
                 prompt: codex_model_catalog_field_prompt(field).to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::CodexModelCatalogField { row, field },
+                secret: false,
             });
             return Action::None;
         }
@@ -532,6 +442,7 @@ impl App {
                 prompt: texts::tui_webdav_jianguoyun_username_prompt().to_string(),
                 input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunUsername,
+                secret: false,
             });
             return Action::None;
         }
@@ -542,6 +453,7 @@ impl App {
             prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
             input: TextInput::new(""),
             submit: TextSubmit::WebDavJianguoyunPassword,
+            secret: true,
         });
         Action::None
     }
@@ -554,6 +466,7 @@ impl App {
                 prompt: texts::tui_webdav_jianguoyun_app_password_prompt().to_string(),
                 input: TextInput::new(""),
                 submit: TextSubmit::WebDavJianguoyunPassword,
+                secret: true,
             });
             return Action::None;
         }
@@ -594,6 +507,7 @@ impl App {
                 prompt: texts::tui_settings_proxy_listen_address_prompt().to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenAddress,
+                secret: false,
             });
             return Action::None;
         }
@@ -621,6 +535,7 @@ impl App {
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
+                secret: false,
             });
             return Action::None;
         };
@@ -635,6 +550,7 @@ impl App {
                 prompt: texts::tui_settings_proxy_listen_port_prompt().to_string(),
                 input: TextInput::new(trimmed),
                 submit: TextSubmit::SettingsProxyListenPort,
+                secret: false,
             });
             return Action::None;
         }

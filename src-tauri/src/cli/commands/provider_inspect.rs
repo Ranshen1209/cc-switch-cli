@@ -33,9 +33,7 @@ enum ModelFetchSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelFetchTarget {
     base_url: String,
-    is_full_url: bool,
     auth_value: Option<String>,
-    custom_user_agent: Option<String>,
     strategy: ProviderModelFetchStrategy,
 }
 
@@ -47,8 +45,6 @@ struct ClaudeConfig {
     haiku_model: Option<String>,
     sonnet_model: Option<String>,
     opus_model: Option<String>,
-    fable_model: Option<String>,
-    subagent_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,14 +88,14 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     });
 
     for (id, provider) in provider_list {
-        let current_marker = if id == current_id { "✓" } else { " " };
+        let current_marker = if id == current_id { "OK" } else { "" };
         let api_url = extract_api_url(&provider, &app_type).unwrap_or_else(|| "N/A".to_string());
 
         table.add_row(vec![current_marker.to_string(), id, provider.name, api_url]);
     }
 
     println!("{}", table);
-    println!("\n{} Application: {}", info("ℹ"), app_str);
+    println!("\n{} Application: {}", info("i"), app_str);
     println!("{} Current: {}", info("→"), highlight(&current_id));
 
     Ok(())
@@ -118,69 +114,45 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
     println!("{}", "═".repeat(60));
 
     println!("\n{}", highlight(texts::basic_info_section_header()));
-    println!("  ID:       {}", current_id);
-    println!(
-        "  {}:     {}",
-        texts::name_label_with_colon(),
-        provider.name
-    );
-    println!(
-        "  {}:     {}",
-        texts::app_label_with_colon(),
-        app_type.as_str()
-    );
+    println!("ID: {}", current_id);
+    println!("{}: {}", texts::name_label_with_colon(), provider.name);
+    println!("{}: {}", texts::app_label_with_colon(), app_type.as_str());
 
     if matches!(app_type, AppType::Claude) {
-        let config = extract_claude_config(provider);
+        let config = extract_claude_config(&provider.settings_config);
 
         println!("\n{}", highlight(texts::api_config_section_header()));
         println!(
-            "  Base URL: {}",
+            "Base URL: {}",
             config.base_url.unwrap_or_else(|| "N/A".to_string())
         );
         println!(
-            "  API Key:  {}",
+            "API Key: {}",
             config.api_key.unwrap_or_else(|| "N/A".to_string())
         );
 
         println!("\n{}", highlight(texts::model_config_section_header()));
         println!(
-            "  {}:   {}",
+            "{}: {}",
             texts::main_model_label_with_colon(),
             config.model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "  Haiku:    {}",
+            "Haiku: {}",
             config.haiku_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "  Sonnet:   {}",
+            "Sonnet: {}",
             config.sonnet_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "  Opus:     {}",
+            "Opus: {}",
             config.opus_model.unwrap_or_else(|| "default".to_string())
-        );
-        println!(
-            "  Fable:    {}",
-            config.fable_model.unwrap_or_else(|| "default".to_string())
-        );
-        println!(
-            "  Subagent: {}",
-            config
-                .subagent_model
-                .unwrap_or_else(|| "default".to_string())
         );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
-        println!("  API URL:  {}", api_url);
-        println!(
-            "  API Key:  {}",
-            provider
-                .configured_api_key(&app_type)
-                .unwrap_or_else(|| "N/A".to_string())
-        );
+        println!("API URL: {}", api_url);
     }
 
     println!("\n{}", "─".repeat(60));
@@ -235,7 +207,7 @@ pub(crate) fn speedtest_provider(app_type: AppType, id: &str) -> Result<(), AppE
         if let Some(err) = &result.error {
             println!("\n{}", error(&format!("Error: {}", err)));
         } else if result.latency.is_some() {
-            println!("\n{}", success("✓ Speedtest completed successfully"));
+            println!("\n{}", success("OK Speedtest completed successfully"));
         }
     }
 
@@ -274,7 +246,7 @@ pub(crate) fn stream_check_provider(app_type: AppType, id: &str) -> Result<(), A
     }
     println!();
     if result.success {
-        println!("{}", success("✓ Stream check completed successfully"));
+        println!("{}", success("OK Stream check completed successfully"));
     } else {
         println!("{}", warning("Stream check finished with errors."));
     }
@@ -348,9 +320,7 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
         ModelFetchSource::Http(target) => runtime.block_on(async {
             crate::cli::tui::fetch_provider_models_for_tui(
                 &target.base_url,
-                target.is_full_url,
                 target.auth_value.as_deref(),
-                target.custom_user_agent.as_deref(),
                 to_tui_strategy(target.strategy),
             )
             .await
@@ -381,7 +351,7 @@ fn print_fetched_models(models: &[String]) {
     println!();
     println!(
         "{}",
-        success(&format!("✓ Fetched {} model(s)", models.len()))
+        success(&format!("OK Fetched {} model(s)", models.len()))
     );
 }
 
@@ -706,13 +676,8 @@ fn push_script_usage_lines(lines: &mut Vec<String>, result: &UsageResult) {
         texts::tui_quota_ok()
     ));
     for (idx, item) in items.iter().enumerate() {
-        let label = display_usage_plan_name(item).map_or_else(
-            || format!("Usage {}", idx + 1),
-            |name| match name.trim() {
-                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
-                other => other.to_string(),
-            },
-        );
+        let label = display_usage_plan_name(item)
+            .map_or_else(|| format!("Usage {}", idx + 1), str::to_string);
         lines.push(format!("{label}: {}", script_usage_item_text(item)));
     }
 }
@@ -735,7 +700,7 @@ fn script_usage_item_text(item: &UsageData) -> String {
     {
         parts.push(extra.to_string());
     }
-    parts.join("  ")
+    parts.join("")
 }
 
 fn push_optional_error(lines: &mut Vec<String>, message: Option<&String>) {
@@ -758,7 +723,7 @@ fn quota_tier_label(name: &str) -> String {
         "gemini_pro" => texts::tui_quota_tier_gemini_pro().to_string(),
         "gemini_flash" => texts::tui_quota_tier_gemini_flash().to_string(),
         "gemini_flash_lite" => texts::tui_quota_tier_gemini_flash_lite().to_string(),
-        other => other.replace('_', " "),
+        other => other.replace('_', ""),
     }
 }
 
@@ -778,20 +743,9 @@ fn model_fetch_target(
             provider.id
         )));
     }
-    let custom_user_agent = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.custom_user_agent.clone());
-    let is_full_url = matches!(app_type, AppType::Claude | AppType::Codex)
-        && !provider.is_codex_oauth()
-        && provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.is_full_url)
-            .unwrap_or(false);
 
     match app_type {
-        AppType::Claude => {
+        AppType::Claude | AppType::ClaudeDesktop => {
             let auth_value = StreamCheckService::extract_claude_key(provider).ok_or_else(|| {
                 AppError::Message(format!("Missing API key for provider '{}'", provider.id))
             })?;
@@ -803,20 +757,16 @@ fn model_fetch_target(
 
             Ok(ModelFetchTarget {
                 base_url,
-                is_full_url,
                 auth_value: Some(auth_value),
-                custom_user_agent,
                 strategy,
             })
         }
         AppType::Codex => {
             Ok(ModelFetchTarget {
                 base_url,
-                is_full_url,
                 auth_value: Some(StreamCheckService::extract_codex_key(provider).ok_or_else(
                     || AppError::Message(format!("Missing API key for provider '{}'", provider.id)),
                 )?),
-                custom_user_agent,
                 strategy: ProviderModelFetchStrategy::Bearer,
             })
         }
@@ -824,15 +774,12 @@ fn model_fetch_target(
             let (auth_value, strategy) = extract_gemini_model_fetch_auth(provider)?;
             Ok(ModelFetchTarget {
                 base_url,
-                is_full_url,
                 auth_value: Some(auth_value),
-                custom_user_agent,
                 strategy,
             })
         }
         AppType::OpenCode => Ok(ModelFetchTarget {
             base_url,
-            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -846,12 +793,10 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
-            custom_user_agent,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
             base_url,
-            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -865,12 +810,10 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
-            custom_user_agent,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
             base_url,
-            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -883,7 +826,6 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
-            custom_user_agent,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
     }
@@ -909,16 +851,14 @@ fn one_off_model_fetch_target(
 
     Ok(ModelFetchTarget {
         base_url,
-        is_full_url: false,
         auth_value,
-        custom_user_agent: None,
         strategy,
     })
 }
 
 fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetchStrategy {
     match app_type {
-        AppType::Claude => ProviderModelFetchStrategy::Anthropic,
+        AppType::Claude | AppType::ClaudeDesktop => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
         AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
             ProviderModelFetchStrategy::Bearer
@@ -1029,15 +969,18 @@ fn extract_api_url(provider: &Provider, app_type: &AppType) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn extract_claude_config(provider: &Provider) -> ClaudeConfig {
-    let env = provider
-        .settings_config
+fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
+    let env = settings_config
         .get("env")
         .and_then(|value| value.as_object());
 
     if let Some(env) = env {
         ClaudeConfig {
-            api_key: provider.configured_api_key(&AppType::Claude),
+            api_key: env
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .or_else(|| env.get("ANTHROPIC_API_KEY"))
+                .and_then(|value| value.as_str())
+                .map(mask_api_key),
             base_url: env
                 .get("ANTHROPIC_BASE_URL")
                 .and_then(|value| value.as_str())
@@ -1058,17 +1001,17 @@ fn extract_claude_config(provider: &Provider) -> ClaudeConfig {
                 .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
                 .and_then(|value| value.as_str())
                 .map(simplify_model_name),
-            fable_model: env
-                .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
-                .and_then(|value| value.as_str())
-                .map(simplify_model_name),
-            subagent_model: env
-                .get("CLAUDE_CODE_SUBAGENT_MODEL")
-                .and_then(|value| value.as_str())
-                .map(simplify_model_name),
         }
     } else {
         ClaudeConfig::default()
+    }
+}
+
+fn mask_api_key(key: &str) -> String {
+    if key.len() > 8 {
+        format!("{}...", &key[..8])
+    } else {
+        key.to_string()
     }
 }
 
@@ -1131,30 +1074,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_api_url_uses_active_codex_model_provider() {
-        let provider = Provider::with_id(
-            "current".to_string(),
-            "Current".to_string(),
-            json!({
-                "config": r#"model_provider = "current"
-
-# [model_providers.old]
-# base_url = "https://old.example.com/v1"
-
-[model_providers.current]
-base_url = "https://current.example.com/v1"
-"#
-            }),
-            None,
-        );
-
-        assert_eq!(
-            extract_api_url(&provider, &AppType::Codex).as_deref(),
-            Some("https://current.example.com/v1")
-        );
-    }
-
-    #[test]
     fn provider_quota_text_shows_script_empty_success_as_not_available_only() {
         let output = quota_output(ProviderUsageQuota::Script(UsageResult {
             success: true,
@@ -1207,26 +1126,6 @@ base_url = "https://current.example.com/v1"
         )));
         assert!(joined.contains("Usage 1: 2 USD"));
         assert!(joined.contains("Usage 2: 3 USD"));
-    }
-
-    #[test]
-    fn provider_quota_text_localizes_token_plan_tier_names() {
-        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
-        let output = quota_output(ProviderUsageQuota::Script(UsageResult {
-            success: true,
-            data: Some(vec![
-                usage_item(Some("five_hour"), Some(100.0)),
-                usage_item(Some("weekly_limit"), Some(0.0)),
-            ]),
-            error: None,
-        }));
-
-        let joined = provider_quota_text_lines(&output).join("\n");
-
-        assert!(joined.contains("5h: 100 USD"), "{joined}");
-        assert!(joined.contains("weekly: 0 USD"), "{joined}");
-        assert!(!joined.contains("five_hour"), "{joined}");
-        assert!(!joined.contains("weekly_limit"), "{joined}");
     }
 
     #[test]
@@ -1328,35 +1227,6 @@ base_url = "https://current.example.com/v1"
         assert_eq!(target.base_url, "https://claude.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-claude"));
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
-    }
-
-    #[test]
-    fn saved_provider_model_fetch_target_keeps_custom_user_agent() {
-        let mut provider = Provider::with_id(
-            "demo".to_string(),
-            "Demo".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": "https://claude.example.com",
-                    "ANTHROPIC_API_KEY": "sk-claude"
-                }
-            }),
-            None,
-        );
-        provider.meta = Some(ProviderMeta {
-            custom_user_agent: Some("cc-switch-model-fetch/test".to_string()),
-            is_full_url: Some(true),
-            ..Default::default()
-        });
-
-        let target = model_fetch_target(&provider, &AppType::Claude)
-            .expect("saved provider should resolve fetch target");
-
-        assert_eq!(
-            target.custom_user_agent.as_deref(),
-            Some("cc-switch-model-fetch/test")
-        );
-        assert!(target.is_full_url);
     }
 
     #[test]
@@ -1475,15 +1345,14 @@ base_url = "https://current.example.com/v1"
     fn one_off_model_fetch_target_defaults_strategy_by_app_and_trims_input() {
         let target = one_off_model_fetch_target(
             &AppType::Gemini,
-            Some(" https://gemini.example.com/ "),
-            Some(" sk-gemini "),
+            Some("https://gemini.example.com/ "),
+            Some("sk-gemini "),
             None,
         )
         .expect("one-off target should be built");
 
         assert_eq!(target.base_url, "https://gemini.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-gemini"));
-        assert_eq!(target.custom_user_agent, None);
         assert_eq!(target.strategy, ProviderModelFetchStrategy::GoogleApiKey);
     }
 

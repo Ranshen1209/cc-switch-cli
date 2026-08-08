@@ -198,7 +198,7 @@ async fn handle_webdav_request(State(state): State<AppState>, request: Request<B
                 .lock()
                 .expect("lock PROPFIND state")
                 .directories
-                .contains(path.trim_end_matches('/'));
+                .contains(&path);
             if exists {
                 multi_status_response()
             } else {
@@ -211,7 +211,7 @@ async fn handle_webdav_request(State(state): State<AppState>, request: Request<B
                 .lock()
                 .expect("lock MKCOL state")
                 .directories
-                .insert(path.trim_end_matches('/').to_string());
+                .insert(path);
             StatusCode::CREATED.into_response()
         }
         "PUT" => {

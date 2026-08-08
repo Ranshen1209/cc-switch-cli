@@ -72,7 +72,6 @@ pub(crate) fn uses_adaptive_thinking(model: &str) -> bool {
     .any(|needle| normalized.contains(needle))
 }
 
-/// Models where omitting `thinking` still leaves adaptive thinking enabled.
 pub(crate) fn adaptive_thinking_is_default(model: &str) -> bool {
     let normalized = normalize_model_name(model);
     ["fable-5", "mythos-5", "mythos-preview", "sonnet-5"]
@@ -80,7 +79,6 @@ pub(crate) fn adaptive_thinking_is_default(model: &str) -> bool {
         .any(|needle| normalized.contains(needle))
 }
 
-/// Models that reject `thinking: {"type":"disabled"}`.
 pub(crate) fn thinking_cannot_be_disabled(model: &str) -> bool {
     let normalized = normalize_model_name(model);
     ["fable-5", "mythos-5"]
@@ -133,6 +131,20 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value == "context-1m-2025-08-07"));
+    }
+
+    #[test]
+    fn fable_uses_adaptive_thinking_and_cannot_be_disabled() {
+        let mut body = json!({
+            "model": "anthropic/claude-fable-5",
+            "thinking": {"type": "disabled"},
+        });
+
+        optimize(&mut body, &enabled_config());
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(adaptive_thinking_is_default("claude-fable-5"));
+        assert!(thinking_cannot_be_disabled("claude-fable-5"));
     }
 
     #[test]

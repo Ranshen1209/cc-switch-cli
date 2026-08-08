@@ -1,5 +1,4 @@
 use super::*;
-use crate::provider_preset_models::CODEX_DEFAULT_MODEL;
 
 pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Option<String> {
     let trimmed = cfg_text.trim();
@@ -32,7 +31,7 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
     let model = table
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or(CODEX_DEFAULT_MODEL)
+        .unwrap_or("gpt-5.4")
         .trim();
     let wire_api = table
         .get("wire_api")
@@ -45,16 +44,13 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
         .unwrap_or(true);
     let env_key = table.get("env_key").and_then(|v| v.as_str());
 
-    let provider_name = if provider.name.trim().is_empty() {
-        provider.id.trim()
+    // Generate provider key from provider id/name
+    let raw_key = if provider.id.trim().is_empty() {
+        &provider.name
     } else {
-        provider.name.trim()
+        &provider.id
     };
-    let provider_name = if provider_name.is_empty() {
-        crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID
-    } else {
-        provider_name
-    };
+    let provider_key = crate::codex_config::clean_codex_provider_key(raw_key);
 
     // Preserve non-provider-specific root keys (model_reasoning_effort, disable_response_storage, etc.)
     let mut extra_root_lines = Vec::new();
@@ -78,22 +74,16 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
 
     // Build new format
     let mut lines = Vec::new();
-    lines.push(format!(
-        "model_provider = \"{}\"",
-        crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID
-    ));
-    lines.push(format!("model = {}", toml_edit::Value::from(model)));
+    lines.push(format!("model_provider = \"{}\"", provider_key));
+    lines.push(format!("model = \"{}\"", model));
     lines.extend(extra_root_lines);
     lines.push(String::new());
-    lines.push(format!(
-        "[model_providers.{}]",
-        crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID
-    ));
-    lines.push(format!("name = {}", toml_edit::Value::from(provider_name)));
+    lines.push(format!("[model_providers.{}]", provider_key));
+    lines.push(format!("name = \"{}\"", provider_key));
     if !base_url.is_empty() {
-        lines.push(format!("base_url = {}", toml_edit::Value::from(base_url)));
+        lines.push(format!("base_url = \"{}\"", base_url));
     }
-    lines.push(format!("wire_api = {}", toml_edit::Value::from(wire_api)));
+    lines.push(format!("wire_api = \"{}\"", wire_api));
     if requires_openai_auth {
         lines.push("requires_openai_auth = true".to_string());
     } else {
@@ -101,7 +91,7 @@ pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Optio
         if let Some(ek) = env_key {
             let ek = ek.trim();
             if !ek.is_empty() {
-                lines.push(format!("env_key = {}", toml_edit::Value::from(ek)));
+                lines.push(format!("env_key = \"{}\"", ek));
             }
         }
     }

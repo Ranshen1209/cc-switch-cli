@@ -1,8 +1,7 @@
-mod action_dialog;
 mod basic;
 mod frame;
 mod layout;
-mod mcp_key_value;
+mod mcp_env;
 mod pickers;
 mod render;
 mod status;

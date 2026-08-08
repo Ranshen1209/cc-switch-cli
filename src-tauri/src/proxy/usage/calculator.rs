@@ -59,7 +59,7 @@ impl CostCalculator {
 
     /// 按 app_type 选择输入 token 语义后计算成本。
     ///
-    /// Codex/OpenAI Responses 与 Gemini 的输入 token 字段包含 cache read/write 部分；
+    /// Codex/OpenAI Responses 与 Gemini 的输入 token 字段包含 cache read 部分；
     /// Claude/Anthropic 的 input_tokens 已经是 fresh input。
     pub fn calculate_for_app(
         app_type: &str,
@@ -161,14 +161,19 @@ pub async fn resolve_pricing_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> PricingConfig {
+    let default_app_type = if matches!(app_type, AppType::ClaudeDesktop) {
+        AppType::Claude
+    } else {
+        app_type.clone()
+    };
     let default_multiplier_raw = db
-        .get_default_cost_multiplier(app_type.as_str())
+        .get_default_cost_multiplier(default_app_type.as_str())
         .await
         .unwrap_or_else(|_| "1".to_string());
     let default_multiplier = parse_decimal_or(&default_multiplier_raw, Decimal::ONE);
 
     let default_pricing_model_source = db
-        .get_pricing_model_source(app_type.as_str())
+        .get_pricing_model_source(default_app_type.as_str())
         .await
         .unwrap_or_else(|_| "response".to_string());
     let default_pricing_model_source = sanitize_pricing_model_source(&default_pricing_model_source)

@@ -58,8 +58,7 @@ impl Database {
             id TEXT PRIMARY KEY, name TEXT NOT NULL, server_config TEXT NOT NULL,
             description TEXT, homepage TEXT, docs TEXT, tags TEXT NOT NULL DEFAULT '[]',
             enabled_claude BOOLEAN NOT NULL DEFAULT 0, enabled_codex BOOLEAN NOT NULL DEFAULT 0,
-            enabled_gemini BOOLEAN NOT NULL DEFAULT 0, enabled_grokbuild BOOLEAN NOT NULL DEFAULT 0,
-            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0, enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
             enabled_hermes BOOLEAN NOT NULL DEFAULT 0
         )",
             [],
@@ -87,7 +86,6 @@ impl Database {
             enabled_claude BOOLEAN NOT NULL DEFAULT 0,
             enabled_codex BOOLEAN NOT NULL DEFAULT 0,
             enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
-            enabled_grokbuild BOOLEAN NOT NULL DEFAULT 0,
             enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
             enabled_hermes BOOLEAN NOT NULL DEFAULT 0,
             installed_at INTEGER NOT NULL DEFAULT 0,
@@ -115,9 +113,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 8. Proxy Config 表（每应用一行，app_type 主键）
+        // 8. Proxy Config 表（三行结构，app_type 主键）
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_config (
-            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
+            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
             listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
@@ -131,11 +129,11 @@ impl Database {
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 初始化每应用数据（每应用不同默认值）
+        // 初始化三行数据（每应用不同默认值）
         //
         // 兼容旧数据库：
-        // - 老版本 proxy_config 是单例表（没有 app_type 列），此时不能执行按应用 seed insert；
-        // - 旧表会在 apply_schema_migrations() 中迁移为按应用结构后再插入。
+        // - 老版本 proxy_config 是单例表（没有 app_type 列），此时不能执行三行 seed insert；
+        // - 旧表会在 apply_schema_migrations() 中迁移为三行结构后再插入。
         if Self::has_column(conn, "proxy_config", "app_type")? {
             conn.execute(
                 "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
@@ -161,15 +159,6 @@ impl Database {
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
                 VALUES ('gemini', 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
-                [],
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-            conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
-                streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
-                circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('grokbuild', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -280,8 +269,8 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // Profiles 表（上游 Projects 功能的共享项目实体）。CLI 暂不解释 payload，
-        // 但必须原样保留该表，确保整库 WebDAV 同步与上游 schema v12+ 兼容。
+        // 19. Profiles 表（全应用共享的项目实体；CLI 暂不提供项目管理界面，
+        // 但必须保留桌面端写入的项目快照与各 scope current 标记）。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS profiles (
                 id TEXT PRIMARY KEY,
@@ -295,8 +284,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 修复跑过上游未发布开发版的数据库：旧的全局 current marker 在 v12
-        // 定稿后改为按 scope 存储。与上游保持相同的一次性映射语义。
+        // 修复跑过未发布开发版的库：current 标记曾是全局 key，v12 定稿后按 scope 存储。
         if conn
             .execute(
                 "INSERT OR REPLACE INTO settings (key, value)
@@ -358,7 +346,7 @@ impl Database {
             [],
         );
 
-        // 兼容：若旧版 proxy_config 仍为单例结构（无 app_type），则在启动时直接转换为按应用结构
+        // 兼容：若旧版 proxy_config 仍为单例结构（无 app_type），则在启动时直接转换为三行结构
         // 说明：user_version=2 时不会再触发 v1->v2 迁移，但新代码查询依赖 app_type 列。
         if Self::table_exists(conn, "proxy_config")?
             && !Self::has_column(conn, "proxy_config", "app_type")?
@@ -479,21 +467,6 @@ impl Database {
                         Self::migrate_v12_to_v13(conn)?;
                         Self::set_user_version(conn, 13)?;
                     }
-                    13 => {
-                        log::info!("迁移数据库从 v13 到 v14（添加 Grok Build 代理配置）");
-                        Self::migrate_v13_to_v14(conn)?;
-                        Self::set_user_version(conn, 14)?;
-                    }
-                    14 => {
-                        log::info!("迁移数据库从 v14 到 v15（Skills/MCP 添加 Grok Build 支持）");
-                        Self::migrate_v14_to_v15(conn)?;
-                        Self::set_user_version(conn, 15)?;
-                    }
-                    15 => {
-                        log::info!("迁移数据库从 v15 到 v16（重建 Codex 会话用量）");
-                        Self::migrate_v15_to_v16(conn)?;
-                        Self::set_user_version(conn, 16)?;
-                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -503,7 +476,6 @@ impl Database {
                 version = Self::get_user_version(conn)?;
             }
             Self::repair_proxy_request_logs_columns(conn)?;
-            Self::repair_usage_rollup_semantics_column(conn)?;
             Self::create_request_logs_indexes_if_supported(conn)?;
             Self::normalize_auto_failover_requires_takeover(conn)?;
             Ok(())
@@ -671,7 +643,6 @@ impl Database {
             pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-            input_token_semantics INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
             cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
@@ -716,13 +687,13 @@ impl Database {
         // 重构 skills 表（添加 app_type 字段）
         Self::migrate_skills_table(conn)?;
 
-        // 重构 proxy_config 为按应用结构（每应用独立配置）
+        // 重构 proxy_config 为三行结构（每应用独立配置）
         Self::migrate_proxy_config_to_per_app(conn)?;
 
         Ok(())
     }
 
-    /// 将 proxy_config 迁移为按应用结构（每应用独立配置）
+    /// 将 proxy_config 迁移为三行结构（每应用独立配置）
     fn migrate_proxy_config_to_per_app(conn: &Connection) -> Result<(), AppError> {
         // 检查是否已经是新表结构（幂等性）
         if !Self::table_exists(conn, "proxy_config")? {
@@ -731,8 +702,8 @@ impl Database {
         }
 
         if Self::has_column(conn, "proxy_config", "app_type")? {
-            // 已经是按应用结构，跳过迁移
-            log::info!("proxy_config 已经是按应用结构，跳过迁移");
+            // 已经是三行结构，跳过迁移
+            log::info!("proxy_config 已经是三行结构，跳过迁移");
             return Ok(());
         }
 
@@ -812,25 +783,12 @@ impl Database {
                 old_cb.3,
                 old_cb.4,
             ),
-            (
-                "grokbuild",
-                false,
-                false,
-                3,
-                old_config.4,
-                old_config.5,
-                old_cb.0,
-                old_cb.1,
-                old_cb.2,
-                old_cb.3,
-                old_cb.4,
-            ),
         ];
 
         // 创建新表
         conn.execute("DROP TABLE IF EXISTS proxy_config_new", [])?;
         conn.execute("CREATE TABLE proxy_config_new (
-            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
+            app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
             listen_port INTEGER NOT NULL DEFAULT 15721, enable_logging INTEGER NOT NULL DEFAULT 1,
             enabled INTEGER NOT NULL DEFAULT 0, auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
@@ -841,11 +799,10 @@ impl Database {
             circuit_min_requests INTEGER NOT NULL DEFAULT 10,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
-            live_takeover_active INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )", [])?;
 
-        // 插入每应用配置
+        // 插入三行配置
         for (app, takeover, failover, retries, fb, idle, cb_f, cb_s, cb_t, cb_r, cb_m) in apps {
             conn.execute(
                 "INSERT INTO proxy_config_new (app_type, proxy_enabled, listen_address, listen_port, enable_logging,
@@ -870,7 +827,7 @@ impl Database {
             [],
         )?;
 
-        log::info!("proxy_config 已迁移为按应用结构");
+        log::info!("proxy_config 已迁移为三行结构");
         Ok(())
     }
 
@@ -1430,10 +1387,7 @@ impl Database {
         Ok(())
     }
 
-    /// v11 -> v12 迁移：添加上游 Projects 功能使用的 Profiles 表。
-    ///
-    /// DDL 必须与 `create_tables_on_conn` 及上游 schema v12 完全一致；
-    /// `IF NOT EXISTS` 使已接收过上游快照的数据库可以安全重放迁移。
+    /// v11 -> v12 迁移：添加项目 Profiles 表。
     fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS profiles (
@@ -1450,10 +1404,10 @@ impl Database {
         Ok(())
     }
 
-    /// v12 -> v13 迁移：记录 `input_tokens` 是否包含缓存写入。
+    /// v12 -> v13：记录 input_tokens 是否包含缓存写入。
     ///
-    /// 默认值 0 表示旧版/未知语义。新代理日志会显式写入 1（total）
-    /// 或 2（fresh），从而既不篡改历史数据，也能正确归一化新数据。
+    /// 默认 0 表示旧版/未知语义；旧 Codex/Gemini 行只包含 cache read，
+    /// 不包含 cache creation。新代理行显式写入 total-inclusive 或 fresh。
     fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
         if Self::table_exists(conn, "proxy_request_logs")? {
             Self::add_column_if_missing(
@@ -1474,141 +1428,11 @@ impl Database {
         Ok(())
     }
 
-    /// v13 -> v14: allow Grok Build to own an independent proxy configuration row.
-    fn migrate_v13_to_v14(conn: &Connection) -> Result<(), AppError> {
-        if !Self::table_exists(conn, "proxy_config")? {
-            return Ok(());
-        }
-
-        conn.execute("DROP TABLE IF EXISTS proxy_config_v14", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "CREATE TABLE proxy_config_v14 (
-                app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini','grokbuild')),
-                proxy_enabled INTEGER NOT NULL DEFAULT 0,
-                listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
-                listen_port INTEGER NOT NULL DEFAULT 15721,
-                enable_logging INTEGER NOT NULL DEFAULT 1,
-                enabled INTEGER NOT NULL DEFAULT 0,
-                auto_failover_enabled INTEGER NOT NULL DEFAULT 0,
-                max_retries INTEGER NOT NULL DEFAULT 3,
-                streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60,
-                streaming_idle_timeout INTEGER NOT NULL DEFAULT 120,
-                non_streaming_timeout INTEGER NOT NULL DEFAULT 600,
-                circuit_failure_threshold INTEGER NOT NULL DEFAULT 4,
-                circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
-                circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60,
-                circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
-                circuit_min_requests INTEGER NOT NULL DEFAULT 10,
-                default_cost_multiplier TEXT NOT NULL DEFAULT '1',
-                pricing_model_source TEXT NOT NULL DEFAULT 'response',
-                live_takeover_active INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-        let copied_columns = [
-            ("app_type", "'claude'"),
-            ("proxy_enabled", "0"),
-            ("listen_address", "'127.0.0.1'"),
-            ("listen_port", "15721"),
-            ("enable_logging", "1"),
-            ("enabled", "0"),
-            ("auto_failover_enabled", "0"),
-            ("max_retries", "3"),
-            ("streaming_first_byte_timeout", "60"),
-            ("streaming_idle_timeout", "120"),
-            ("non_streaming_timeout", "600"),
-            ("circuit_failure_threshold", "4"),
-            ("circuit_success_threshold", "2"),
-            ("circuit_timeout_seconds", "60"),
-            ("circuit_error_rate_threshold", "0.6"),
-            ("circuit_min_requests", "10"),
-            ("default_cost_multiplier", "'1'"),
-            ("pricing_model_source", "'response'"),
-            ("live_takeover_active", "0"),
-            ("created_at", "datetime('now')"),
-            ("updated_at", "datetime('now')"),
-        ]
-        .into_iter()
-        .map(|(column, fallback)| {
-            Self::has_column(conn, "proxy_config", column).map(|exists| {
-                if exists {
-                    format!("\"{column}\"")
-                } else {
-                    fallback.into()
-                }
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?
-        .join(", ");
-
-        let copy_sql = format!(
-            "INSERT INTO proxy_config_v14 (
-                app_type, proxy_enabled, listen_address, listen_port, enable_logging,
-                enabled, auto_failover_enabled, max_retries,
-                streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
-                circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                circuit_error_rate_threshold, circuit_min_requests,
-                default_cost_multiplier, pricing_model_source, live_takeover_active,
-                created_at, updated_at
-            )
-            SELECT {copied_columns} FROM proxy_config"
-        );
-        conn.execute(&copy_sql, [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        conn.execute("DROP TABLE proxy_config", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute("ALTER TABLE proxy_config_v14 RENAME TO proxy_config", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute(
-            "INSERT OR IGNORE INTO proxy_config (app_type) VALUES ('grokbuild')",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// v14 -> v15: persist Grok Build enablement for unified Skills and MCP.
-    fn migrate_v14_to_v15(conn: &Connection) -> Result<(), AppError> {
-        if Self::table_exists(conn, "mcp_servers")? {
-            Self::add_column_if_missing(
-                conn,
-                "mcp_servers",
-                "enabled_grokbuild",
-                "BOOLEAN NOT NULL DEFAULT 0",
-            )?;
-        }
-        if Self::table_exists(conn, "skills")? {
-            Self::add_column_if_missing(
-                conn,
-                "skills",
-                "enabled_grokbuild",
-                "BOOLEAN NOT NULL DEFAULT 0",
-            )?;
-        }
-        Ok(())
-    }
-
-    /// v15 -> v16: remove Codex session rows and cursors so startup sync can
-    /// rebuild them with fork-history alignment. Must stay connection-level:
-    /// schema migration already owns the Database connection mutex.
-    fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
-        let codex_dir = crate::codex_config::get_codex_config_dir();
-        crate::services::session_usage_codex::reset_codex_usage_on_conn(conn, &codex_dir)
-    }
-
     /// 插入默认模型定价数据
     /// 格式: (model_id, display_name, input, output, cache_read, cache_creation)
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_data = [
-            // Claude Fable 5（Opus 之上的新档）
             (
                 "claude-fable-5",
                 "Claude Fable 5",
@@ -1617,16 +1441,6 @@ impl Database {
                 "1.00",
                 "12.50",
             ),
-            (
-                "claude-mythos-5",
-                "Claude Mythos 5",
-                "10",
-                "50",
-                "1.00",
-                "12.50",
-            ),
-            // Claude Opus 5（与 Opus 4.8 同价位；fast mode $10/$50 不入表）
-            ("claude-opus-5", "Claude Opus 5", "5", "25", "0.50", "6.25"),
             // Claude 4.8 系列
             (
                 "claude-opus-4-8",
@@ -1635,15 +1449,6 @@ impl Database {
                 "25",
                 "0.50",
                 "6.25",
-            ),
-            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致；促销 $2/$10 至 2026-08-31 不入表）
-            (
-                "claude-sonnet-5",
-                "Claude Sonnet 5",
-                "3",
-                "15",
-                "0.30",
-                "3.75",
             ),
             // Claude 4.7 系列
             (
@@ -1738,25 +1543,6 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
-            // GPT-5.6 系列（Sol / Terra / Luna，2026-06 发布）
-            // 5.6 家族起 cache write 收 1.25× 输入价（此前 GPT 模型写缓存免费，勿回填旧系列）
-            ("gpt-5.6-sol", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            (
-                "gpt-5.6-terra",
-                "GPT-5.6 Terra",
-                "2.50",
-                "15",
-                "0.25",
-                "3.125",
-            ),
-            ("gpt-5.6-luna", "GPT-5.6 Luna", "1", "6", "0.10", "1.25"),
-            // 裸名 gpt-5.6 是 Sol 的官方别名；effort 后缀与现有 GPT 系列保持一致。
-            ("gpt-5.6", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-low", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-medium", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-high", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-xhigh", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
-            ("gpt-5.6-minimal", "GPT-5.6 Sol", "5", "30", "0.50", "6.25"),
             // GPT-5.5 系列
             ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
@@ -1935,24 +1721,6 @@ impl Database {
             ("gpt-4.1", "GPT-4.1", "2", "8", "0.50", "0"),
             ("gpt-4.1-mini", "GPT-4.1 Mini", "0.40", "1.60", "0.10", "0"),
             ("gpt-4.1-nano", "GPT-4.1 Nano", "0.10", "0.40", "0.025", "0"),
-            // Gemini 3.6 系列
-            (
-                "gemini-3.6-flash",
-                "Gemini 3.6 Flash",
-                "1.50",
-                "7.50",
-                "0.15",
-                "0",
-            ),
-            // Gemini 3.5 系列
-            (
-                "gemini-3.5-flash",
-                "Gemini 3.5 Flash",
-                "1.50",
-                "9.00",
-                "0.15",
-                "0",
-            ),
             // Gemini 3.1 系列
             (
                 "gemini-3.1-pro-preview",
@@ -1960,14 +1728,6 @@ impl Database {
                 "2",
                 "12",
                 "0.20",
-                "0",
-            ),
-            (
-                "gemini-3.1-flash-lite",
-                "Gemini 3.1 Flash Lite",
-                "0.25",
-                "1.50",
-                "0.025",
                 "0",
             ),
             (
@@ -2031,14 +1791,6 @@ impl Database {
             ),
             // StepFun 系列
             (
-                "step-3.7-flash",
-                "Step 3.7 Flash",
-                "0.19",
-                "1.13",
-                "0.04",
-                "0",
-            ),
-            (
                 "step-3.5-flash",
                 "Step 3.5 Flash",
                 "0.10",
@@ -2046,36 +1798,8 @@ impl Database {
                 "0.02",
                 "0",
             ),
-            (
-                "step-3.5-flash-2603",
-                "Step 3.5 Flash 2603",
-                "0.10",
-                "0.30",
-                "0.02",
-                "0",
-            ),
-            // ====== 国产模型 (USD/1M tokens) ======
+            // ====== 国产模型 (CNY/1M tokens) ======
             // Doubao (字节跳动)
-            // Seed 2.1 系列（2026-06 火山引擎官方 list 价，CNY 按 ~7.14 折算）：
-            //   pro   输入 6 元 / 输出 30 元 / 命中 1.2 元
-            //   turbo 输入 3 元 / 输出 15 元 / 命中 0.6 元
-            // 「缓存存储 0.017 元/M/小时」是按时长计费的存储费，与本表 cache_creation（按 token 写入价）口径不同，置 0。
-            (
-                "doubao-seed-2-1-pro",
-                "Doubao Seed 2.1 Pro",
-                "0.84",
-                "4.2",
-                "0.17",
-                "0",
-            ),
-            (
-                "doubao-seed-2-1-turbo",
-                "Doubao Seed 2.1 Turbo",
-                "0.42",
-                "2.1",
-                "0.08",
-                "0",
-            ),
             (
                 "doubao-seed-code",
                 "Doubao Seed Code",
@@ -2089,7 +1813,7 @@ impl Database {
                 "Doubao Seed 2.0 Pro",
                 "0.47",
                 "2.37",
-                "0.09",
+                "0",
                 "0",
             ),
             (
@@ -2097,23 +1821,15 @@ impl Database {
                 "Doubao Seed 2.0 Code",
                 "0.47",
                 "2.37",
-                "0.09",
                 "0",
-            ),
-            (
-                "doubao-seed-2-0-code-preview-latest",
-                "Doubao Seed 2.0 Code Preview",
-                "0.47",
-                "2.37",
-                "0.09",
                 "0",
             ),
             (
                 "doubao-seed-2-0-lite",
                 "Doubao Seed 2.0 Lite",
-                "0.08",
-                "0.50",
-                "0.017",
+                "0.25",
+                "2",
+                "0",
                 "0",
             ),
             (
@@ -2121,7 +1837,7 @@ impl Database {
                 "Doubao Seed 2.0 Mini",
                 "0.03",
                 "0.31",
-                "0.0056",
+                "0",
                 "0",
             ),
             // DeepSeek 系列
@@ -2158,23 +1874,6 @@ impl Database {
                 "0.14",
                 "0",
             ),
-            // DeepSeek V4 系列（官方 CNY 按 1 USD ≈ 7.14 折算）
-            (
-                "deepseek-v4-flash",
-                "DeepSeek V4 Flash",
-                "0.14",
-                "0.28",
-                "0.0028",
-                "0",
-            ),
-            (
-                "deepseek-v4-pro",
-                "DeepSeek V4 Pro",
-                "0.435",
-                "0.87",
-                "0.003625",
-                "0",
-            ),
             // Kimi (月之暗面)
             (
                 "kimi-k2-thinking",
@@ -2193,22 +1892,8 @@ impl Database {
                 "0.14",
                 "0",
             ),
-            ("kimi-k2.5", "Kimi K2.5", "0.60", "3.00", "0.10", "0"),
+            ("kimi-k2.5", "Kimi K2.5", "0.60", "2.50", "0.10", "0"),
             ("kimi-k2.6", "Kimi K2.6", "0.95", "4.00", "0.16", "0"),
-            (
-                "kimi-k2.7-code",
-                "Kimi K2.7 Code",
-                "0.95",
-                "4.00",
-                "0.19",
-                "0",
-            ),
-            ("kimi-k3", "Kimi K3", "3.00", "15.00", "0.30", "0"),
-            // Kimi For Coding 套餐里 K3 的裸名（无 kimi- 前缀），同标准 list 价
-            ("k3", "Kimi K3", "3.00", "15.00", "0.30", "0"),
-            // 腾讯混元 (Tencent Hunyuan)（官方 CNY 1/4/0.25 按 1 USD ≈ 7.14 折算；Hy3 阶梯计价取最低档）
-            ("hunyuan-hy3", "Hunyuan Hy3", "0.14", "0.56", "0.035", "0"),
-            ("hy3", "Hunyuan Hy3", "0.14", "0.56", "0.035", "0"),
             // MiniMax 系列
             ("minimax-m2.1", "MiniMax M2.1", "0.27", "0.95", "0.03", "0"),
             (
@@ -2220,7 +1905,7 @@ impl Database {
                 "0",
             ),
             ("minimax-m2", "MiniMax M2", "0.27", "0.95", "0.03", "0"),
-            ("minimax-m2.5", "MiniMax M2.5", "0.15", "0.95", "0.03", "0"),
+            ("minimax-m2.5", "MiniMax M2.5", "0.12", "0.95", "0.03", "0"),
             (
                 "minimax-m2.5-lightning",
                 "MiniMax M2.5 Lightning",
@@ -2245,45 +1930,24 @@ impl Database {
                 "0.06",
                 "0.375",
             ),
-            // MiniMax 官方 PAYG 标准档（≤512K）；长上下文阶梯价格暂不由静态目录表达。
-            ("minimax-m3", "MiniMax M3", "0.30", "1.20", "0.06", "0"),
             // GLM (智谱)
-            ("glm-4.7", "GLM-4.7", "0.6", "2.2", "0.11", "0"),
-            ("glm-4.6", "GLM-4.6", "0.6", "2.2", "0.11", "0"),
-            ("glm-5", "GLM-5", "1", "3.2", "0.2", "0"),
-            ("glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0"),
-            ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
-            // MiMo (小米)
+            ("glm-4.7", "GLM-4.7", "0.39", "1.75", "0.04", "0"),
+            ("glm-4.6", "GLM-4.6", "0.28", "1.11", "0.03", "0"),
+            ("glm-5", "GLM-5", "0.72", "2.30", "0", "0"),
+            ("glm-5.1", "GLM-5.1", "0.95", "3.15", "0", "0"),
+            // Mimo (小米)
             (
                 "mimo-v2-flash",
-                "MiMo V2 Flash",
+                "Mimo V2 Flash",
                 "0.09",
                 "0.29",
                 "0.009",
                 "0",
             ),
-            ("mimo-v2-pro", "MiMo V2 Pro", "0.435", "0.87", "0.0036", "0"),
-            ("mimo-v2.5", "MiMo V2.5", "0.14", "0.29", "0.0028", "0"),
-            (
-                "mimo-v2.5-pro",
-                "MiMo V2.5 Pro",
-                "0.435",
-                "0.87",
-                "0.0036",
-                "0",
-            ),
+            ("mimo-v2-pro", "MiMo V2 Pro", "1", "3", "0", "0"),
             // Qwen 系列 (阿里巴巴)
-            ("qwen3.7-max", "Qwen3.7 Max", "2.50", "7.50", "0.25", "0"),
-            ("qwen3.7-plus", "Qwen3.7 Plus", "0.40", "1.60", "0.08", "0"),
-            (
-                "qwen3.6-plus",
-                "Qwen3.6 Plus",
-                "0.325",
-                "1.95",
-                "0.065",
-                "0",
-            ),
-            ("qwen3.5-plus", "Qwen3.5 Plus", "0.26", "1.56", "0.052", "0"),
+            ("qwen3.6-plus", "Qwen3.6 Plus", "0.325", "1.95", "0", "0"),
+            ("qwen3.5-plus", "Qwen3.5 Plus", "0.26", "1.56", "0", "0"),
             ("qwen3-max", "Qwen3 Max", "0.78", "3.90", "0", "0"),
             (
                 "qwen3-235b-a22b",
@@ -2298,22 +1962,6 @@ impl Database {
                 "Qwen3 Coder Plus",
                 "0.65",
                 "3.25",
-                "0.13",
-                "0",
-            ),
-            (
-                "qwen3-coder-480b",
-                "Qwen3 Coder 480B",
-                "0.65",
-                "3.25",
-                "0",
-                "0",
-            ),
-            (
-                "qwen3-coder-480b-a35b-instruct",
-                "Qwen3 Coder 480B-A35B Instruct",
-                "0.65",
-                "3.25",
                 "0",
                 "0",
             ),
@@ -2322,7 +1970,7 @@ impl Database {
                 "Qwen3 Coder Flash",
                 "0.195",
                 "0.975",
-                "0.039",
+                "0",
                 "0",
             ),
             (
@@ -2337,25 +1985,19 @@ impl Database {
             ("qwq-32b", "QwQ 32B", "0.20", "0.60", "0", "0"),
             ("qwen3-32b", "Qwen3 32B", "0.16", "0.64", "0", "0"),
             // Grok 系列 (xAI)
-            ("grok-4.5", "Grok 4.5", "2", "6", "0.50", "0"),
-            // Grok CLI 官方 OAuth 态 modelUsage 上报的内部别名。定价由
-            // costUsdTicks（1 tick = 1e-10 USD）双轮实测反推：input/output 与
-            // grok-4.5 同为 2/6，cache read 实际按 0.30 计（非 API 挂牌的 0.50）
-            ("grok-4.5-build", "Grok 4.5 Build", "2", "6", "0.30", "0"),
-            ("grok-4.3", "Grok 4.3", "1.25", "2.50", "0.20", "0"),
             (
                 "grok-4.20-0309-reasoning",
                 "Grok 4.20 Reasoning",
-                "1.25",
-                "2.50",
+                "2",
+                "6",
                 "0.20",
                 "0",
             ),
             (
                 "grok-4.20-0309-non-reasoning",
                 "Grok 4.20",
-                "1.25",
-                "2.50",
+                "2",
+                "6",
                 "0.20",
                 "0",
             ),
@@ -2378,48 +2020,15 @@ impl Database {
             ("grok-4", "Grok 4", "3", "15", "0.75", "0"),
             (
                 "grok-code-fast-1",
-                "Grok Build 0.1 (Code Fast Alias)",
-                "1",
-                "2",
+                "Grok Code Fast",
                 "0.20",
+                "1.50",
+                "0.02",
                 "0",
             ),
-            ("grok-build-0.1", "Grok Build 0.1", "1", "2", "0.20", "0"),
             ("grok-3", "Grok 3", "3", "15", "0.75", "0"),
             ("grok-3-mini", "Grok 3 Mini", "0.25", "0.50", "0.075", "0"),
             // Mistral 系列
-            (
-                "mistral-medium-3.5",
-                "Mistral Medium 3.5",
-                "1.50",
-                "7.50",
-                "0",
-                "0",
-            ),
-            (
-                "mistral-small-4",
-                "Mistral Small 4",
-                "0.10",
-                "0.30",
-                "0.01",
-                "0",
-            ),
-            (
-                "devstral-small-2-2512",
-                "Devstral Small 2",
-                "0.10",
-                "0.30",
-                "0.01",
-                "0",
-            ),
-            (
-                "magistral-small",
-                "Magistral Small",
-                "0.50",
-                "1.50",
-                "0",
-                "0",
-            ),
             ("codestral-2508", "Codestral", "0.30", "0.90", "0.03", "0"),
             (
                 "devstral-small-1.1",
@@ -2429,7 +2038,7 @@ impl Database {
                 "0.01",
                 "0",
             ),
-            ("devstral-2-2512", "Devstral 2", "0.40", "2", "0.04", "0"),
+            ("devstral-2-2512", "Devstral 2", "0.40", "0.90", "0.04", "0"),
             (
                 "devstral-medium",
                 "Devstral Medium",
@@ -2510,276 +2119,6 @@ impl Database {
 
     fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_fixes = [
-            // 上游曾短暂以 0 写入 GPT-5.6 cache-write 价格。共享数据库可能保留该种子；
-            // 仅匹配完整旧内置值，避免覆盖用户自定义定价。
-            (
-                "gpt-5.6-sol",
-                "GPT-5.6 Sol",
-                "5",
-                "30",
-                "0.50",
-                "6.25",
-                "5",
-                "30",
-                "0.50",
-                "0",
-            ),
-            (
-                "gpt-5.6-terra",
-                "GPT-5.6 Terra",
-                "2.50",
-                "15",
-                "0.25",
-                "3.125",
-                "2.50",
-                "15",
-                "0.25",
-                "0",
-            ),
-            (
-                "gpt-5.6-luna",
-                "GPT-5.6 Luna",
-                "1",
-                "6",
-                "0.10",
-                "1.25",
-                "1",
-                "6",
-                "0.10",
-                "0",
-            ),
-            // 2026-06-10 上游全量核价（厂商官方 list 价；CNY 按约 7.14 折算）。
-            // GLM 4.6/4.7 的旧值是中转/OpenRouter 折扣价，统一到 Z.ai 官方价格。
-            (
-                "glm-4.7", "GLM-4.7", "0.6", "2.2", "0.11", "0", "0.39", "1.75", "0.04", "0",
-            ),
-            (
-                "glm-4.6", "GLM-4.6", "0.6", "2.2", "0.11", "0", "0.28", "1.11", "0.03", "0",
-            ),
-            // Grok 4.20：xAI 已降价 2/6 → 1.25/2.50。
-            (
-                "grok-4.20-0309-reasoning",
-                "Grok 4.20 Reasoning",
-                "1.25",
-                "2.50",
-                "0.20",
-                "0",
-                "2",
-                "6",
-                "0.20",
-                "0",
-            ),
-            (
-                "grok-4.20-0309-non-reasoning",
-                "Grok 4.20",
-                "1.25",
-                "2.50",
-                "0.20",
-                "0",
-                "2",
-                "6",
-                "0.20",
-                "0",
-            ),
-            // Kimi K2.5 官方 output 为 3.00。
-            (
-                "kimi-k2.5",
-                "Kimi K2.5",
-                "0.60",
-                "3.00",
-                "0.10",
-                "0",
-                "0.60",
-                "2.50",
-                "0.10",
-                "0",
-            ),
-            // MiniMax M2.5 官方 input 为 0.15。
-            (
-                "minimax-m2.5",
-                "MiniMax M2.5",
-                "0.15",
-                "0.95",
-                "0.03",
-                "0",
-                "0.12",
-                "0.95",
-                "0.03",
-                "0",
-            ),
-            // MiniMax M3 的标准档已永久 5 折；共享数据库可能仍保存上游旧种子。
-            (
-                "minimax-m3",
-                "MiniMax M3",
-                "0.30",
-                "1.20",
-                "0.06",
-                "0",
-                "0.60",
-                "2.40",
-                "0.12",
-                "0",
-            ),
-            // Mistral Devstral 2 output 0.90 → 2。
-            (
-                "devstral-2-2512",
-                "Devstral 2",
-                "0.40",
-                "2",
-                "0.04",
-                "0",
-                "0.40",
-                "0.90",
-                "0.04",
-                "0",
-            ),
-            // Doubao Seed 2.0：修正 lite 价格并补全缓存命中价。
-            (
-                "doubao-seed-2-0-lite",
-                "Doubao Seed 2.0 Lite",
-                "0.08",
-                "0.50",
-                "0.017",
-                "0",
-                "0.25",
-                "2",
-                "0",
-                "0",
-            ),
-            (
-                "doubao-seed-2-0-pro",
-                "Doubao Seed 2.0 Pro",
-                "0.47",
-                "2.37",
-                "0.09",
-                "0",
-                "0.47",
-                "2.37",
-                "0",
-                "0",
-            ),
-            (
-                "doubao-seed-2-0-code",
-                "Doubao Seed 2.0 Code",
-                "0.47",
-                "2.37",
-                "0.09",
-                "0",
-                "0.47",
-                "2.37",
-                "0",
-                "0",
-            ),
-            (
-                "doubao-seed-2-0-code-preview-latest",
-                "Doubao Seed 2.0 Code Preview",
-                "0.47",
-                "2.37",
-                "0.09",
-                "0",
-                "0.47",
-                "2.37",
-                "0",
-                "0",
-            ),
-            (
-                "doubao-seed-2-0-mini",
-                "Doubao Seed 2.0 Mini",
-                "0.03",
-                "0.31",
-                "0.0056",
-                "0",
-                "0.03",
-                "0.31",
-                "0",
-                "0",
-            ),
-            // MiMo：5 月 27 日永久降价，旧值是降价前价格。
-            (
-                "mimo-v2-pro",
-                "MiMo V2 Pro",
-                "0.435",
-                "0.87",
-                "0.0036",
-                "0",
-                "1",
-                "3",
-                "0",
-                "0",
-            ),
-            (
-                "mimo-v2.5",
-                "MiMo V2.5",
-                "0.14",
-                "0.29",
-                "0.0028",
-                "0",
-                "0.09",
-                "0.29",
-                "0.009",
-                "0",
-            ),
-            (
-                "mimo-v2.5-pro",
-                "MiMo V2.5 Pro",
-                "0.435",
-                "0.87",
-                "0.0036",
-                "0",
-                "1",
-                "3",
-                "0",
-                "0",
-            ),
-            // Qwen：官方隐式缓存价格为输入价格的 20%。
-            (
-                "qwen3.6-plus",
-                "Qwen3.6 Plus",
-                "0.325",
-                "1.95",
-                "0.065",
-                "0",
-                "0.325",
-                "1.95",
-                "0",
-                "0",
-            ),
-            (
-                "qwen3.5-plus",
-                "Qwen3.5 Plus",
-                "0.26",
-                "1.56",
-                "0.052",
-                "0",
-                "0.26",
-                "1.56",
-                "0",
-                "0",
-            ),
-            (
-                "qwen3-coder-plus",
-                "Qwen3 Coder Plus",
-                "0.65",
-                "3.25",
-                "0.13",
-                "0",
-                "0.65",
-                "3.25",
-                "0",
-                "0",
-            ),
-            (
-                "qwen3-coder-flash",
-                "Qwen3 Coder Flash",
-                "0.195",
-                "0.975",
-                "0.039",
-                "0",
-                "0.195",
-                "0.975",
-                "0",
-                "0",
-            ),
             (
                 "deepseek-v4-flash",
                 "DeepSeek V4 Flash",
@@ -3026,19 +2365,6 @@ impl Database {
             Self::add_column_if_missing(conn, "proxy_request_logs", column, definition)?;
         }
 
-        Ok(())
-    }
-
-    fn repair_usage_rollup_semantics_column(conn: &Connection) -> Result<(), AppError> {
-        if !Self::table_exists(conn, "usage_daily_rollups")? {
-            return Ok(());
-        }
-        Self::add_column_if_missing(
-            conn,
-            "usage_daily_rollups",
-            "input_token_semantics",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
         Ok(())
     }
 

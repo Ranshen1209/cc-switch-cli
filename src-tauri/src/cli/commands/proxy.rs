@@ -326,7 +326,7 @@ fn serve_proxy(
                 .map_err(AppError::Message)?;
             println!(
                 "{}",
-                success(crate::t!("✓ Proxy stopped.", "✓ 代理已停止。"))
+                success(crate::t!("OK Proxy stopped.", "OK 代理已停止。"))
             );
 
             Ok(())

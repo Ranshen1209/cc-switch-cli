@@ -24,6 +24,7 @@ const LATEST_MANIFEST_FILE_NAME: &str = "latest.json";
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RELEASE_ASSET_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
+const HOMEBREW_UPGRADE_COMMAND: &str = "brew upgrade Ranshen1209/cc-switch-cli/cc-switch-cli";
 const UPDATER_PUBLIC_KEY: &str = include_str!("../../../updater/minisign.pub");
 const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -157,9 +158,9 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
     if should_block_homebrew_before_update_check(is_homebrew_managed, explicit_version) {
         println!(
             "{}",
-            warning(
-                "cc-switch was installed via Homebrew. Self-update to a specific version is not supported.\nPlease use: brew upgrade cc-switch",
-            )
+            warning(&format!(
+                "cc-switch was installed via Homebrew. Self-update to a specific version is not supported.\nPlease use: {HOMEBREW_UPGRADE_COMMAND}"
+            ))
         );
         return Ok(());
     }
@@ -191,7 +192,7 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
         println!(
             "{}",
             warning(&format!(
-                "Update {target_tag} is available (current v{current_version}).\nPlease update with: brew upgrade cc-switch"
+                "Update {target_tag} is available (current v{current_version}).\nPlease update with: {HOMEBREW_UPGRADE_COMMAND}"
             ))
         );
         return Ok(());
@@ -208,7 +209,9 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
             let asset = select_current_manifest_asset(&manifest)?;
             println!("{}", info(&format!("Downloading: {}", asset.url)));
             println!("{}", info("Verifying updater signature."));
-            download_manifest_release_asset(&client, &asset, None).await?
+            let (downloaded_asset, _) =
+                download_manifest_release_asset(&client, &manifest, None).await?;
+            downloaded_asset
         }
         ResolvedRelease::Legacy {
             target_tag,
@@ -297,8 +300,8 @@ fn print_update_check_info(
         println!(
             "{}",
             warning(&format!(
-                "Update {} is available (current v{}).\nPlease update with: brew upgrade cc-switch",
-                update_info.target_tag, update_info.current_version
+                "Update {} is available (current v{}).\nPlease update with: {}",
+                update_info.target_tag, update_info.current_version, HOMEBREW_UPGRADE_COMMAND
             ))
         );
     } else if update_info.is_downgrade {
@@ -444,23 +447,14 @@ fn linux_libc_preference() -> Result<LinuxLibcPreference, AppError> {
     }
 }
 
-fn linux_release_asset_name(
-    arch: &str,
-    preference: LinuxLibcPreference,
-) -> Result<&'static str, AppError> {
-    match (arch, preference) {
-        ("x86_64", LinuxLibcPreference::Auto | LinuxLibcPreference::Musl) => {
-            Ok("cc-switch-cli-linux-x64-musl.tar.gz")
-        }
-        ("x86_64", LinuxLibcPreference::Glibc) => Ok("cc-switch-cli-linux-x64.tar.gz"),
-        ("aarch64", LinuxLibcPreference::Auto | LinuxLibcPreference::Musl) => {
-            Ok("cc-switch-cli-linux-arm64-musl.tar.gz")
-        }
-        ("aarch64", LinuxLibcPreference::Glibc) => Ok("cc-switch-cli-linux-arm64.tar.gz"),
-        _ => Err(AppError::Message(format!(
-            "Self-update is not supported for Linux architecture {arch}."
-        ))),
+fn push_manifest_asset(candidates: &mut Vec<ManifestAsset>, asset: ManifestAsset) {
+    if !candidates.contains(&asset) {
+        candidates.push(asset);
     }
+}
+
+fn asset_looks_like_musl(url: &str) -> bool {
+    url.contains("-musl")
 }
 
 fn select_manifest_asset(
@@ -468,6 +462,19 @@ fn select_manifest_asset(
     platform_key: &str,
     preference: LinuxLibcPreference,
 ) -> Result<ManifestAsset, AppError> {
+    manifest_asset_candidates(manifest, platform_key, preference)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            AppError::Message("Update manifest does not contain a usable asset.".to_string())
+        })
+}
+
+fn manifest_asset_candidates(
+    manifest: &UpdateManifest,
+    platform_key: &str,
+    preference: LinuxLibcPreference,
+) -> Result<Vec<ManifestAsset>, AppError> {
     let entry = manifest.platforms.get(platform_key).ok_or_else(|| {
         AppError::Message(format!(
             "Update manifest does not provide platform entry '{platform_key}'."
@@ -479,9 +486,9 @@ fn select_manifest_asset(
         signature: entry.signature.clone(),
     };
 
-    let Some(arch) = platform_key.strip_prefix("linux-") else {
-        return Ok(primary);
-    };
+    if !platform_key.starts_with("linux-") {
+        return Ok(vec![primary]);
+    }
 
     let musl_variant = entry.variants.get("musl").map(|variant| ManifestAsset {
         url: variant.url.clone(),
@@ -492,22 +499,46 @@ fn select_manifest_asset(
         signature: variant.signature.clone(),
     });
 
-    let selected = match preference {
-        LinuxLibcPreference::Auto | LinuxLibcPreference::Musl => musl_variant.unwrap_or(primary),
-        LinuxLibcPreference::Glibc => glibc_variant.unwrap_or(primary),
-    };
-
-    let actual_name = asset_name_from_url(&selected.url)?;
-    let expected_name = linux_release_asset_name(arch, preference)?;
-    let allowed_names = release_asset_names(&manifest.version, expected_name);
-    if !allowed_names.contains(&actual_name) {
-        return Err(AppError::Message(format!(
-            "Update manifest selected unexpected asset '{actual_name}' for platform \
-             '{platform_key}'; expected one of {allowed_names:?}. Linux libc modes do not \
-             fall back across the libc boundary."
-        )));
+    let mut candidates = Vec::new();
+    match preference {
+        LinuxLibcPreference::Auto => {
+            push_manifest_asset(&mut candidates, primary);
+            if let Some(asset) = glibc_variant {
+                push_manifest_asset(&mut candidates, asset);
+            }
+            if let Some(asset) = musl_variant {
+                push_manifest_asset(&mut candidates, asset);
+            }
+        }
+        LinuxLibcPreference::Musl => {
+            if let Some(asset) = musl_variant {
+                push_manifest_asset(&mut candidates, asset);
+            } else if asset_looks_like_musl(&primary.url) {
+                push_manifest_asset(&mut candidates, primary.clone());
+            } else {
+                return Err(AppError::Message(format!(
+                    "Update manifest does not provide a musl variant for platform '{platform_key}'."
+                )));
+            }
+        }
+        LinuxLibcPreference::Glibc => {
+            if let Some(asset) = glibc_variant {
+                push_manifest_asset(&mut candidates, asset);
+            } else if !asset_looks_like_musl(&primary.url) {
+                push_manifest_asset(&mut candidates, primary.clone());
+            } else {
+                return Err(AppError::Message(format!(
+                    "Update manifest does not provide a glibc variant for platform '{platform_key}'."
+                )));
+            }
+            push_manifest_asset(&mut candidates, primary);
+            if let Some(asset) = musl_variant {
+                push_manifest_asset(&mut candidates, asset);
+            }
+        }
     }
-    Ok(selected)
+
+    Ok(candidates)
 }
 
 fn select_current_manifest_asset(manifest: &UpdateManifest) -> Result<ManifestAsset, AppError> {
@@ -528,9 +559,30 @@ fn release_asset_candidates_for_platform(
             "cc-switch-cli-darwin-universal.tar.gz".to_string(),
             "cc-switch-cli-darwin-arm64.tar.gz".to_string(),
         ],
-        ("linux", "x86_64" | "aarch64") => {
-            vec![linux_release_asset_name(arch, preference)?.to_string()]
-        }
+        ("linux", "x86_64") => match preference {
+            LinuxLibcPreference::Auto => vec![
+                "cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                "cc-switch-cli-linux-x64.tar.gz".to_string(),
+            ],
+            LinuxLibcPreference::Musl => vec!["cc-switch-cli-linux-x64-musl.tar.gz".to_string()],
+            LinuxLibcPreference::Glibc => vec![
+                "cc-switch-cli-linux-x64.tar.gz".to_string(),
+                "cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+            ],
+        },
+        ("linux", "aarch64") => match preference {
+            LinuxLibcPreference::Auto => vec![
+                "cc-switch-cli-linux-arm64-musl.tar.gz".to_string(),
+                "cc-switch-cli-linux-arm64.tar.gz".to_string(),
+            ],
+            LinuxLibcPreference::Musl => {
+                vec!["cc-switch-cli-linux-arm64-musl.tar.gz".to_string()]
+            }
+            LinuxLibcPreference::Glibc => vec![
+                "cc-switch-cli-linux-arm64.tar.gz".to_string(),
+                "cc-switch-cli-linux-arm64-musl.tar.gz".to_string(),
+            ],
+        },
         ("windows", "x86_64") => vec!["cc-switch-cli-windows-x64.zip".to_string()],
         _ => {
             return Err(AppError::Message(format!(
@@ -601,15 +653,30 @@ fn asset_name_from_url(url: &str) -> Result<String, AppError> {
 
 async fn download_manifest_release_asset(
     client: &reqwest::Client,
-    asset: &ManifestAsset,
+    manifest: &UpdateManifest,
     on_progress: Option<&dyn Fn(u64, Option<u64>)>,
-) -> Result<DownloadedAsset, AppError> {
-    let asset_name = asset_name_from_url(&asset.url)?;
-    let downloaded_asset = download_release_asset(client, &asset.url, &asset_name, on_progress)
-        .await
-        .map_err(|err| selected_asset_download_error(&asset.url, err))?;
-    verify_downloaded_asset_signature(&downloaded_asset.archive_path, &asset.signature)?;
-    Ok(downloaded_asset)
+) -> Result<(DownloadedAsset, ManifestAsset), AppError> {
+    let assets =
+        manifest_asset_candidates(manifest, current_platform_key()?, linux_libc_preference()?)?;
+    let mut last_error = None;
+
+    for asset in assets {
+        let asset_name = asset_name_from_url(&asset.url)?;
+        match download_release_asset(client, &asset.url, &asset_name, on_progress).await {
+            Ok(downloaded_asset) => {
+                verify_downloaded_asset_signature(
+                    &downloaded_asset.archive_path,
+                    &asset.signature,
+                )?;
+                return Ok((downloaded_asset, asset));
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AppError::Message("Update manifest did not produce a downloadable asset.".to_string())
+    }))
 }
 
 async fn download_legacy_release_asset(
@@ -641,8 +708,7 @@ async fn download_legacy_release_asset(
         release_asset.name.as_str(),
         on_progress,
     )
-    .await
-    .map_err(|err| selected_asset_download_error(&release_asset.browser_download_url, err))?;
+    .await?;
     verify_asset_checksum(
         client,
         &downloaded_asset.archive_path,
@@ -651,13 +717,6 @@ async fn download_legacy_release_asset(
     )
     .await?;
     Ok((downloaded_asset, release_asset))
-}
-
-fn selected_asset_download_error(url: &str, err: AppError) -> AppError {
-    AppError::Message(format!(
-        "Failed to download the selected update asset '{url}': {err} The current installation was \
-         not changed."
-    ))
 }
 
 async fn resolve_target_release(
@@ -1368,18 +1427,18 @@ pub(crate) async fn download_and_apply(
 ) -> Result<(), AppError> {
     // Same brew-prefix guard as the CLI path (see execute_async).
     if is_homebrew_install() {
-        return Err(AppError::Message(
-            "cc-switch was installed via Homebrew. Please upgrade with: brew upgrade cc-switch"
-                .to_string(),
-        ));
+        return Err(AppError::Message(format!(
+            "cc-switch was installed via Homebrew. Please upgrade with: {HOMEBREW_UPGRADE_COMMAND}"
+        )));
     }
 
     let client = create_http_client()?;
     let release = resolve_target_release(&client, REPO_URL, Some(target_tag)).await?;
     let downloaded_asset = match release {
         ResolvedRelease::Manifest { manifest, .. } => {
-            let asset = select_current_manifest_asset(&manifest)?;
-            download_manifest_release_asset(&client, &asset, Some(&on_progress)).await?
+            let (downloaded_asset, _) =
+                download_manifest_release_asset(&client, &manifest, Some(&on_progress)).await?;
+            downloaded_asset
         }
         ResolvedRelease::Legacy {
             target_tag,

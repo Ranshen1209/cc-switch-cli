@@ -217,6 +217,7 @@ impl McpService {
                 mcp::sync_single_server_to_hermes(cfg, &server.id, &server.server)?;
             }
             AppType::OpenClaw => {}
+            AppType::ClaudeDesktop => {}
         }
         Ok(())
     }
@@ -242,22 +243,21 @@ impl McpService {
             AppType::OpenCode => mcp::remove_server_from_opencode(id)?,
             AppType::Hermes => mcp::remove_server_from_hermes(id)?,
             AppType::OpenClaw => {}
+            AppType::ClaudeDesktop => {}
         }
         Ok(())
     }
 
     /// 手动同步所有启用的 MCP 服务器到对应的应用。
     ///
-    /// Best-effort：单个应用投影失败不阻断其余应用。各应用的 live 文件互相独立，
-    /// 一处损坏没有理由让其它应用的 MCP 状态保持陈旧。全部执行完后聚合错误，
-    /// 保留调用方对部分失败的可见性。
+    /// 单个应用失败不会阻断其它应用；全部尝试后聚合错误。
     pub fn sync_all_enabled(state: &AppState) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
-
         let mut failures = Vec::new();
+
         for app in Self::supported_mcp_apps() {
             if let Err(err) = Self::project_servers_to_app(state, &servers, &app) {
-                log::warn!("同步 MCP 到 {app:?} 失败: {err}");
+                log::warn!("Failed to sync MCP servers to {}: {err}", app.as_str());
                 failures.push(format!("{}: {err}", app.as_str()));
             }
         }
@@ -266,14 +266,12 @@ impl McpService {
             Ok(())
         } else {
             Err(AppError::Message(format!(
-                "部分应用 MCP 同步失败: {}",
+                "MCP sync failed for some apps: {}",
                 failures.join("; ")
             )))
         }
     }
 
-    /// 只把启用状态投影到单个应用。某个应用的 live 被整体重写后用它做
-    /// 定向重投影，避免把无关应用的失败面牵连进目标应用的关键路径。
     pub fn sync_enabled_for_app(state: &AppState, app: &AppType) -> Result<(), AppError> {
         let servers = Self::get_all_servers(state)?;
         Self::project_servers_to_app(state, &servers, app)
@@ -284,6 +282,10 @@ impl McpService {
         servers: &HashMap<String, McpServer>,
         app: &AppType,
     ) -> Result<(), AppError> {
+        if !Self::supported_mcp_apps().any(|supported| supported == *app) {
+            return Ok(());
+        }
+
         for server in servers.values() {
             if server.apps.is_enabled_for(app) {
                 Self::sync_server_to_app(state, server, app)?;
@@ -390,11 +392,32 @@ impl McpService {
 
     pub fn import_from_supported_apps(state: &AppState) -> Result<usize, AppError> {
         let mut total = 0;
-        total += Self::import_from_claude(state)?;
-        total += Self::import_from_codex(state)?;
-        total += Self::import_from_gemini(state)?;
-        total += Self::import_from_opencode(state)?;
-        total += Self::import_from_hermes(state)?;
-        Ok(total)
+        let mut failures = Vec::new();
+        let results = [
+            ("claude", Self::import_from_claude(state)),
+            ("codex", Self::import_from_codex(state)),
+            ("gemini", Self::import_from_gemini(state)),
+            ("opencode", Self::import_from_opencode(state)),
+            ("hermes", Self::import_from_hermes(state)),
+        ];
+
+        for (app, result) in results {
+            match result {
+                Ok(count) => total += count,
+                Err(err) => {
+                    log::warn!("Failed to import MCP servers from {app}: {err}");
+                    failures.push(format!("{app}: {err}"));
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            Ok(total)
+        } else {
+            Err(AppError::Message(format!(
+                "Imported {total} MCP server(s), but some apps failed: {}",
+                failures.join("; ")
+            )))
+        }
     }
 }

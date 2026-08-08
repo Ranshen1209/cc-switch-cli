@@ -15,9 +15,7 @@ use super::{
 };
 use crate::{
     app_config::AppType,
-    provider::{
-        AuthBinding, AuthBindingSource, LocalProxyRequestOverrides, Provider, ProviderMeta,
-    },
+    provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta},
     proxy::{
         forwarder::{ForwardOptions, RequestForwarder},
         providers::copilot_auth::CopilotModel,
@@ -366,240 +364,19 @@ async fn claude_prepare_request_sets_defaults_and_filters_blocked_caller_headers
 }
 
 #[tokio::test]
-async fn custom_user_agent_replaces_the_caller_header() {
-    let provider = provider_with_request_overrides(
-        claude_provider("p1", "https://example.com", None),
-        Some("  custom-agent/1.0  "),
-        &[],
-        None,
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert("user-agent", HeaderValue::from_static("caller-agent/1.0"));
-
-    let request = build_request(&AppType::Claude, &provider, headers).await;
-
-    assert_eq!(
-        header_value(&request, "user-agent"),
-        Some("custom-agent/1.0")
-    );
-    assert_eq!(request.headers().get_all("user-agent").iter().count(), 1);
-}
-
-#[tokio::test]
-async fn custom_user_agent_is_added_when_the_caller_omits_it() {
-    let provider = provider_with_request_overrides(
-        claude_provider("p1", "https://example.com", None),
-        Some("custom-agent/1.0"),
-        &[],
-        None,
-    );
-
-    let request = build_request(&AppType::Claude, &provider, HeaderMap::new()).await;
-
-    assert_eq!(
-        header_value(&request, "user-agent"),
-        Some("custom-agent/1.0")
-    );
-}
-
-#[tokio::test]
-async fn blank_and_invalid_custom_user_agents_are_ignored() {
-    for custom_user_agent in ["   ", "invalid\nuser-agent"] {
-        let provider = provider_with_request_overrides(
-            claude_provider("p1", "https://example.com", None),
-            Some(custom_user_agent),
-            &[],
-            None,
-        );
-        let mut headers = HeaderMap::new();
-        headers.insert("user-agent", HeaderValue::from_static("caller-agent/1.0"));
-
-        let request = build_request(&AppType::Claude, &provider, headers).await;
-
-        assert_eq!(
-            header_value(&request, "user-agent"),
-            Some("caller-agent/1.0"),
-            "custom User-Agent {custom_user_agent:?} should be ignored"
-        );
-    }
-}
-
-#[tokio::test]
-async fn local_header_overrides_replace_allowed_headers_but_not_protected_headers() {
-    let provider = provider_with_request_overrides(
-        claude_provider("p1", "https://example.com", None),
-        None,
-        &[
-            (" X-Feature ", "override"),
-            ("X-New-Header", "added"),
-            ("Authorization", "Bearer override"),
-            ("X-Api-Key", "override-key"),
-            ("Content-Type", "text/plain"),
-        ],
-        None,
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert("x-feature", HeaderValue::from_static("caller"));
-
-    let request = build_request(&AppType::Claude, &provider, headers).await;
-
-    assert_eq!(header_value(&request, "x-feature"), Some("override"));
-    assert_eq!(request.headers().get_all("x-feature").iter().count(), 1);
-    assert_eq!(header_value(&request, "x-new-header"), Some("added"));
-    assert_eq!(header_value(&request, "authorization"), None);
-    assert_eq!(header_value(&request, "x-api-key"), Some("key-p1"));
-    assert_eq!(
-        header_value(&request, "content-type"),
-        Some("application/json")
-    );
-}
-
-#[tokio::test]
-async fn local_user_agent_header_override_takes_precedence_over_custom_user_agent() {
-    let provider = provider_with_request_overrides(
-        claude_provider("p1", "https://example.com", None),
-        Some("custom-agent/1.0"),
-        &[("User-Agent", "header-override/2.0")],
-        None,
-    );
-
-    let request = build_request(&AppType::Claude, &provider, HeaderMap::new()).await;
-
-    assert_eq!(
-        header_value(&request, "user-agent"),
-        Some("header-override/2.0")
-    );
-    assert_eq!(request.headers().get_all("user-agent").iter().count(), 1);
-}
-
-#[tokio::test]
-async fn local_body_overrides_deep_merge_and_refilter_the_final_body() {
-    let provider = provider_with_request_overrides(
-        claude_provider("p1", "https://example.com", None),
-        None,
-        &[],
-        Some(json!({
-            "stream": false,
-            "config": {
-                "nested": {
-                    "added": 2,
-                    "stream": false,
-                    "_private_nested": "drop"
-                },
-                "array": ["replacement"],
-                "scalar": 42
-            },
-            "metadata": {
-                "source": "override",
-                "_private_metadata": "drop"
-            },
-            "_private_top_level": "drop"
-        })),
-    );
-    let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router).expect("create forwarder");
-
-    let request = forwarder
-        .prepare_request(
-            &AppType::Claude,
-            &provider,
-            "/v1/messages",
-            &json!({
-                "model": "claude-3-7-sonnet-20250219",
-                "max_tokens": 32,
-                "stream": true,
-                "messages": [{"role": "user", "content": "hello"}],
-                "config": {
-                    "keep": true,
-                    "nested": {"original": 1, "stream": true},
-                    "array": [1, 2],
-                    "scalar": "original"
-                }
-            }),
-            &HeaderMap::new(),
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare locally overridden request")
-        .build()
-        .expect("build locally overridden request");
-
-    let body = request_body_json(&request);
-    assert_eq!(body["stream"], true);
-    assert_eq!(body["config"]["keep"], true);
-    assert_eq!(body["config"]["nested"]["original"], 1);
-    assert_eq!(body["config"]["nested"]["added"], 2);
-    assert_eq!(body["config"]["nested"]["stream"], false);
-    assert_eq!(body["config"]["array"], json!(["replacement"]));
-    assert_eq!(body["config"]["scalar"], 42);
-    assert_eq!(body["metadata"]["source"], "override");
-    assert!(body.get("_private_top_level").is_none());
-    assert!(body["config"]["nested"].get("_private_nested").is_none());
-    assert!(body["metadata"].get("_private_metadata").is_none());
-}
-
-#[tokio::test]
-async fn local_body_overrides_apply_after_protocol_conversion() {
-    let provider = provider_with_request_overrides(
-        claude_provider("p1", "https://example.com", Some("openai_chat")),
-        None,
-        &[],
-        Some(json!({
-            "stream": false,
-            "stream_options": {
-                "include_usage": false,
-                "vendor_extension": true
-            }
-        })),
-    );
-    let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router).expect("create forwarder");
-
-    let request = forwarder
-        .prepare_request(
-            &AppType::Claude,
-            &provider,
-            "/v1/messages",
-            &json!({
-                "model": "gpt-4o",
-                "max_tokens": 32,
-                "stream": true,
-                "messages": [{"role": "user", "content": "hello"}]
-            }),
-            &HeaderMap::new(),
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare transformed request with local overrides")
-        .build()
-        .expect("build transformed request with local overrides");
-
-    assert_eq!(request.url().path(), "/v1/chat/completions");
-    let body = request_body_json(&request);
-    assert_eq!(body["stream"], true);
-    assert_eq!(body["stream_options"]["include_usage"], false);
-    assert_eq!(body["stream_options"]["vendor_extension"], true);
-}
-
-#[tokio::test]
 async fn claude_opencode_go_openai_chat_sends_only_bearer_no_x_api_key() {
-    // Issue #330: legacy/editor paths may retain ANTHROPIC_API_KEY, but the
-    // OpenAI Chat endpoint still requires Authorization: Bearer.
+    // Issue #330: OpenCode Go is a strict Anthropic-protocol endpoint. The user
+    // stores the credential in ANTHROPIC_AUTH_TOKEN (Bearer semantics) and picks
+    // the openai_chat API format. The proxy must forward only
+    // `Authorization: Bearer` upstream — the extra `x-api-key` the adapter used
+    // to add triggered a 401 "The API key you provided is invalid.".
     let mut provider = Provider::with_id(
         "opencode-go".to_string(),
         "OpenCode Go".to_string(),
         json!({
             "env": {
                 "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go",
-                "ANTHROPIC_API_KEY": "sk-oc-token"
+                "ANTHROPIC_AUTH_TOKEN": "sk-oc-token"
             }
         }),
         None,
@@ -616,6 +393,7 @@ async fn claude_opencode_go_openai_chat_sends_only_bearer_no_x_api_key() {
         request.url().as_str(),
         "https://opencode.ai/zen/go/v1/chat/completions"
     );
+    // ANTHROPIC_AUTH_TOKEN => ClaudeAuth: Bearer only, no x-api-key (the #330 fix).
     assert_eq!(
         header_value(&request, "authorization"),
         Some("Bearer sk-oc-token")
@@ -773,7 +551,7 @@ async fn streaming_passthrough_prepare_request_forces_identity_accept_encoding()
 }
 
 #[tokio::test]
-async fn codex_oauth_prepare_request_ignores_stale_full_url_and_injects_bound_account_headers() {
+async fn codex_oauth_prepare_request_injects_bound_account_headers() {
     let _lock = lock_test_home_and_settings();
     let _manager = CodexOAuthService::test_manager_with_account(
         "acc-bound",
@@ -785,12 +563,7 @@ async fn codex_oauth_prepare_request_ignores_stale_full_url_and_injects_bound_ac
     .await
     .expect("seed bound account");
 
-    let mut provider = codex_oauth_provider(Some("acc-bound"));
-    provider
-        .meta
-        .as_mut()
-        .expect("Codex OAuth metadata")
-        .is_full_url = Some(true);
+    let provider = codex_oauth_provider(Some("acc-bound"));
     let request = build_request(&AppType::Claude, &provider, HeaderMap::new()).await;
 
     assert_eq!(
@@ -805,8 +578,7 @@ async fn codex_oauth_prepare_request_ignores_stale_full_url_and_injects_bound_ac
         header_value(&request, "chatgpt-account-id"),
         Some("acc-bound")
     );
-    assert_eq!(header_value(&request, "originator"), Some("codex_cli_rs"));
-    assert_eq!(header_value(&request, "version"), Some("0.144.1"));
+    assert_eq!(header_value(&request, "originator"), Some("cc-switch"));
     assert_eq!(header_value(&request, "anthropic-beta"), None);
     assert_eq!(header_value(&request, "anthropic-version"), None);
 }
@@ -1092,12 +864,7 @@ async fn github_copilot_prepare_request_detects_copilot_base_url_without_provide
     )
     .await;
 
-    let provider = provider_with_request_overrides(
-        claude_provider("copilot-url", "https://api.githubcopilot.com", None),
-        Some("custom-agent/1.0"),
-        &[("x-local-override", "should-not-appear")],
-        Some(json!({"copilot_override_marker": true})),
-    );
+    let provider = claude_provider("copilot-url", "https://api.githubcopilot.com", None);
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");
 
@@ -1136,14 +903,6 @@ async fn github_copilot_prepare_request_detects_copilot_base_url_without_provide
     );
     assert_eq!(header_value(&request, "anthropic-beta"), None);
     assert_eq!(header_value(&request, "anthropic-version"), None);
-    assert_ne!(
-        header_value(&request, "user-agent"),
-        Some("custom-agent/1.0")
-    );
-    assert_eq!(header_value(&request, "x-local-override"), None);
-    assert!(request_body_json(&request)
-        .get("copilot_override_marker")
-        .is_none());
 }
 
 #[tokio::test]
@@ -1490,15 +1249,7 @@ async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
     )
     .await;
 
-    let provider = provider_with_request_overrides(
-        github_copilot_provider(Some("fingerprint")),
-        Some("custom-agent/1.0"),
-        &[
-            ("user-agent", "header-override/2.0"),
-            ("x-local-override", "should-not-appear"),
-        ],
-        Some(json!({"copilot_override_marker": true})),
-    );
+    let provider = github_copilot_provider(Some("fingerprint"));
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");
     let mut headers = HeaderMap::new();
@@ -1565,10 +1316,6 @@ async fn github_copilot_prepare_request_overrides_client_fingerprint_headers() {
         header_value(&request, "x-request-id"),
         header_value(&request, "x-agent-task-id")
     );
-    assert_eq!(header_value(&request, "x-local-override"), None);
-    assert!(request_body_json(&request)
-        .get("copilot_override_marker")
-        .is_none());
 }
 
 #[tokio::test]
@@ -1711,23 +1458,15 @@ async fn non_managed_upstream_allows_proxy_managed_placeholder_guard() {
 
 #[tokio::test]
 async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
-    let mut provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
-    provider
-        .meta
-        .as_mut()
-        .expect("Codex Chat provider should have metadata")
-        .prompt_cache_routing = Some("enabled".to_string());
+    let provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
     let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router)
-        .expect("create forwarder")
-        .with_session("session-key".to_string(), true);
+    let forwarder = RequestForwarder::new(router).expect("create forwarder");
     let mut headers = HeaderMap::new();
     headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
     let request_body = json!({
         "model": "gpt-5.4",
         "input": "hello",
-        "stream": true,
-        "prompt_cache_key": "request-key"
+        "stream": true
     });
 
     let request = forwarder
@@ -1766,70 +1505,6 @@ async fn codex_chat_prepare_request_rewrites_responses_to_chat_completions() {
     assert_eq!(body["messages"][0]["content"], "hello");
     assert_eq!(body["stream"], true);
     assert_eq!(body["stream_options"]["include_usage"], true);
-    assert_eq!(body["prompt_cache_key"], "request-key");
-}
-
-#[tokio::test]
-async fn codex_chat_prepare_request_uses_only_client_provided_session_for_prompt_cache() {
-    let mut provider = codex_chat_provider("https://example.com/v1", "deepseek-chat");
-    provider
-        .meta
-        .as_mut()
-        .expect("Codex Chat provider should have metadata")
-        .prompt_cache_routing = Some("enabled".to_string());
-    let body = json!({
-        "model": "gpt-5.4",
-        "input": "hello"
-    });
-
-    let (_db, router) = test_router().await;
-    let request = RequestForwarder::new(router)
-        .expect("create forwarder")
-        .with_session("client-session".to_string(), true)
-        .prepare_request(
-            &AppType::Codex,
-            &provider,
-            "/v1/responses",
-            &body,
-            &HeaderMap::new(),
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare request with client session")
-        .build()
-        .expect("build request with client session");
-    assert_eq!(
-        request_body_json(&request)["prompt_cache_key"],
-        "client-session"
-    );
-
-    let (_db, router) = test_router().await;
-    let request = RequestForwarder::new(router)
-        .expect("create forwarder")
-        .with_session("generated-session".to_string(), false)
-        .prepare_request(
-            &AppType::Codex,
-            &provider,
-            "/v1/responses",
-            &body,
-            &HeaderMap::new(),
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare request with generated session")
-        .build()
-        .expect("build request with generated session");
-    assert!(request_body_json(&request)
-        .get("prompt_cache_key")
-        .is_none());
 }
 
 #[tokio::test]
@@ -2008,176 +1683,6 @@ async fn codex_chat_prepare_request_preserves_query_with_full_chat_endpoint_base
     );
 }
 
-#[tokio::test]
-async fn codex_anthropic_prepare_request_rewrites_body_url_and_headers() {
-    let provider = codex_anthropic_provider("https://gateway.example/api", "claude-sonnet-4-6");
-    let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router).expect("create forwarder");
-    let mut headers = HeaderMap::new();
-    headers.insert("accept", HeaderValue::from_static("text/event-stream"));
-    headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
-    headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
-    headers.insert("x-stainless-lang", HeaderValue::from_static("rust"));
-    headers.insert("x-codex-turn-id", HeaderValue::from_static("turn-1"));
-    headers.insert(
-        "anthropic-beta",
-        HeaderValue::from_static("caller-provided-beta"),
-    );
-
-    let request = forwarder
-        .prepare_request(
-            &AppType::Codex,
-            &provider,
-            "/v1/responses?foo=bar",
-            &json!({
-                "model": "gpt-5.4",
-                "instructions": "Be useful.",
-                "input": "hello",
-                "stream": true
-            }),
-            &headers,
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare Codex Anthropic bridge request")
-        .build()
-        .expect("build Codex Anthropic bridge request");
-
-    assert_eq!(
-        request.url().as_str(),
-        "https://gateway.example/api/v1/messages?foo=bar"
-    );
-    assert_eq!(
-        header_value(&request, "authorization"),
-        Some("Bearer codex-key")
-    );
-    assert_eq!(header_value(&request, "x-api-key"), None);
-    assert_eq!(header_value(&request, "accept"), Some("application/json"));
-    assert_eq!(header_value(&request, "accept-encoding"), Some("identity"));
-    assert_eq!(
-        header_value(&request, "anthropic-version"),
-        Some("2023-06-01")
-    );
-    assert_eq!(header_value(&request, "anthropic-beta"), None);
-    assert_eq!(header_value(&request, "originator"), None);
-    assert_eq!(header_value(&request, "x-stainless-lang"), None);
-    assert_eq!(header_value(&request, "x-codex-turn-id"), None);
-
-    let body = request_body_json(&request);
-    assert_eq!(body["model"], "claude-sonnet-4-6");
-    assert_eq!(body["max_tokens"], 8192);
-    assert_eq!(body["stream"], true);
-    assert!(body["messages"].is_array());
-    assert!(body.get("input").is_none());
-    assert!(body.get("max_output_tokens").is_none());
-}
-
-#[tokio::test]
-async fn codex_anthropic_prepare_request_supports_x_api_key_impersonation_and_one_m() {
-    let mut provider =
-        codex_anthropic_provider("https://gateway.example/v1", "claude-sonnet-4-6[1m]");
-    provider.settings_config["modelCatalog"] = json!({
-        "models": [{"model": "claude-sonnet-4-6[1m]"}]
-    });
-    let meta = provider.meta.as_mut().expect("Anthropic metadata");
-    meta.api_key_field = Some("ANTHROPIC_API_KEY".to_string());
-    meta.impersonate_claude_code = Some(true);
-    meta.max_output_tokens = Some(16_384);
-
-    let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router).expect("create forwarder");
-    let mut headers = HeaderMap::new();
-    headers.insert("user-agent", HeaderValue::from_static("codex-cli/0.1"));
-    headers.insert("x-app", HeaderValue::from_static("caller"));
-
-    let request = forwarder
-        .prepare_request(
-            &AppType::Codex,
-            &provider,
-            "/responses",
-            &json!({
-                "model": "claude-sonnet-4-6[1m]",
-                "instructions": "Original instructions.",
-                "input": "hello"
-            }),
-            &headers,
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare impersonated Anthropic request")
-        .build()
-        .expect("build impersonated Anthropic request");
-
-    assert_eq!(
-        request.url().as_str(),
-        "https://gateway.example/v1/messages"
-    );
-    assert_eq!(header_value(&request, "x-api-key"), Some("codex-key"));
-    assert_eq!(header_value(&request, "authorization"), None);
-    assert_eq!(header_value(&request, "x-app"), Some("cli"));
-    assert_eq!(
-        header_value(&request, "user-agent"),
-        Some("claude-cli/1.0.119 (external, cli)")
-    );
-    assert_eq!(
-        header_value(&request, "anthropic-beta"),
-        Some("claude-code-20250219,context-1m-2025-08-07")
-    );
-
-    let body = request_body_json(&request);
-    assert_eq!(body["model"], "claude-sonnet-4-6");
-    assert_eq!(body["max_tokens"], 16_384);
-    assert_eq!(
-        body["system"][0]["text"],
-        "You are Claude Code, Anthropic's official CLI for Claude."
-    );
-    assert!(body["system"][1]["cache_control"].get("ttl").is_none());
-    assert!(body["messages"][0]["content"][0]["cache_control"]
-        .get("ttl")
-        .is_none());
-}
-
-#[tokio::test]
-async fn codex_anthropic_prepare_request_preserves_full_messages_endpoint() {
-    let provider = codex_anthropic_provider(
-        "https://gateway.example/custom/v1/messages?existing=1",
-        "claude-sonnet-4-6",
-    );
-    let (_db, router) = test_router().await;
-    let forwarder = RequestForwarder::new(router).expect("create forwarder");
-
-    let request = forwarder
-        .prepare_request(
-            &AppType::Codex,
-            &provider,
-            "/responses?foo=bar",
-            &json!({"model": "gpt-5.4", "input": "hello"}),
-            &HeaderMap::new(),
-            ForwardOptions {
-                max_retries: 0,
-                request_timeout: Some(Duration::from_secs(2)),
-                bypass_circuit_breaker: true,
-            },
-        )
-        .await
-        .expect("prepare full-endpoint Anthropic request")
-        .build()
-        .expect("build full-endpoint Anthropic request");
-
-    assert_eq!(
-        request.url().as_str(),
-        "https://gateway.example/custom/v1/messages?existing=1&foo=bar"
-    );
-}
-
 async fn build_request(
     app_type: &AppType,
     provider: &Provider,
@@ -2205,24 +1710,6 @@ async fn build_request(
         .expect("build request")
 }
 
-fn provider_with_request_overrides(
-    mut provider: Provider,
-    custom_user_agent: Option<&str>,
-    headers: &[(&str, &str)],
-    body: Option<Value>,
-) -> Provider {
-    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
-    meta.custom_user_agent = custom_user_agent.map(str::to_string);
-    meta.local_proxy_request_overrides = Some(LocalProxyRequestOverrides {
-        headers: headers
-            .iter()
-            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
-            .collect(),
-        body,
-    });
-    provider
-}
-
 fn codex_provider(base_url: &str) -> Provider {
     Provider::with_id(
         "codex".to_string(),
@@ -2248,24 +1735,6 @@ fn codex_chat_provider(base_url: &str, model: &str) -> Provider {
     );
     provider.meta = Some(ProviderMeta {
         api_format: Some("openai_chat".to_string()),
-        ..Default::default()
-    });
-    provider
-}
-
-fn codex_anthropic_provider(base_url: &str, model: &str) -> Provider {
-    let mut provider = Provider::with_id(
-        "codex-anthropic".to_string(),
-        "Codex Anthropic Provider".to_string(),
-        json!({
-            "base_url": base_url,
-            "apiKey": "codex-key",
-            "model": model,
-        }),
-        None,
-    );
-    provider.meta = Some(ProviderMeta {
-        api_format: Some("anthropic".to_string()),
         ..Default::default()
     });
     provider

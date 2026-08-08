@@ -23,16 +23,6 @@ use crate::session_manager::cache::{CachedScanRow, SessionScanCacheEntry};
 /// sidecar 缓存库文件名（与主库同目录）。
 const SCAN_CACHE_DB_FILE: &str = "session-scan-cache.db";
 
-/// A cached `SessionMeta` must fit in one bounded manifest row. Enforce the
-/// same ceiling at the SQLite boundary so a corrupted or legacy sidecar row
-/// cannot make rusqlite allocate an arbitrarily large `String`.
-const MAX_SCAN_CACHE_META_BYTES: usize = 64 * 1024;
-
-/// Oversized rows are cache misses regardless of whether cleanup succeeds.
-/// Retire only a fixed number per read so repairing a damaged cache cannot add
-/// an unbounded write pause to session discovery.
-const OVERSIZED_META_CLEANUP_LIMIT: usize = 128;
-
 /// 会话扫描缓存的 sidecar SQLite 存储。
 ///
 /// 与主库互不相干：自持连接、自建表，损坏时可直接删除文件重建。
@@ -88,22 +78,47 @@ impl ScanCacheStore {
 
     /// 在指定路径打开缓存库（测试与 `open()` 共用）。
     pub fn open_at(path: &Path) -> Result<Self, AppError> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-            }
+        let file_name = path.file_name().ok_or_else(|| {
+            AppError::InvalidInput(format!("会话扫描缓存路径缺少文件名: {}", path.display()))
+        })?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
+        let open_path = parent
+            .canonicalize()
+            .map_err(|e| AppError::io(parent, e))?
+            .join(file_name);
+
+        // Resolve only the parent: SQLite NOFOLLOW rejects macOS aliases such as /tmp, while
+        // leaving the final component unresolved still blocks a symlink at the database path.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&open_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(AppError::io(&open_path, error)),
+        }
+
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
             | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
             | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let conn = Connection::open_with_flags(path, flags)
+        let conn = Connection::open_with_flags(&open_path, flags)
             .map_err(|e| AppError::Database(format!("打开会话扫描缓存库失败: {e}")))?;
         // 与主库一致：缓存虽可重建，但含会话元数据与绝对路径，unix 下收紧为 0600
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&open_path, std::fs::Permissions::from_mode(0o600));
         }
         Self::from_connection(conn)
     }
@@ -194,330 +209,81 @@ impl ScanCacheStore {
             .map_err(|_| AppError::Database("会话扫描缓存库连接锁中毒".to_string()))
     }
 
-    /// Best-effort retirement for rows already classified as oversized by a
-    /// bounded SELECT. The size predicate closes the gap between the read and
-    /// delete if another process replaces a rowid with valid data meanwhile.
-    fn delete_oversized_rowids_bounded(conn: &mut Connection, rowids: &[i64]) {
-        debug_assert!(rowids.len() <= OVERSIZED_META_CLEANUP_LIMIT);
-        if rowids.is_empty() {
-            return;
-        }
-        let result = (|| -> Result<(), rusqlite::Error> {
-            let tx = conn.transaction()?;
-            {
-                let mut stmt = tx.prepare_cached(
-                    "DELETE FROM session_scan_cache
-                     WHERE rowid = ?1
-                       AND (typeof(meta) <> 'text'
-                            OR length(CAST(meta AS BLOB)) > ?2)",
-                )?;
-                for rowid in rowids {
-                    stmt.execute(rusqlite::params![rowid, MAX_SCAN_CACHE_META_BYTES as i64])?;
-                }
-            }
-            tx.commit()
-        })();
-        if let Err(error) = result {
-            // Cleanup is an optimization. The SELECT still omitted every
-            // oversized value, so a lock/contention failure remains a safe
-            // cache miss and must not fail session discovery.
-            log::debug!("[SESSION-SCAN] 清理超大会话缓存元数据失败: {error}");
-        }
-    }
-
-    /// Test-only full-table inspection. Production scans use bounded batches
-    /// and must never materialize an entire provider cache.
-    #[cfg(test)]
+    /// 读取某个 provider 的全部缓存行，键为绝对文件路径。
     pub fn load_for_provider(
         &self,
         provider: &str,
     ) -> Result<HashMap<String, CachedScanRow>, AppError> {
-        let mut conn = self.lock()?;
-        let (map, oversized_rowids) = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT rowid, file_path, mtime_ns, size, cache_version,
-                            CASE WHEN typeof(meta) = 'text'
-                                       AND length(CAST(meta AS BLOB)) <= ?2
-                                 THEN meta ELSE NULL END
-                     FROM session_scan_cache
-                     WHERE provider = ?1",
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_path, mtime_ns, size, cache_version, meta
+                 FROM session_scan_cache
+                 WHERE provider = ?1",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
 
-            let rows = stmt
-                .query_map(
-                    rusqlite::params![provider, MAX_SCAN_CACHE_META_BYTES as i64],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
-                            row.get::<_, Option<String>>(5)?,
-                        ))
-                    },
-                )
-                .map_err(|e| AppError::Database(e.to_string()))?;
-
-            let mut map = HashMap::new();
-            let mut oversized_rowids = Vec::with_capacity(OVERSIZED_META_CLEANUP_LIMIT);
-            for row in rows {
-                let (rowid, file_path, mtime_ns, size, cache_version, meta_json) =
-                    row.map_err(|e| AppError::Database(e.to_string()))?;
-                let Some(meta_json) = meta_json else {
-                    if oversized_rowids.len() < OVERSIZED_META_CLEANUP_LIMIT {
-                        oversized_rowids.push(rowid);
-                    }
-                    continue;
-                };
-                map.insert(
-                    file_path,
+        let rows = stmt
+            .query_map([provider], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
                     CachedScanRow {
-                        mtime_ns,
-                        size,
-                        cache_version,
-                        meta_json,
+                        mtime_ns: row.get::<_, i64>(1)?,
+                        size: row.get::<_, i64>(2)?,
+                        cache_version: row.get::<_, i64>(3)?,
+                        meta_json: row.get::<_, String>(4)?,
                     },
-                );
-            }
-            (map, oversized_rowids)
-        };
-        Self::delete_oversized_rowids_bounded(&mut conn, &oversized_rowids);
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let (file_path, cached) = row.map_err(|e| AppError::Database(e.to_string()))?;
+            map.insert(file_path, cached);
+        }
         Ok(map)
     }
 
-    /// Load only the cache rows needed by one bounded discovery batch. Each
-    /// lookup uses the existing `file_path` primary key plus provider guard; no
-    /// provider-wide map or dynamically sized `IN (...)` statement is built.
-    pub(crate) fn load_batch_cancellable(
-        &self,
-        provider: &str,
-        file_paths: &[String],
-        is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<Option<HashMap<String, CachedScanRow>>, AppError> {
-        if is_cancelled() {
-            return Ok(None);
-        }
-        let mut conn = self.lock()?;
-        let (rows, oversized_rowids) = {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT rowid, mtime_ns, size, cache_version,
-                            CASE WHEN typeof(meta) = 'text'
-                                       AND length(CAST(meta AS BLOB)) <= ?3
-                                 THEN meta ELSE NULL END
-                     FROM session_scan_cache
-                     WHERE file_path = ?1 AND provider = ?2",
-                )
-                .map_err(|error| AppError::Database(error.to_string()))?;
-            let mut rows = HashMap::with_capacity(file_paths.len());
-            let mut oversized_rowids =
-                Vec::with_capacity(OVERSIZED_META_CLEANUP_LIMIT.min(file_paths.len()));
-            for file_path in file_paths {
-                if is_cancelled() {
-                    return Ok(None);
-                }
-                let cached = stmt
-                    .query_row(
-                        rusqlite::params![file_path, provider, MAX_SCAN_CACHE_META_BYTES as i64],
-                        |row| {
-                            Ok((
-                                row.get::<_, i64>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, i64>(3)?,
-                                row.get::<_, Option<String>>(4)?,
-                            ))
-                        },
-                    )
-                    .map(Some)
-                    .or_else(|error| match error {
-                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                        other => Err(AppError::Database(other.to_string())),
-                    })?;
-                let Some((rowid, mtime_ns, size, cache_version, meta_json)) = cached else {
-                    continue;
-                };
-                let Some(meta_json) = meta_json else {
-                    if oversized_rowids.len() < OVERSIZED_META_CLEANUP_LIMIT {
-                        oversized_rowids.push(rowid);
-                    }
-                    continue;
-                };
-                rows.insert(
-                    file_path.clone(),
-                    CachedScanRow {
-                        mtime_ns,
-                        size,
-                        cache_version,
-                        meta_json,
-                    },
-                );
-            }
-            (rows, oversized_rowids)
-        };
-        if is_cancelled() {
-            Ok(None)
-        } else {
-            Self::delete_oversized_rowids_bounded(&mut conn, &oversized_rowids);
-            Ok(Some(rows))
-        }
-    }
-
-    /// Remove sidecar rows whose source file disappeared, using SQLite's stable
-    /// rowid keyset and fixed-size delete batches. This deliberately avoids an
-    /// O(N) in-memory `seen` set. Existing files that no longer match a newer
-    /// provider discovery policy may remain as harmless cache garbage; they are
-    /// never emitted because streaming reads cache rows only by discovered path.
-    pub(crate) fn delete_missing_for_provider_bounded(
-        &self,
-        provider: &str,
-        batch_size: usize,
-        is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<Option<usize>, AppError> {
-        if batch_size == 0 {
-            return Err(AppError::InvalidInput(
-                "session cache cleanup batch_size must be greater than zero".to_string(),
-            ));
-        }
-        let mut after_rowid = 0_i64;
-        let mut deleted = 0usize;
-        loop {
-            if is_cancelled() {
-                return Ok(None);
-            }
-            let rows: Vec<(i64, String)> = {
-                let conn = self.lock()?;
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT rowid, file_path
-                         FROM session_scan_cache
-                         WHERE provider = ?1 AND rowid > ?2
-                         ORDER BY rowid ASC
-                         LIMIT ?3",
-                    )
-                    .map_err(|error| AppError::Database(error.to_string()))?;
-                let rows = stmt
-                    .query_map(
-                        rusqlite::params![provider, after_rowid, batch_size as i64],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                    )
-                    .map_err(|error| AppError::Database(error.to_string()))?;
-                let mut rows_out = Vec::with_capacity(batch_size);
-                for row in rows {
-                    if is_cancelled() {
-                        return Ok(None);
-                    }
-                    rows_out.push(row.map_err(|error| AppError::Database(error.to_string()))?);
-                }
-                rows_out
-            };
-            let Some((last_rowid, _)) = rows.last() else {
-                return Ok(Some(deleted));
-            };
-            after_rowid = *last_rowid;
-
-            let mut missing = Vec::new();
-            for (_, path) in &rows {
-                if is_cancelled() {
-                    return Ok(None);
-                }
-                match std::fs::metadata(path) {
-                    Ok(metadata) if metadata.is_file() => {}
-                    Ok(_) => missing.push(path.clone()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        missing.push(path.clone());
-                    }
-                    Err(error) => {
-                        return Err(AppError::io(Path::new(path), error));
-                    }
-                }
-            }
-            self.delete_paths(&missing)?;
-            deleted = deleted.saturating_add(missing.len());
-            if rows.len() < batch_size {
-                return Ok(Some(deleted));
-            }
-        }
-    }
-
-    /// 读取缓存的 `SessionMeta` JSON（诊断/兼容 API）。首屏不使用此查询：首屏
-    /// 读取独立的 bounded recency snapshot，避免在无 recency 索引的 sidecar 表上
-    /// 做 ORDER BY 全表临时排序。
-    #[allow(dead_code)]
+    /// 读取缓存的 `SessionMeta` JSON（用于秒开快照）。`provider` 为 `None` 时返回
+    /// 全部 provider 的行；只返回 `cache_version` 匹配当前版本的行，让整体版本失效
+    /// 时快照自动为空、退回到全量扫描。
     pub fn load_meta_json(
         &self,
         provider: Option<&str>,
         cache_version: i64,
     ) -> Result<Vec<String>, AppError> {
-        let mut conn = self.lock()?;
-        let (out, oversized_rowids) = match provider {
+        let conn = self.lock()?;
+        let mut out = Vec::new();
+        match provider {
             Some(provider) => {
                 let mut stmt = conn
                     .prepare(
-                        "SELECT rowid,
-                                CASE WHEN typeof(meta) = 'text'
-                                           AND length(CAST(meta AS BLOB)) <= ?3
-                                     THEN meta ELSE NULL END
-                         FROM session_scan_cache
+                        "SELECT meta FROM session_scan_cache
                          WHERE provider = ?1 AND cache_version = ?2",
                     )
                     .map_err(|e| AppError::Database(e.to_string()))?;
                 let rows = stmt
-                    .query_map(
-                        rusqlite::params![
-                            provider,
-                            cache_version,
-                            MAX_SCAN_CACHE_META_BYTES as i64
-                        ],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
+                    .query_map(rusqlite::params![provider, cache_version], |row| {
+                        row.get::<_, String>(0)
+                    })
                     .map_err(|e| AppError::Database(e.to_string()))?;
-                let mut out = Vec::new();
-                let mut oversized_rowids = Vec::with_capacity(OVERSIZED_META_CLEANUP_LIMIT);
                 for row in rows {
-                    let (rowid, meta_json) = row.map_err(|e| AppError::Database(e.to_string()))?;
-                    if let Some(meta_json) = meta_json {
-                        out.push(meta_json);
-                    } else if oversized_rowids.len() < OVERSIZED_META_CLEANUP_LIMIT {
-                        oversized_rowids.push(rowid);
-                    }
+                    out.push(row.map_err(|e| AppError::Database(e.to_string()))?);
                 }
-                (out, oversized_rowids)
             }
             None => {
                 let mut stmt = conn
-                    .prepare(
-                        "SELECT rowid,
-                                CASE WHEN typeof(meta) = 'text'
-                                           AND length(CAST(meta AS BLOB)) <= ?2
-                                     THEN meta ELSE NULL END
-                         FROM session_scan_cache
-                         WHERE cache_version = ?1",
-                    )
+                    .prepare("SELECT meta FROM session_scan_cache WHERE cache_version = ?1")
                     .map_err(|e| AppError::Database(e.to_string()))?;
                 let rows = stmt
-                    .query_map(
-                        rusqlite::params![cache_version, MAX_SCAN_CACHE_META_BYTES as i64],
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-                    )
+                    .query_map([cache_version], |row| row.get::<_, String>(0))
                     .map_err(|e| AppError::Database(e.to_string()))?;
-                let mut out = Vec::new();
-                let mut oversized_rowids = Vec::with_capacity(OVERSIZED_META_CLEANUP_LIMIT);
                 for row in rows {
-                    let (rowid, meta_json) = row.map_err(|e| AppError::Database(e.to_string()))?;
-                    if let Some(meta_json) = meta_json {
-                        out.push(meta_json);
-                    } else if oversized_rowids.len() < OVERSIZED_META_CLEANUP_LIMIT {
-                        oversized_rowids.push(rowid);
-                    }
+                    out.push(row.map_err(|e| AppError::Database(e.to_string()))?);
                 }
-                (out, oversized_rowids)
             }
-        };
-        Self::delete_oversized_rowids_bounded(&mut conn, &oversized_rowids);
+        }
         Ok(out)
     }
 
@@ -525,16 +291,6 @@ impl ScanCacheStore {
     pub fn upsert_batch(&self, entries: &[SessionScanCacheEntry]) -> Result<(), AppError> {
         if entries.is_empty() {
             return Ok(());
-        }
-        if let Some(entry) = entries
-            .iter()
-            .find(|entry| entry.meta_json.len() > MAX_SCAN_CACHE_META_BYTES)
-        {
-            return Err(AppError::InvalidInput(format!(
-                "session cache meta is {} bytes; maximum is {} bytes",
-                entry.meta_json.len(),
-                MAX_SCAN_CACHE_META_BYTES
-            )));
         }
         let mut conn = self.lock()?;
         let tx = conn
@@ -746,8 +502,9 @@ impl ScanCacheStore {
 /// 只记 debug，绝不影响删除结果本身。
 ///
 /// TUI 删除 worker 与 CLI `sessions delete` 成功路径共用此函数，保证两个入口
-/// 一致地清缓存，避免后续扫描复用已删除文件的旧元数据。内部自行 `open()`
-/// sidecar；打不开就降级为无操作（下一轮扫描仍会靠文件缺失自愈）。
+/// 一致地清缓存——否则删完再开另一入口时，stale-while-revalidate 的秒开快照会
+/// 让已删会话短暂"复活"（要等后台重扫的 deletes 才自愈）。内部自行 `open()`
+/// sidecar；打不开就降级为无操作（下一轮 revalidate 仍会靠文件缺失自愈）。
 pub fn purge_session(provider_id: &str, session_id: &str, source_path: &str) {
     match ScanCacheStore::open() {
         Ok(store) => purge_session_in(&store, provider_id, session_id, source_path),
@@ -755,10 +512,6 @@ pub fn purge_session(provider_id: &str, session_id: &str, source_path: &str) {
             log::debug!("[SESSION-SCAN] 删除会话后打开扫描缓存失败 ({source_path}): {err}")
         }
     }
-    // Legacy JSON recency snapshots are independent of SQLite. Purge them even
-    // when the sidecar database cannot be opened so a downgrade cannot revive
-    // the deleted row.
-    super::recent_snapshot::purge(provider_id, session_id, source_path);
 }
 
 /// [`purge_session`] 的核心两步删除（在已打开的 store 上执行）。抽出来让测试可
@@ -851,111 +604,6 @@ mod tests {
             .expect("reload after delete");
         assert_eq!(claude.len(), 1);
         assert!(claude.contains_key("/b.jsonl"));
-    }
-
-    #[test]
-    fn meta_write_accepts_exact_byte_limit() {
-        let store = ScanCacheStore::in_memory().expect("open memory store");
-        let mut bounded = entry("/bounded.jsonl", "claude", 1, 10, SCAN_CACHE_VERSION);
-        bounded.meta_json = "x".repeat(MAX_SCAN_CACHE_META_BYTES);
-
-        store
-            .upsert_batch(&[bounded])
-            .expect("exact boundary is accepted");
-        let loaded = store.load_for_provider("claude").expect("load boundary");
-        assert_eq!(
-            loaded
-                .get("/bounded.jsonl")
-                .expect("bounded row")
-                .meta_json
-                .len(),
-            MAX_SCAN_CACHE_META_BYTES
-        );
-    }
-
-    #[test]
-    fn meta_write_rejects_limit_plus_one_before_sql() {
-        let store = ScanCacheStore::in_memory().expect("open memory store");
-        let valid = entry("/valid.jsonl", "claude", 1, 10, SCAN_CACHE_VERSION);
-        let mut oversized = entry("/oversized.jsonl", "claude", 2, 20, SCAN_CACHE_VERSION);
-        oversized.meta_json = "x".repeat(MAX_SCAN_CACHE_META_BYTES + 1);
-
-        let result = store.upsert_batch(&[valid, oversized]);
-        assert!(
-            matches!(result, Err(AppError::InvalidInput(_))),
-            "the whole batch must be rejected before opening a transaction"
-        );
-        assert!(
-            store
-                .load_for_provider("claude")
-                .expect("load after rejected write")
-                .is_empty(),
-            "a preflight rejection must not partially write earlier entries"
-        );
-    }
-
-    #[test]
-    fn legacy_oversized_meta_rows_are_misses_and_cleanup_is_bounded() {
-        let store = ScanCacheStore::in_memory().expect("open memory store");
-        let oversized = "x".repeat(MAX_SCAN_CACHE_META_BYTES + 1);
-        {
-            let mut conn = store.lock().expect("lock store");
-            let tx = conn.transaction().expect("begin legacy insert");
-            {
-                let mut stmt = tx
-                    .prepare(
-                        "INSERT INTO session_scan_cache
-                            (file_path, provider, mtime_ns, size, meta, cache_version)
-                         VALUES (?1, 'legacy', 1, 1, ?2, ?3)",
-                    )
-                    .expect("prepare legacy insert");
-                for index in 0..=OVERSIZED_META_CLEANUP_LIMIT {
-                    stmt.execute(rusqlite::params![
-                        format!("/legacy-{index}.jsonl"),
-                        &oversized,
-                        SCAN_CACHE_VERSION - 1
-                    ])
-                    .expect("insert legacy oversized row");
-                }
-            }
-            tx.commit().expect("commit legacy insert");
-        }
-
-        assert!(
-            store
-                .load_for_provider("legacy")
-                .expect("load legacy rows")
-                .is_empty(),
-            "oversized legacy rows are cache misses"
-        );
-        let remaining = store
-            .lock()
-            .expect("lock for count")
-            .query_row(
-                "SELECT count(*) FROM session_scan_cache WHERE provider = 'legacy'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count after bounded cleanup");
-        assert_eq!(
-            remaining, 1,
-            "one read retires at most {OVERSIZED_META_CLEANUP_LIMIT} rows"
-        );
-
-        assert!(store
-            .load_for_provider("legacy")
-            .expect("load remaining legacy row")
-            .is_empty());
-        let remaining = store
-            .lock()
-            .expect("lock for final count")
-            .query_row(
-                "SELECT count(*) FROM session_scan_cache WHERE provider = 'legacy'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("count after second cleanup");
-        assert_eq!(remaining, 0);
     }
 
     #[test]
@@ -1216,5 +864,19 @@ mod tests {
         let result = ScanCacheStore::open_at(&path)
             .and_then(|store| store.load_for_provider("claude").map(|_| store));
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_at_rejects_database_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.db");
+        let path = dir.path().join("session-scan-cache.db");
+        std::fs::write(&target, []).expect("write target");
+        symlink(&target, &path).expect("create symlink");
+
+        assert!(ScanCacheStore::open_at(&path).is_err());
     }
 }

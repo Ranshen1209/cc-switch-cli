@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
+    /// Foreground asks which database this daemon owns before sending any
+    /// state-mutating request. This prevents a daemon started with a different
+    /// `CC_SWITCH_CONFIG_DIR` from serving the process-global control socket.
+    ConfigIdentity,
     /// Foreground asks the daemon to bring the named app's worker up if it
     /// isn't already, and enable proxy takeover for that app.
     EnsureWorker {
@@ -44,6 +48,9 @@ pub enum Request {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
     Ok,
+    ConfigIdentity {
+        database: String,
+    },
     Worker {
         address: String,
         port: u16,
@@ -146,6 +153,14 @@ mod tests {
         roundtrip_request(Request::EnsureWorker {
             app_type: "claude".to_string(),
             fallback_provider_id: Some("provider-1".to_string()),
+        });
+    }
+
+    #[test]
+    fn config_identity_roundtrips() {
+        roundtrip_request(Request::ConfigIdentity);
+        roundtrip_response(Response::ConfigIdentity {
+            database: "file:/tmp/cc-switch.db".to_string(),
         });
     }
 

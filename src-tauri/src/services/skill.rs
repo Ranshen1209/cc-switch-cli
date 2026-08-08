@@ -550,6 +550,7 @@ impl SkillService {
     pub fn get_app_skills_dir(app: &AppType) -> Result<PathBuf, AppError> {
         // Override directories follow the same pattern as upstream: <override>/skills
         match app {
+            AppType::ClaudeDesktop => {}
             AppType::Claude => {
                 if let Some(custom) = crate::settings::get_claude_override_dir() {
                     return Ok(custom.join("skills"));
@@ -592,6 +593,7 @@ impl SkillService {
 
         Ok(match app {
             AppType::Claude => home.join(".claude").join("skills"),
+            AppType::ClaudeDesktop => home.join(".claude-desktop").join("skills"),
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
@@ -1547,7 +1549,7 @@ impl SkillService {
         let skills = response
             .skills
             .into_iter()
-            .filter_map(|skill| skills_sh_api_skill_to_discoverable(skill))
+            .filter_map(skills_sh_api_skill_to_discoverable)
             .collect();
 
         Ok(SkillsShSearchResult {
@@ -1603,7 +1605,7 @@ impl SkillService {
             .collect();
 
         // Add local SSOT-only skills not in repos.
-        Self::merge_local_ssot_skills(&index, &mut out)?;
+        Self::merge_local_ssot_skills(index, &mut out)?;
 
         // De-dup + sort.
         Self::deduplicate_skills(&mut out);

@@ -4,13 +4,13 @@ use crate::app_config::AppType;
 use crate::cli::i18n::{set_language, texts};
 use crate::error::AppError;
 
-use super::app::{Action, App, Focus, Overlay, ToastKind};
+use super::app::{Action, App, Focus, Overlay, TextViewState, ToastKind};
 use super::data::UiData;
 use super::runtime_systems::{
     LocalEnvReq, ManagedAuthReq, ModelFetchReq, ProxyReq, RequestTracker, SessionReq, SkillsReq,
     StreamCheckReq, UpdateReq, WebDavReq,
 };
-use super::terminal::{ClipboardCopyOutcome, TuiTerminal};
+use super::terminal::TuiTerminal;
 
 mod claude_temp_launch;
 mod codex_temp_launch;
@@ -89,22 +89,10 @@ pub(crate) fn apply_preloaded_app_switch(
     next: AppType,
     next_data: UiData,
 ) {
-    let changing_app = app.app_type != next;
-    let was_sessions = matches!(app.route, super::route::Route::Sessions);
     app.clear_openclaw_daily_memory_search_state();
-    if changing_app {
-        // A log-detail snapshot is scoped to one application. Clearing the
-        // browsing source here prevents a matching request id in another app
-        // from rendering the previous app's row.
-        app.usage.invalidate_log_pages();
-    }
     app.app_type = next;
     let original_route = app.route.clone();
     app.route = normalize_route_for_app(&app.app_type, &app.route);
-    if was_sessions && (changing_app || !matches!(app.route, super::route::Route::Sessions)) {
-        app.sessions.request_cost_cancel();
-    }
-    app.clear_out_of_scope_action_toast();
     for route in &mut app.route_stack {
         *route = normalize_route_for_app(&app.app_type, route);
     }
@@ -141,7 +129,7 @@ pub(super) struct RuntimeActionContext<'a> {
     skills_req_tx: Option<&'a mpsc::Sender<SkillsReq>>,
     proxy_req_tx: Option<&'a mpsc::Sender<ProxyReq>>,
     proxy_loading: &'a mut RequestTracker,
-    local_env_req_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<LocalEnvReq>>,
+    local_env_req_tx: Option<&'a mpsc::Sender<LocalEnvReq>>,
     session_req_tx: Option<&'a mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&'a mpsc::Sender<WebDavReq>>,
     webdav_loading: &'a mut RequestTracker,
@@ -149,337 +137,6 @@ pub(super) struct RuntimeActionContext<'a> {
     update_check: &'a mut RequestTracker,
     model_fetch_req_tx: Option<&'a mpsc::Sender<ModelFetchReq>>,
     managed_auth_req_tx: Option<&'a mpsc::Sender<ManagedAuthReq>>,
-}
-
-fn queue_active_session_message_refresh(app: &mut App, tx: &mpsc::Sender<SessionReq>) {
-    if !app.sessions.request_message_source_refresh() {
-        return;
-    }
-    let _ = queue_pending_session_message_refresh(app, Some(tx));
-}
-
-/// Dispatch one remembered manual transcript refresh when paging state allows
-/// it. Returning `false` means no request was ready, so the caller may continue
-/// with ordinary adjacent-page prefetch. A refresh requested during a page
-/// crossing remains remembered in the pager and is retried by the event loop.
-pub(super) fn queue_pending_session_message_refresh(
-    app: &mut App,
-    tx: Option<&mpsc::Sender<SessionReq>>,
-) -> bool {
-    let Some(key) = app.sessions.messages_key.clone() else {
-        return false;
-    };
-    let Some((request_id, transcript_generation, refresh_page, refresh_message_key, reader)) =
-        app.sessions.next_message_source_refresh_request()
-    else {
-        return false;
-    };
-    let result = tx
-        .ok_or_else(|| "sessions worker is not running".to_string())
-        .and_then(|tx| {
-            tx.send(SessionReq::LoadMessagePage {
-                request_id,
-                key: key.clone(),
-                transcript_generation: transcript_generation.clone(),
-                page: refresh_page,
-                refresh_page,
-                refresh_message_key,
-                reader,
-            })
-            .map_err(|error| error.to_string())
-        });
-    if let Err(error) = result {
-        app.sessions.fail_message_page_request(
-            request_id,
-            &key,
-            &transcript_generation,
-            refresh_page,
-            error.clone(),
-        );
-        app.push_toast(
-            texts::tui_sessions_toast_messages_failed(&error),
-            ToastKind::Warning,
-        );
-    }
-    true
-}
-
-/// Start one materialized Sessions search and settle it immediately if its
-/// worker channel is absent or disconnected. The request id check prevents an
-/// old send failure from clearing a newer query's spinner.
-pub(super) fn queue_sessions_deep_search(
-    app: &mut App,
-    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
-    query: String,
-) {
-    let view = app.sessions.desired_view_spec(Some(&query));
-    if app.sessions.materialization_failed_for_current_base(&view) {
-        return;
-    }
-    let Some(tx) = session_req_tx else {
-        let request_id = begin_sessions_deep_search(app, &view);
-        settle_sessions_deep_search_dispatch_error(
-            app,
-            request_id,
-            &view,
-            "sessions worker is not running".to_string(),
-        );
-        return;
-    };
-    let Some((base, base_reader)) = app.sessions.base_query_source() else {
-        app.sessions.deep_search_pending = Some((query, 0));
-        return;
-    };
-    let request_id = begin_sessions_deep_search(app, &view);
-    if let Err(error) = tx.send(SessionReq::Search {
-        request_id,
-        scope_epoch: app.sessions.scope_epoch,
-        view: view.clone(),
-        base,
-        base_reader,
-        query_namespace: app.sessions.query_namespace.clone(),
-    }) {
-        settle_sessions_deep_search_dispatch_error(app, request_id, &view, error.to_string());
-    }
-}
-
-/// Dispatch a debounced request only if its query still describes the current
-/// Sessions view. This is the final identity check between UI input handling
-/// and the worker queue, so a cancelled request cannot be revived later in the
-/// same event-loop iteration.
-pub(super) fn queue_pending_sessions_deep_search(
-    app: &mut App,
-    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
-    query: String,
-) {
-    let current_query = app.filter.query_lower().unwrap_or_default();
-    if query != current_query {
-        return;
-    }
-    queue_sessions_deep_search(app, session_req_tx, query);
-}
-
-fn begin_sessions_deep_search(
-    app: &mut App,
-    view: &crate::session_manager::project_scope::SessionViewSpec,
-) -> u64 {
-    app.sessions.clear_materialization_failure();
-    app.sessions.deep_search_query = (!view.query.is_empty()).then(|| view.query.clone());
-    app.sessions.clear_deep_search_results();
-    app.sessions.deep_search_pending = None;
-    app.sessions.last_error = None;
-    app.sessions.deep_search_seq = app.sessions.deep_search_seq.wrapping_add(1);
-    let request_id = app.sessions.deep_search_seq;
-    app.sessions.deep_search_active = Some(request_id);
-    request_id
-}
-
-fn settle_sessions_deep_search_dispatch_error(
-    app: &mut App,
-    request_id: u64,
-    view: &crate::session_manager::project_scope::SessionViewSpec,
-    error: String,
-) {
-    if app.sessions.deep_search_active != Some(request_id) {
-        return;
-    }
-    app.sessions.deep_search_active = None;
-    if let Some((scope_epoch, scope, generation)) =
-        app.sessions.base_manifest.as_ref().map(|base| {
-            (
-                base.scope_epoch,
-                base.scope.clone(),
-                base.generation.clone(),
-            )
-        })
-    {
-        app.sessions
-            .mark_materialization_failed(scope_epoch, &scope, &generation, view.clone());
-    }
-    app.sessions.last_error = Some(error.clone());
-    app.push_toast(
-        texts::tui_sessions_toast_worker_unavailable(&error),
-        ToastKind::Warning,
-    );
-}
-
-fn new_session_project_picker(app: &App) -> super::app::SessionProjectPickerState {
-    let mut picker = super::app::SessionProjectPickerState {
-        input: super::text_edit::TextInput::new(""),
-        selected_idx: 0,
-        path_scroll: 0,
-        filtered_indices: None,
-        pinned_scope: super::app::session_project_picker_pinned_scope(&app.sessions),
-        filter_error: None,
-    };
-    picker.selected_idx = super::app::session_project_active_option_index(&app.sessions, &picker);
-    picker
-}
-
-pub(crate) fn session_project_picker(app: &App) -> Option<&super::app::SessionProjectPickerState> {
-    match &app.overlay {
-        Overlay::SessionProjectPicker(picker) => Some(picker),
-        Overlay::Help(_) => match app.pending_overlay.as_ref() {
-            Some(Overlay::SessionProjectPicker(picker)) => Some(picker),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-pub(crate) fn session_project_picker_mut(
-    app: &mut App,
-) -> Option<&mut super::app::SessionProjectPickerState> {
-    match &mut app.overlay {
-        Overlay::SessionProjectPicker(picker) => Some(picker),
-        Overlay::Help(_) => match app.pending_overlay.as_mut() {
-            Some(Overlay::SessionProjectPicker(picker)) => Some(picker),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-pub(crate) fn sync_session_project_picker(app: &mut App) {
-    let Some(old_input) = session_project_picker(app).map(|picker| picker.input.clone()) else {
-        return;
-    };
-    let covered_by_help = matches!(app.overlay, Overlay::Help(_));
-    let mut picker = new_session_project_picker(app);
-    picker.input = old_input;
-    let query = picker.input.value.trim().to_lowercase();
-    if query.is_empty() {
-        picker.selected_idx =
-            super::app::session_project_active_option_index(&app.sessions, &picker);
-    } else {
-        picker.filtered_indices = Some(Vec::new());
-        picker.selected_idx = 0;
-        app.pending_project_filter = Some(query);
-    }
-    if covered_by_help {
-        app.pending_overlay = Some(Overlay::SessionProjectPicker(picker));
-    } else {
-        app.overlay = Overlay::SessionProjectPicker(picker);
-    }
-}
-
-pub(crate) fn queue_sessions_project_catalog(
-    app: &mut App,
-    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
-) {
-    if app.sessions.project_catalog_is_current() {
-        app.pending_project_catalog = false;
-        app.sessions.project_catalog_loading = false;
-        sync_session_project_picker(app);
-        return;
-    }
-    if app.sessions.project_catalog_active.is_some() {
-        return;
-    }
-    let Some((base, base_reader)) = app.sessions.base_query_source() else {
-        if app.sessions.scan_active.is_none() {
-            if let Some(error) = app.sessions.last_error.clone() {
-                app.pending_project_catalog = false;
-                app.sessions.project_catalog_loading = false;
-                app.sessions.project_catalog_error = Some(error);
-                return;
-            }
-        }
-        app.pending_project_catalog = true;
-        app.sessions.project_catalog_loading = true;
-        return;
-    };
-    let Some(request_id) = app.sessions.start_project_catalog() else {
-        app.pending_project_catalog = true;
-        return;
-    };
-    app.pending_project_catalog = false;
-    let Some(tx) = session_req_tx else {
-        app.sessions
-            .fail_project_catalog(request_id, "sessions worker is not running".to_string());
-        return;
-    };
-    if let Err(error) = tx.send(SessionReq::ProjectCatalog {
-        request_id,
-        scope_epoch: app.sessions.scope_epoch,
-        base,
-        base_reader,
-    }) {
-        app.sessions
-            .fail_project_catalog(request_id, error.to_string());
-    }
-}
-
-pub(crate) fn cancel_sessions_project_filter(
-    app: &mut App,
-    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
-) {
-    app.pending_project_filter = None;
-    app.sessions.cancel_project_filter();
-    if let Some(tx) = session_req_tx {
-        let _ = tx.send(SessionReq::CancelProjectFilter);
-    }
-}
-
-pub(crate) fn queue_sessions_project_filter(
-    app: &mut App,
-    session_req_tx: Option<&mpsc::Sender<SessionReq>>,
-    query: String,
-) {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        cancel_sessions_project_filter(app, session_req_tx);
-        return;
-    }
-    if session_project_picker(app).is_none() {
-        cancel_sessions_project_filter(app, session_req_tx);
-        return;
-    }
-    let source = session_project_picker(app).and_then(|picker| {
-        super::app::session_project_filter_source(&app.sessions, picker, &query)
-    });
-    let Some(source) = source else {
-        app.pending_project_filter = Some(query);
-        return;
-    };
-    let Some(cache) = app.sessions.project_catalog.as_ref() else {
-        app.pending_project_filter = Some(query);
-        return;
-    };
-    let scope_epoch = cache.scope_epoch;
-    let scope = cache.scope.clone();
-    let base_generation = cache.base_generation.clone();
-    let Some(request_id) = app.sessions.start_project_filter() else {
-        app.pending_project_filter = Some(query);
-        return;
-    };
-    app.pending_project_filter = None;
-    if let Some(picker) = session_project_picker_mut(app) {
-        picker.filter_error = None;
-    }
-    let Some(tx) = session_req_tx else {
-        app.sessions.fail_project_filter(request_id);
-        if let Some(picker) = session_project_picker_mut(app) {
-            picker.filter_error = Some("sessions worker is not running".to_string());
-        }
-        return;
-    };
-    if let Err(error) = tx.send(SessionReq::ProjectFilter {
-        request_id,
-        scope_epoch,
-        scope,
-        base_generation,
-        query,
-        catalog: source.catalog,
-        project_offset: source.project_offset,
-        fixed_matches: source.fixed_matches,
-        trailing_matches: source.trailing_matches,
-    }) {
-        app.sessions.fail_project_filter(request_id);
-        if let Some(picker) = session_project_picker_mut(app) {
-            picker.filter_error = Some(error.to_string());
-        }
-    }
 }
 
 #[expect(
@@ -495,7 +152,7 @@ pub(crate) fn handle_action(
     skills_req_tx: Option<&mpsc::Sender<SkillsReq>>,
     proxy_req_tx: Option<&mpsc::Sender<ProxyReq>>,
     proxy_loading: &mut RequestTracker,
-    local_env_req_tx: Option<&tokio::sync::mpsc::UnboundedSender<LocalEnvReq>>,
+    local_env_req_tx: Option<&mpsc::Sender<LocalEnvReq>>,
     session_req_tx: Option<&mpsc::Sender<SessionReq>>,
     webdav_req_tx: Option<&mpsc::Sender<WebDavReq>>,
     webdav_loading: &mut RequestTracker,
@@ -524,51 +181,14 @@ pub(crate) fn handle_action(
         managed_auth_req_tx,
     };
 
-    if ctx.app.sessions.take_message_cancel_pending() {
-        if let Some(tx) = ctx.session_req_tx {
-            let _ = tx.send(SessionReq::CancelMessages);
-        }
-    }
-
     match action {
         Action::None => Ok(()),
-        Action::CopyToClipboard { text } => {
-            match ctx.terminal.copy_to_clipboard(&text) {
-                Ok(ClipboardCopyOutcome::Confirmed) => ctx
-                    .app
-                    .push_toast(texts::tui_toast_copied_to_clipboard(), ToastKind::Success),
-                Ok(ClipboardCopyOutcome::Requested) => ctx.app.push_copyable_toast(
-                    texts::tui_toast_clipboard_request_sent(),
-                    ToastKind::Info,
-                    text,
-                ),
-                Err(err) => {
-                    log::debug!("failed to copy TUI toast content to clipboard: {err}");
-                    ctx.app.push_copyable_toast(
-                        texts::tui_toast_copy_to_clipboard_failed(),
-                        ToastKind::Warning,
-                        text,
-                    );
-                }
-            }
-            Ok(())
-        }
         Action::ReloadData => {
             *ctx.data = UiData::load(&ctx.app.app_type)?;
             ctx.app.maybe_prompt_import_candidate(ctx.data);
             Ok(())
         }
-        // The top-level TUI dispatcher owns the usage worker channel. Keeping
-        // these arms harmless also makes direct runtime-action tests exhaustive.
-        Action::UsageRefresh | Action::UsageRebuildCodex | Action::UsageLogDetailRefresh { .. } => {
-            Ok(())
-        }
         Action::SetAppType(next) => {
-            ctx.app.sessions.clear_detail();
-            let _ = ctx.app.sessions.take_message_cancel_pending();
-            if let Some(tx) = ctx.session_req_tx {
-                let _ = tx.send(SessionReq::CancelMessages);
-            }
             let next_data = UiData::load(&next)?;
             apply_preloaded_app_switch(ctx.app, ctx.data, next, next_data);
             ctx.app.maybe_prompt_import_candidate(ctx.data);
@@ -576,7 +196,7 @@ pub(crate) fn handle_action(
         }
         Action::LocalEnvRefresh => {
             let Some(tx) = ctx.local_env_req_tx else {
-                ctx.app.stop_local_env_refresh();
+                ctx.app.local_env_loading = false;
                 ctx.app.push_toast(
                     texts::tui_toast_local_env_check_disabled(),
                     ToastKind::Warning,
@@ -584,9 +204,9 @@ pub(crate) fn handle_action(
                 return Ok(());
             };
 
-            let generation = ctx.app.begin_local_env_refresh();
-            if let Err(err) = tx.send(LocalEnvReq::Refresh { generation }) {
-                ctx.app.fail_local_env_refresh(generation);
+            ctx.app.local_env_loading = true;
+            if let Err(err) = tx.send(LocalEnvReq::Refresh) {
+                ctx.app.local_env_loading = false;
                 ctx.app.push_toast(
                     texts::tui_toast_local_env_check_request_failed(&err.to_string()),
                     ToastKind::Warning,
@@ -595,117 +215,66 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SessionsRefresh => {
+            let Some(tx) = ctx.session_req_tx else {
+                ctx.app.sessions.loading = false;
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_worker_unavailable("sessions worker is not running"),
+                    ToastKind::Warning,
+                );
+                return Ok(());
+            };
             // A scan already runs on a detached worker thread (workers.rs). If we
             // start another scan here it bumps scan_active to a new id, so the
             // in-flight thread's partial/finished messages (carrying the old id)
             // get rejected — and if the worker were to drop the superseding
-            // Refresh, the UI would stay loading forever. Serialize only the list
-            // scan from the entry side; the independently paged open transcript
-            // still records and dispatches its own revalidation request.
-            let provider_id = ctx.app.app_type.as_str().to_string();
-            let Some(tx) = ctx.session_req_tx else {
-                if ctx.app.sessions.scan_active.is_none() {
-                    let request_id = ctx.app.sessions.start_scan(provider_id);
-                    ctx.app
-                        .sessions
-                        .fail_scan(request_id, "sessions worker is not running".to_string());
-                    ctx.app.push_toast(
-                        texts::tui_sessions_toast_worker_unavailable(
-                            "sessions worker is not running",
-                        ),
-                        ToastKind::Warning,
-                    );
-                }
+            // Refresh, the UI would stay loading forever. Serialize from the entry
+            // side instead: while a scan is active, ignore `r` (a reload during an
+            // ongoing scan is a no-op by design). The automatic entry point
+            // (queue_sessions_refresh_if_needed) already guards on `loading`.
+            if ctx.app.sessions.scan_active.is_some() {
                 return Ok(());
-            };
-            if ctx.app.sessions.scan_active.is_none() {
-                let request_id = ctx.app.sessions.start_scan(provider_id.clone());
-                ctx.app.sessions.mark_manual_refresh(request_id);
-                if let Err(err) = tx.send(SessionReq::Refresh {
-                    request_id,
-                    scope_epoch: ctx.app.sessions.scope_epoch,
-                    provider_id,
-                    // Manual `r` reload forces a full re-parse (ignore the mtime/size
-                    // snapshot); the fresh results still refresh the persistent cache.
-                    force: true,
-                }) {
-                    ctx.app.sessions.fail_scan(request_id, err.to_string());
-                    ctx.app.push_toast(
-                        texts::tui_sessions_toast_refresh_failed(&err.to_string()),
-                        ToastKind::Warning,
-                    );
-                    return Ok(());
-                }
             }
-            queue_active_session_message_refresh(ctx.app, tx);
+            // In "show all providers" mode, refresh must rescan every provider
+            // (the virtual "all" id), otherwise `r` would only refresh the
+            // current app and the stale "all" cache would be restored afterward.
+            let provider_id = if ctx.app.sessions.show_all_providers {
+                "all".to_string()
+            } else {
+                ctx.app.app_type.as_str().to_string()
+            };
+            let request_id = ctx.app.sessions.start_scan(provider_id.clone());
+            if let Err(err) = tx.send(SessionReq::Refresh {
+                request_id,
+                provider_id,
+                // Manual `r` reload forces a full re-parse (ignore the mtime/size
+                // snapshot); the fresh results still refresh the persistent cache.
+                force: true,
+            }) {
+                ctx.app.sessions.fail_scan(request_id, err.to_string());
+                ctx.app.push_toast(
+                    texts::tui_sessions_toast_refresh_failed(&err.to_string()),
+                    ToastKind::Warning,
+                );
+            }
             Ok(())
         }
         Action::SessionsDeepSearch { query } => {
-            // Enter is an explicit retry boundary for a previously failed
-            // materialization of this exact query.
-            ctx.app.pending_deep_search = None;
-            ctx.app.sessions.clear_materialization_failure();
-            queue_sessions_deep_search(ctx.app, ctx.session_req_tx, query);
-            Ok(())
-        }
-        Action::SessionsDeepSearchCancel => {
-            // `sessions.deep_search_pending` may already contain the newest
-            // debounced input. Cancel only the older dispatch lane atomically.
-            ctx.app.pending_deep_search = None;
-            ctx.app.sessions.deep_search_active = None;
-            ctx.app.sessions.deep_search_query = None;
-            ctx.app.sessions.clear_deep_search_results();
-            if let Some(tx) = ctx.session_req_tx {
-                let _ = tx.send(SessionReq::CancelSearch);
-            }
-            Ok(())
-        }
-        Action::SessionsProjectCatalogLoad => {
-            ctx.app.overlay = Overlay::SessionProjectPicker(new_session_project_picker(ctx.app));
-            queue_sessions_project_catalog(ctx.app, ctx.session_req_tx);
-            Ok(())
-        }
-        Action::SessionsProjectFilter { query } => {
-            queue_sessions_project_filter(ctx.app, ctx.session_req_tx, query);
-            Ok(())
-        }
-        Action::SessionsProjectFilterCancel => {
-            cancel_sessions_project_filter(ctx.app, ctx.session_req_tx);
-            Ok(())
-        }
-        Action::SessionsProjectApply { scope } => {
-            // Enter on the already-active option is a true no-op. Cancelling
-            // first would strand an otherwise valid in-flight project/query
-            // request because the worker deliberately emits no terminal result.
-            if ctx.app.sessions.project_scope == scope {
+            let Some(tx) = ctx.session_req_tx else {
                 return Ok(());
-            }
-            if let Some(tx) = ctx.session_req_tx {
-                let _ = tx.send(SessionReq::CancelSearch);
-                let _ = tx.send(SessionReq::CancelProjectCatalog);
-                let _ = tx.send(SessionReq::CancelProjectFilter);
-            }
-            ctx.app.pending_project_catalog = false;
-            ctx.app.pending_project_filter = None;
-            ctx.app.pending_deep_search = None;
-            ctx.app.sessions.cancel_project_catalog();
-            ctx.app.sessions.cancel_project_filter();
-            if !ctx.app.sessions.set_project_scope(scope) {
-                return Ok(());
-            }
-            let query = ctx.app.filter.query_lower().unwrap_or_default();
-            ctx.app.sessions.deep_search_query = (!query.is_empty()).then(|| query.clone());
-            if ctx
-                .app
-                .sessions
-                .desired_view_requires_materialization(Some(&query))
-            {
-                queue_sessions_deep_search(ctx.app, ctx.session_req_tx, query);
-            } else if !ctx.app.sessions.base_view_is_current()
-                && !ctx.app.sessions.stage_base_restore()
-            {
-                ctx.app.sessions.deep_search_pending = Some((String::new(), 0));
-            }
+            };
+            // Set the query immediately so the UI shows "searching" state
+            ctx.app.sessions.deep_search_query = Some(query.clone());
+            ctx.app.sessions.deep_search_results.clear();
+            ctx.app.sessions.deep_search_seq = ctx.app.sessions.deep_search_seq.wrapping_add(1);
+            let request_id = ctx.app.sessions.deep_search_seq;
+            ctx.app.sessions.deep_search_active = Some(request_id);
+            // Snapshot the sessions to search (respecting show_all / provider filter)
+            let sessions = ctx.app.sessions.rows.clone();
+            let _ = tx.send(SessionReq::Search {
+                request_id,
+                query,
+                sessions,
+            });
             Ok(())
         }
         Action::SessionResume { command, cwd } => {
@@ -727,7 +296,18 @@ pub(crate) fn handle_action(
                         ToastKind::Success,
                     );
                 }
-                Err(err) => show_session_resume_fallback(ctx.app, command, &err),
+                Err(err) => {
+                    ctx.app.overlay = Overlay::TextView(TextViewState {
+                        title: texts::tui_sessions_resume_command().to_string(),
+                        lines: command.lines().map(|line| line.to_string()).collect(),
+                        scroll: 0,
+                        action: None,
+                    });
+                    ctx.app.push_toast(
+                        texts::tui_sessions_toast_resume_fallback(&err.to_string()),
+                        ToastKind::Warning,
+                    );
+                }
             }
             Ok(())
         }
@@ -790,37 +370,7 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::SwitchRoute(route) => {
-            let entering_sessions = !matches!(ctx.app.route, super::route::Route::Sessions)
-                && matches!(route, super::route::Route::Sessions);
-            let leaving_sessions = matches!(ctx.app.route, super::route::Route::Sessions)
-                && !matches!(route, super::route::Route::Sessions);
-            if leaving_sessions {
-                ctx.app.sessions.request_cost_cancel();
-            }
-            if !matches!(route, super::route::Route::Sessions) {
-                ctx.app.sessions.deep_search_active = None;
-                ctx.app.sessions.deep_search_pending = None;
-                ctx.app.pending_deep_search = None;
-                ctx.app.pending_project_catalog = false;
-                ctx.app.pending_project_filter = None;
-                ctx.app.sessions.cancel_project_catalog();
-                ctx.app.sessions.cancel_project_filter();
-                ctx.app.sessions.clear_detail();
-                let _ = ctx.app.sessions.take_message_cancel_pending();
-                if let Some(tx) = ctx.session_req_tx {
-                    let _ = tx.send(SessionReq::CancelSearch);
-                    let _ = tx.send(SessionReq::CancelMessages);
-                    let _ = tx.send(SessionReq::CancelProjectCatalog);
-                    let _ = tx.send(SessionReq::CancelProjectFilter);
-                }
-            }
             ctx.app.route = route;
-            if entering_sessions
-                && ctx.app.sessions.page_token().is_some()
-                && !ctx.app.sessions.rows.is_empty()
-            {
-                ctx.app.sessions.request_cost_overlay();
-            }
             ctx.app.maybe_prompt_import_candidate(ctx.data);
             if matches!(ctx.app.route, super::route::Route::SkillsDiscover)
                 && ctx.app.skills_discover_results.is_empty()
@@ -897,9 +447,7 @@ pub(crate) fn handle_action(
         Action::ProviderQuotaRefresh { .. } => Ok(()),
         Action::ProviderModelFetch {
             base_url,
-            is_full_url,
             api_key,
-            custom_user_agent,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -907,9 +455,7 @@ pub(crate) fn handle_action(
         } => providers::model_fetch(
             &mut ctx,
             base_url,
-            is_full_url,
             api_key,
-            custom_user_agent,
             codex_oauth,
             codex_oauth_account_id,
             field,
@@ -959,24 +505,13 @@ pub(crate) fn handle_action(
             Ok(())
         }
         Action::ConfigWebDavCheckConnection => config::webdav_check_connection(&mut ctx),
-        Action::ConfigWebDavSave { settings } => config::webdav_save(&mut ctx, settings),
         Action::ConfigWebDavUpload => config::webdav_upload(&mut ctx),
         Action::ConfigWebDavDownload => config::webdav_download(&mut ctx),
         Action::ConfigWebDavMigrateV1ToV2 => config::webdav_migrate_v1_to_v2(&mut ctx),
         Action::ConfigWebDavReset => config::webdav_reset(&mut ctx),
-        Action::ConfigWebDavSetEnabled { enabled } => config::webdav_set_enabled(&mut ctx, enabled),
         Action::ConfigWebDavJianguoyunQuickSetup { username, password } => {
             config::webdav_jianguoyun_quick_setup(&mut ctx, username, password)
         }
-        Action::ConfigS3Save { settings } => config::s3_save(&mut ctx, settings),
-        Action::ConfigS3CheckConnection => config::s3_check_connection(&mut ctx),
-        Action::ConfigS3FetchRemoteInfo { intent } => {
-            config::s3_fetch_remote_info(&mut ctx, intent)
-        }
-        Action::ConfigS3Upload => config::s3_upload(&mut ctx),
-        Action::ConfigS3Download => config::s3_download(&mut ctx),
-        Action::ConfigS3SetEnabled { enabled } => config::s3_set_enabled(&mut ctx, enabled),
-        Action::ConfigS3Reset => config::s3_reset(&mut ctx),
         Action::OpenClawWorkspaceOpenFile { filename } => {
             config::open_openclaw_workspace_file(&mut ctx, filename)
         }
@@ -1020,12 +555,9 @@ pub(crate) fn handle_action(
             );
             Ok(())
         }
-        Action::SetPreserveCodexOfficialAuth { enabled } => {
-            settings::set_preserve_codex_official_auth(&mut ctx, enabled)
+        Action::SetCodexUnifiedSessionHistory { enabled } => {
+            settings::set_codex_unified_session_history(&mut ctx, enabled)
         }
-        Action::SetCodexUnifiedSessionHistory { .. } => Err(AppError::Message(
-            "Codex history settings bypassed the background worker".to_string(),
-        )),
         Action::SetProxyEnabled { enabled } => settings::set_proxy_enabled(&mut ctx, enabled),
         Action::SetProxyListenAddress { address } => {
             settings::set_proxy_listen_address(&mut ctx, address)
@@ -1038,14 +570,12 @@ pub(crate) fn handle_action(
             settings::enable_proxy_and_auto_failover(&mut ctx, app_type)
         }
         Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
-        Action::SetPreferredEditor { command } => settings::set_preferred_editor(&mut ctx, command),
         Action::SetManagedProxyForCurrentApp { app_type, enabled } => queue_managed_proxy_action(
             ctx.app,
             ctx.proxy_req_tx,
             ctx.proxy_loading,
             app_type,
             enabled,
-            ctx.data.reload_token,
         ),
         Action::SetLanguage(lang) => {
             set_language(lang)?;
@@ -1086,15 +616,6 @@ pub(crate) fn handle_action(
             Ok(())
         }
     }
-}
-
-fn show_session_resume_fallback(app: &mut App, command: String, err: &AppError) {
-    log::debug!("failed to launch a terminal for session resume: {err}");
-    app.push_copyable_toast(
-        texts::tui_sessions_toast_resume_fallback(),
-        ToastKind::Warning,
-        command,
-    );
 }
 
 fn session_terminal_target(preferred_terminal: Option<&str>) -> String {
@@ -1196,378 +717,12 @@ mod tests {
         )
     }
 
-    fn run_action_with_sessions(
-        app: &mut App,
-        data: &mut UiData,
-        session_req_tx: &mpsc::Sender<SessionReq>,
-        action: Action,
-    ) -> Result<(), AppError> {
-        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
-        let mut proxy_loading = RequestTracker::default();
-        let mut webdav_loading = RequestTracker::default();
-        let mut update_check = RequestTracker::default();
-
-        handle_action(
-            &mut terminal,
-            app,
-            data,
-            None,
-            None,
-            None,
-            None,
-            &mut proxy_loading,
-            None,
-            Some(session_req_tx),
-            None,
-            &mut webdav_loading,
-            None,
-            &mut update_check,
-            None,
-            None,
-            action,
-        )
-    }
-
-    fn app_with_base_session_manifest() -> (App, TempDir) {
-        let manifest_dir = tempfile::tempdir().expect("manifest fixture directory");
-        let store = crate::session_manager::paged_manifest::PagedManifestStore::open_at(
-            manifest_dir.path(),
-        )
-        .expect("manifest fixture store");
-        let mut builder = store
-            .begin_build("claude")
-            .expect("manifest fixture builder");
-        builder
-            .push(crate::session_manager::SessionMeta {
-                provider_id: "claude".to_string(),
-                session_id: "session".to_string(),
-                source_path: Some("/tmp/session.jsonl".to_string()),
-                ..crate::session_manager::SessionMeta::default()
-            })
-            .expect("manifest fixture row");
-        let published = builder.publish().expect("publish manifest fixture");
-        let mut app = App::new(Some(AppType::Claude));
-        let _request_id = app.sessions.start_scan("claude".to_string());
-        let scope_epoch = app.sessions.scope_epoch;
-        assert!(app.sessions.remember_base_manifest(
-            scope_epoch,
-            "claude",
-            published.generation.clone(),
-            published.total_rows,
-            published.reader.clone(),
-        ));
-        assert!(app.sessions.apply_opened_manifest(
-            scope_epoch,
-            "claude",
-            published.generation,
-            published.total_rows,
-            published.first_page.page_index,
-            published.first_page.rows,
-            published.reader,
-        ));
-        (app, manifest_dir)
-    }
-
-    #[test]
-    fn returning_to_loaded_sessions_requests_a_fresh_cost_overlay() {
-        let (mut app, _manifest_dir) = app_with_base_session_manifest();
-        app.route = Route::Main;
-        let mut data = UiData::default();
-
-        run_action(&mut app, &mut data, Action::SwitchRoute(Route::Sessions))
-            .expect("return to Sessions");
-
-        assert!(matches!(app.route, Route::Sessions));
-        assert!(
-            app.sessions.take_cost_overlay_request(),
-            "route re-entry must recover discarded or stale background cost results"
-        );
-    }
-
-    #[test]
-    fn leaving_sessions_invalidates_the_active_cost_overlay() {
-        let (mut app, _manifest_dir) = app_with_base_session_manifest();
-        app.route = Route::Sessions;
-        let mut data = UiData::default();
-        app.sessions
-            .start_cost_overlay()
-            .expect("visible page cost request");
-        assert!(app.sessions.has_active_cost_overlay());
-
-        run_action(&mut app, &mut data, Action::SwitchRoute(Route::Main)).expect("leave Sessions");
-
-        assert!(
-            !app.sessions.has_active_cost_overlay(),
-            "leaving Sessions must invalidate the running projection immediately"
-        );
-    }
-
-    #[test]
-    fn switching_apps_from_sessions_invalidates_the_active_cost_overlay() {
-        let (mut app, _manifest_dir) = app_with_base_session_manifest();
-        app.route = Route::Sessions;
-        app.sessions
-            .start_cost_overlay()
-            .expect("visible page cost request");
-        assert!(app.sessions.has_active_cost_overlay());
-
-        let mut data = UiData::default();
-        apply_preloaded_app_switch(&mut app, &mut data, AppType::Codex, UiData::default());
-
-        assert!(
-            !app.sessions.has_active_cost_overlay(),
-            "an app switch must immediately retire the old app's projection"
-        );
-    }
-
-    #[test]
-    fn deep_search_disconnected_sender_settles_matching_request() {
-        let (mut app, _manifest_dir) = app_with_base_session_manifest();
-        let (tx, rx) = mpsc::channel();
-        drop(rx);
-
-        queue_sessions_deep_search(&mut app, Some(&tx), "needle".to_string());
-
-        assert_eq!(app.sessions.deep_search_query.as_deref(), Some("needle"));
-        assert!(app.sessions.deep_search_active.is_none());
-        let failed_view = app.sessions.desired_view_spec(Some("needle"));
-        assert!(app
-            .sessions
-            .materialization_failed_for_current_base(&failed_view));
-        let failed_request_seq = app.sessions.deep_search_seq;
-        queue_sessions_deep_search(&mut app, Some(&tx), "needle".to_string());
-        assert_eq!(app.sessions.deep_search_seq, failed_request_seq);
-        assert!(app.sessions.last_error.is_some());
-        assert!(matches!(
-            app.toast.as_ref(),
-            Some(toast) if toast.kind == ToastKind::Warning
-        ));
-    }
-
-    #[test]
-    fn manual_sessions_refresh_also_revalidates_the_open_transcript() {
-        let temp = tempfile::tempdir().expect("transcript fixture directory");
-        let source = temp.path().join("session.jsonl");
-        std::fs::write(
-            &source,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "response_item",
-                    "payload": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "message"}],
-                    }
-                })
-            ),
-        )
-        .expect("write transcript fixture");
-        let (reader, page) = crate::session_manager::transcript::open_transcript_at(
-            &temp.path().join("config"),
-            "codex",
-            &source.to_string_lossy(),
-        )
-        .expect("open transcript fixture");
-        let mut app = App::new(Some(AppType::Codex));
-        app.sessions.provider_id = Some("codex".to_string());
-        let key = "codex:session:test".to_string();
-        app.sessions.detail_key = Some(key.clone());
-        let message_request = app.sessions.start_message_load(key.clone());
-        assert!(app
-            .sessions
-            .finish_message_load(message_request, &key, reader, page));
-        let mut data = UiData::default();
-        let (tx, rx) = mpsc::channel();
-
-        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
-            .expect("manual refresh");
-
-        assert!(matches!(
-            rx.recv().expect("session-list refresh"),
-            SessionReq::Refresh {
-                provider_id,
-                force: true,
-                ..
-            } if provider_id == "codex"
-        ));
-        assert!(matches!(
-            rx.recv().expect("transcript refresh"),
-            SessionReq::LoadMessagePage {
-                key: queued_key,
-                page: 0,
-                refresh_page: 0,
-                refresh_message_key: Some(_),
-                ..
-            } if queued_key == key
-        ));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn manual_sessions_refresh_revalidates_transcript_while_list_scan_is_active() {
-        let temp = tempfile::tempdir().expect("transcript fixture directory");
-        let source = temp.path().join("session.jsonl");
-        std::fs::write(
-            &source,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "response_item",
-                    "payload": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "message"}],
-                    }
-                })
-            ),
-        )
-        .expect("write transcript fixture");
-        let (reader, page) = crate::session_manager::transcript::open_transcript_at(
-            &temp.path().join("config"),
-            "codex",
-            &source.to_string_lossy(),
-        )
-        .expect("open transcript fixture");
-        let mut app = App::new(Some(AppType::Codex));
-        app.sessions.provider_id = Some("codex".to_string());
-        let key = "codex:session:test".to_string();
-        app.sessions.detail_key = Some(key.clone());
-        let message_request = app.sessions.start_message_load(key.clone());
-        assert!(app
-            .sessions
-            .finish_message_load(message_request, &key, reader, page));
-        let scan_request = app.sessions.start_scan("codex".to_string());
-        let mut data = UiData::default();
-        let (tx, rx) = mpsc::channel();
-
-        run_action_with_sessions(&mut app, &mut data, &tx, Action::SessionsRefresh)
-            .expect("manual refresh during list scan");
-
-        assert_eq!(app.sessions.scan_active, Some(scan_request));
-        assert!(matches!(
-            rx.recv().expect("transcript refresh"),
-            SessionReq::LoadMessagePage {
-                key: queued_key,
-                page: 0,
-                refresh_page: 0,
-                refresh_message_key: Some(_),
-                ..
-            } if queued_key == key
-        ));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn deep_search_without_system_is_visible_and_settled() {
-        let mut app = App::new(Some(AppType::Claude));
-
-        queue_sessions_deep_search(&mut app, None, "needle".to_string());
-
-        assert_eq!(app.sessions.deep_search_query.as_deref(), Some("needle"));
-        assert!(app.sessions.deep_search_active.is_none());
-        assert_eq!(
-            app.sessions.last_error.as_deref(),
-            Some("sessions worker is not running")
-        );
-        assert!(app.pending_deep_search.is_none());
-    }
-
-    #[test]
-    fn stale_deep_search_send_failure_cannot_clear_newer_spinner() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.sessions.deep_search_active = Some(8);
-
-        let view = app.sessions.desired_view_spec(Some("old"));
-        settle_sessions_deep_search_dispatch_error(&mut app, 7, &view, "old failure".to_string());
-
-        assert_eq!(app.sessions.deep_search_active, Some(8));
-        assert!(app.sessions.last_error.is_none());
-        assert!(app.toast.is_none());
-    }
-
-    #[test]
-    fn deep_search_cancel_drops_dispatch_lane_but_preserves_new_debounce() {
-        let mut app = App::new(Some(AppType::Claude));
-        let mut data = UiData::default();
-        app.pending_deep_search = Some("old".to_string());
-        app.sessions.deep_search_pending = Some(("new".to_string(), 0));
-        app.sessions.deep_search_query = Some("old".to_string());
-        app.sessions.deep_search_active = Some(7);
-
-        run_action(&mut app, &mut data, Action::SessionsDeepSearchCancel)
-            .expect("cancel deep search");
-
-        assert!(app.pending_deep_search.is_none());
-        assert_eq!(
-            app.sessions.deep_search_pending.as_ref(),
-            Some(&("new".to_string(), 0))
-        );
-        assert!(app.sessions.deep_search_query.is_none());
-        assert!(app.sessions.deep_search_active.is_none());
-    }
-
-    #[test]
-    fn stale_debounced_query_is_rejected_before_dispatch() {
-        let (mut app, _manifest_dir) = app_with_base_session_manifest();
-        app.filter.input.set("new");
-        let (tx, rx) = mpsc::channel();
-
-        queue_pending_sessions_deep_search(&mut app, Some(&tx), "old".to_string());
-
-        assert!(rx.try_recv().is_err());
-        assert!(app.sessions.deep_search_active.is_none());
-        assert!(app.sessions.deep_search_query.is_none());
-        assert_eq!(app.sessions.deep_search_seq, 0);
-    }
-
     #[test]
     fn session_terminal_target_matches_upstream_setting_names() {
         assert_eq!(session_terminal_target(None), "terminal");
         assert_eq!(session_terminal_target(Some("")), "terminal");
         assert_eq!(session_terminal_target(Some("iterm2")), "iterm");
         assert_eq!(session_terminal_target(Some("ghostty")), "ghostty");
-    }
-
-    #[test]
-    fn session_resume_fallback_uses_copyable_toast_without_opening_an_overlay() {
-        let mut app = App::new(Some(AppType::Codex));
-        let command = "codex resume session-1".to_string();
-        let err = AppError::Message("Terminal resume is only supported on macOS".to_string());
-
-        show_session_resume_fallback(&mut app, command.clone(), &err);
-
-        assert!(matches!(app.overlay, Overlay::None));
-        let toast = app.toast.as_ref().expect("fallback toast");
-        assert_eq!(toast.kind, ToastKind::Warning);
-        assert_eq!(toast.message, texts::tui_sessions_toast_resume_fallback());
-        assert!(!toast.message.contains("macOS"));
-        assert_eq!(toast.copy_text(), Some(command.as_str()));
-    }
-
-    #[test]
-    fn clipboard_action_keeps_recovery_command_after_sending_terminal_request() {
-        let mut app = App::new(Some(AppType::Codex));
-        app.push_copyable_toast(
-            texts::tui_sessions_toast_resume_fallback(),
-            ToastKind::Warning,
-            "codex resume session-1",
-        );
-        let mut data = UiData::default();
-
-        run_action(
-            &mut app,
-            &mut data,
-            Action::CopyToClipboard {
-                text: "codex resume session-1".to_string(),
-            },
-        )
-        .expect("copy action");
-
-        let toast = app.toast.as_ref().expect("clipboard request toast");
-        assert_eq!(toast.kind, ToastKind::Info);
-        assert_eq!(toast.message, texts::tui_toast_clipboard_request_sent());
-        assert_eq!(toast.copy_text(), Some("codex resume session-1"));
     }
 
     fn write_invalid_legacy_config(home: &Path) {
@@ -1708,6 +863,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -1718,6 +874,7 @@ mod tests {
 
         let next_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: false,
@@ -1778,6 +935,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         let initial_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -1800,6 +958,7 @@ mod tests {
             Action::SetVisibleApps {
                 apps: crate::settings::VisibleApps {
                     claude: true,
+                    claude_desktop: true,
                     codex: false,
                     gemini: false,
                     opencode: false,
@@ -1828,6 +987,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         crate::settings::set_visible_apps(crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -1839,6 +999,7 @@ mod tests {
 
         let next_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: true,
@@ -1876,6 +1037,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         let initial_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -1895,6 +1057,7 @@ mod tests {
             Action::SetVisibleApps {
                 apps: crate::settings::VisibleApps {
                     claude: false,
+                    claude_desktop: false,
                     codex: false,
                     gemini: false,
                     opencode: false,
@@ -1924,6 +1087,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -1936,6 +1100,7 @@ mod tests {
 
         let next_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: false,
             gemini: false,
             opencode: false,
@@ -1982,6 +1147,7 @@ mod tests {
         let _env = EnvGuard::set_home(temp_home.path());
         let initial_visible_apps = crate::settings::VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -2008,6 +1174,7 @@ mod tests {
             Action::SwitchVisibleAppsToManual {
                 apps: crate::settings::VisibleApps {
                     claude: true,
+                    claude_desktop: true,
                     codex: false,
                     gemini: false,
                     opencode: false,

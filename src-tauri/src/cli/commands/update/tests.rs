@@ -4,11 +4,20 @@ use minisign::KeyPair;
 use serial_test::serial;
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
 use tokio::net::TcpListener;
+
+#[test]
+fn package_metadata_tracks_distribution_fork() {
+    assert_eq!(REPO_URL, "https://github.com/Ranshen1209/cc-switch-cli");
+}
+
+#[test]
+fn homebrew_upgrade_uses_distribution_tap() {
+    assert_eq!(
+        HOMEBREW_UPGRADE_COMMAND,
+        "brew upgrade Ranshen1209/cc-switch-cli/cc-switch-cli"
+    );
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -182,28 +191,6 @@ async fn spawn_update_manifest_server(
 
     let repo_url = format!("http://{addr}/team/cc-switch-cli");
     (repo_url, server)
-}
-
-fn linux_update_manifest(platform_key: &str, asset_arch: &str, base_url: &str) -> UpdateManifest {
-    UpdateManifest {
-        version: "v4.6.3".to_string(),
-        _notes: None,
-        _pub_date: None,
-        platforms: BTreeMap::from([(
-            platform_key.to_string(),
-            UpdatePlatformEntry {
-                url: format!("{base_url}/cc-switch-cli-linux-{asset_arch}-musl.tar.gz"),
-                signature: "musl-signature".to_string(),
-                variants: BTreeMap::from([(
-                    "glibc".to_string(),
-                    UpdatePlatformVariant {
-                        url: format!("{base_url}/cc-switch-cli-linux-{asset_arch}.tar.gz"),
-                        signature: "glibc-signature".to_string(),
-                    },
-                )]),
-            },
-        )]),
-    }
 }
 
 #[test]
@@ -478,30 +465,35 @@ fn validate_download_size_limit_rejects_oversized_asset() {
 }
 
 #[test]
-fn manifest_linux_asset_selection_is_strict_for_supported_architectures() {
-    for (platform_key, asset_arch) in [("linux-x86_64", "x64"), ("linux-aarch64", "arm64")] {
-        let manifest = linux_update_manifest(platform_key, asset_arch, "https://example.com");
-        let cases = [
-            (LinuxLibcPreference::Auto, "musl"),
-            (LinuxLibcPreference::Musl, "musl"),
-            (LinuxLibcPreference::Glibc, "glibc"),
-        ];
+fn select_manifest_asset_prefers_linux_glibc_variant_when_overridden() {
+    let manifest = UpdateManifest {
+        version: "v4.6.3".to_string(),
+        _notes: None,
+        _pub_date: None,
+        platforms: BTreeMap::from([(
+            "linux-x86_64".to_string(),
+            UpdatePlatformEntry {
+                url: "https://example.com/cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                signature: "musl-signature".to_string(),
+                variants: BTreeMap::from([(
+                    "glibc".to_string(),
+                    UpdatePlatformVariant {
+                        url: "https://example.com/cc-switch-cli-linux-x64.tar.gz".to_string(),
+                        signature: "glibc-signature".to_string(),
+                    },
+                )]),
+            },
+        )]),
+    };
 
-        for (preference, expected_libc) in cases {
-            let asset = select_manifest_asset(&manifest, platform_key, preference)
-                .expect("selected libc asset should resolve");
-            let expected_suffix = match expected_libc {
-                "musl" => format!("linux-{asset_arch}-musl.tar.gz"),
-                "glibc" => format!("linux-{asset_arch}.tar.gz"),
-                _ => unreachable!(),
-            };
-            assert!(
-                asset.url.ends_with(&expected_suffix),
-                "expected {expected_libc} for {platform_key}/{preference:?}, got {}",
-                asset.url
-            );
-        }
-    }
+    let asset = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Glibc)
+        .expect("glibc variant should be selected");
+
+    assert_eq!(
+        asset.url,
+        "https://example.com/cc-switch-cli-linux-x64.tar.gz"
+    );
+    assert_eq!(asset.signature, "glibc-signature");
 }
 
 #[test]
@@ -513,7 +505,7 @@ fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {
-                url: "https://example.com/cc-switch-cli-linux-x64.tar.gz".to_string(),
+                url: "https://example.com/glibc.tar.gz".to_string(),
                 signature: "glibc-signature".to_string(),
                 variants: BTreeMap::new(),
             },
@@ -523,11 +515,11 @@ fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
     let asset = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Glibc)
         .expect("glibc primary entry should be accepted");
 
-    assert!(asset.url.ends_with("cc-switch-cli-linux-x64.tar.gz"));
+    assert_eq!(asset.url, "https://example.com/glibc.tar.gz");
 }
 
 #[test]
-fn manifest_linux_auto_rejects_glibc_only_entry() {
+fn manifest_linux_asset_candidates_keep_musl_strict_when_forced() {
     let manifest = UpdateManifest {
         version: "v4.6.3".to_string(),
         _notes: None,
@@ -535,106 +527,57 @@ fn manifest_linux_auto_rejects_glibc_only_entry() {
         platforms: BTreeMap::from([(
             "linux-x86_64".to_string(),
             UpdatePlatformEntry {
-                url: "https://example.com/releases/v4.6.3-musl-fix/cc-switch-cli-linux-x64.tar.gz"
-                    .to_string(),
-                signature: "glibc-signature".to_string(),
-                variants: BTreeMap::new(),
+                url: "https://example.com/cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                signature: "musl-signature".to_string(),
+                variants: BTreeMap::from([(
+                    "glibc".to_string(),
+                    UpdatePlatformVariant {
+                        url: "https://example.com/cc-switch-cli-linux-x64.tar.gz".to_string(),
+                        signature: "glibc-signature".to_string(),
+                    },
+                )]),
             },
         )]),
     };
 
-    let err = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Auto)
-        .expect_err("auto mode must reject a glibc-only manifest entry");
+    let candidates =
+        manifest_asset_candidates(&manifest, "linux-x86_64", LinuxLibcPreference::Musl)
+            .expect("musl candidates should resolve");
 
-    let message = err.to_string();
-    assert!(message.contains("unexpected asset"));
-    assert!(message.contains("cc-switch-cli-linux-x64-musl.tar.gz"));
-
-    let glibc_asset = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Glibc)
-        .expect("explicit glibc mode should inspect only the asset filename");
-    assert!(glibc_asset.url.ends_with("cc-switch-cli-linux-x64.tar.gz"));
-}
-
-#[tokio::test]
-async fn manifest_linux_auto_does_not_request_glibc_after_musl_download_failure() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("listener should bind");
-    let addr = listener.local_addr().expect("local addr should resolve");
-    let musl_requests = Arc::new(AtomicUsize::new(0));
-    let glibc_requests = Arc::new(AtomicUsize::new(0));
-    let app = Router::new()
-        .route(
-            "/cc-switch-cli-linux-x64-musl.tar.gz",
-            get({
-                let requests = Arc::clone(&musl_requests);
-                move || {
-                    let requests = Arc::clone(&requests);
-                    async move {
-                        requests.fetch_add(1, Ordering::SeqCst);
-                        axum::http::StatusCode::NOT_FOUND
-                    }
-                }
-            }),
-        )
-        .route(
-            "/cc-switch-cli-linux-x64.tar.gz",
-            get({
-                let requests = Arc::clone(&glibc_requests);
-                move || {
-                    let requests = Arc::clone(&requests);
-                    async move {
-                        requests.fetch_add(1, Ordering::SeqCst);
-                        axum::http::StatusCode::OK
-                    }
-                }
-            }),
-        );
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("server should run");
-    });
-    let manifest = linux_update_manifest("linux-x86_64", "x64", &format!("http://{addr}"));
-    let selected = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Auto)
-        .expect("auto mode should select musl");
-    let client = create_http_client().expect("http client should initialize");
-
-    let err = match download_manifest_release_asset(&client, &selected, None).await {
-        Ok(_) => panic!("failed musl download must abort the update"),
-        Err(err) => err,
-    };
-
-    assert!(err
-        .to_string()
-        .contains("current installation was not changed"));
-    assert_eq!(musl_requests.load(Ordering::SeqCst), 1);
     assert_eq!(
-        glibc_requests.load(Ordering::SeqCst),
-        0,
-        "regression for #398: auto mode must never request glibc after musl fails"
+        candidates,
+        vec![ManifestAsset {
+            url: "https://example.com/cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+            signature: "musl-signature".to_string(),
+        }]
     );
-    server.abort();
 }
 
 #[test]
-fn legacy_linux_asset_selection_is_strict_for_supported_architectures() {
-    for (rust_arch, asset_arch) in [("x86_64", "x64"), ("aarch64", "arm64")] {
-        for (preference, musl) in [
-            (LinuxLibcPreference::Auto, true),
-            (LinuxLibcPreference::Musl, true),
-            (LinuxLibcPreference::Glibc, false),
-        ] {
-            let candidates = release_asset_candidates_for_platform("linux", rust_arch, preference)
-                .expect("legacy Linux candidates should resolve");
-            let libc_suffix = if musl { "-musl" } else { "" };
-            assert_eq!(
-                candidates,
-                vec![format!(
-                    "cc-switch-cli-linux-{asset_arch}{libc_suffix}.tar.gz"
-                )],
-                "unexpected legacy asset for {rust_arch}/{preference:?}"
-            );
-        }
-    }
+fn legacy_linux_asset_candidates_follow_glibc_override() {
+    let candidates =
+        release_asset_candidates_for_platform("linux", "x86_64", LinuxLibcPreference::Glibc)
+            .expect("glibc candidates should resolve");
+
+    assert_eq!(
+        candidates,
+        vec![
+            "cc-switch-cli-linux-x64.tar.gz".to_string(),
+            "cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn legacy_linux_asset_candidates_keep_musl_strict_when_forced() {
+    let candidates =
+        release_asset_candidates_for_platform("linux", "x86_64", LinuxLibcPreference::Musl)
+            .expect("musl candidates should resolve");
+
+    assert_eq!(
+        candidates,
+        vec!["cc-switch-cli-linux-x64-musl.tar.gz".to_string(),]
+    );
 }
 
 #[tokio::test]

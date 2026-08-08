@@ -1,8 +1,6 @@
-use crate::app_config::{AppType, McpApps, McpServer};
+use crate::app_config::{AppType, McpApps};
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use super::app::EditorState;
 
@@ -10,14 +8,9 @@ mod codex_config;
 mod mcp;
 mod prompt;
 mod provider_json;
-mod provider_request_overrides;
 mod provider_state;
 mod provider_state_loading;
 mod provider_templates;
-mod s3;
-mod webdav;
-
-pub(crate) const PROMPT_FORM_SPLIT_MIN_BODY_WIDTH: u16 = 84;
 
 #[cfg(test)]
 mod tests;
@@ -25,7 +18,7 @@ mod tests;
 #[cfg(test)]
 pub(crate) use provider_json::strip_provider_internal_fields;
 
-pub(crate) use super::text_edit::{TextEditSession, TextInput};
+pub(crate) use super::text_edit::TextInput;
 pub(crate) use codex_config::parse_codex_config_snippet;
 pub(crate) use provider_json::claude_disable_auto_upgrade_enabled;
 pub(crate) use provider_json::claude_hide_attribution_enabled;
@@ -33,26 +26,15 @@ pub(crate) use provider_json::claude_teammates_enabled;
 pub(crate) use provider_json::claude_tool_search_enabled;
 pub(crate) use provider_json::strip_common_config_from_settings;
 pub(crate) use provider_json::{normalize_usage_interval, normalize_usage_timeout};
-pub(crate) use provider_request_overrides::{
-    format_local_proxy_body_override, format_local_proxy_header_overrides,
-    is_valid_http_header_name, is_valid_http_header_value, normalize_local_proxy_header_overrides,
-    parse_local_proxy_body_override, parse_local_proxy_header_overrides,
-    user_agent_picker_option_count, user_agent_picker_selection, USER_AGENT_PICKER_CUSTOM_INDEX,
-    USER_AGENT_PICKER_NO_OVERRIDE_INDEX, USER_AGENT_PICKER_PRESET_OFFSET, USER_AGENT_PRESETS,
-};
 pub(crate) use provider_state::resolve_provider_id_for_submit;
 pub(crate) use provider_state::{
     detect_balance_provider_for_usage_query, detect_coding_plan_provider_for_usage_query,
 };
-pub(crate) use s3::{S3Preset, S3SyncField, S3SyncFormState};
-pub(crate) use webdav::{WebDavSyncField, WebDavSyncFormState};
 
-pub(crate) use crate::claude_model_config::ClaudeModelRole;
 pub(crate) use crate::hermes_config::{HERMES_API_MODES, HERMES_DEFAULT_API_MODE};
 pub(crate) use crate::openclaw_config::{
     OPENCLAW_API_PROTOCOLS, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
 };
-pub(crate) use crate::usage_script::UsageQueryTemplate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiAuthType {
@@ -90,12 +72,6 @@ pub enum ClaudeApiFormat {
     OpenAiChat,
     OpenAiResponses,
     GeminiNative,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaudeModelPickerColumn {
-    Model,
-    OneM,
 }
 
 impl ClaudeApiFormat {
@@ -158,51 +134,16 @@ impl ClaudeApiFormat {
 
     pub fn requires_proxy_for_app(self, app_type: &AppType) -> bool {
         match app_type {
-            AppType::Codex => {
-                matches!(
-                    self,
-                    ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::Anthropic
-                )
-            }
+            AppType::Codex => matches!(
+                self,
+                ClaudeApiFormat::OpenAiChat | ClaudeApiFormat::Anthropic
+            ),
             _ => self.requires_proxy(),
         }
     }
 
     pub fn requires_proxy(self) -> bool {
         !matches!(self, ClaudeApiFormat::Anthropic)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptCacheRoutingMode {
-    Auto,
-    Enabled,
-    Disabled,
-}
-
-impl PromptCacheRoutingMode {
-    pub fn from_raw(value: &str) -> Self {
-        match value {
-            "enabled" => Self::Enabled,
-            "disabled" => Self::Disabled,
-            _ => Self::Auto,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Enabled => "enabled",
-            Self::Disabled => "disabled",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            Self::Auto => Self::Enabled,
-            Self::Enabled => Self::Disabled,
-            Self::Disabled => Self::Auto,
-        }
     }
 }
 
@@ -255,6 +196,7 @@ pub enum ProviderAddField {
     ClaudeFallbackModel,
     ClaudeAdvancedDivider,
     ClaudeQuickConfig,
+    ClaudeDesktopModelConfig,
     ClaudeHideAttribution,
     ClaudeTeammates,
     ClaudeToolSearch,
@@ -262,16 +204,12 @@ pub enum ProviderAddField {
     CodexOAuthAccount,
     CodexFastMode,
     CodexBaseUrl,
-    CodexAnthropicApiKeyField,
-    CodexImpersonateClaudeCode,
-    CodexMaxOutputTokens,
     // Retired from the form (matches upstream): the model is configured via the
     // catalog / config, not a standalone row. Match arms + `codex_model` state
     // (loaded from config, used as the serialization fallback) are kept.
     #[allow(dead_code)]
     CodexModel,
     CodexAdvancedDivider,
-    CodexPromptCacheRouting,
     CodexLocalRouting,
     CodexQuickConfig,
     CodexGoalMode,
@@ -283,7 +221,6 @@ pub enum ProviderAddField {
     #[allow(dead_code)]
     CodexEnvKey,
     CodexApiKey,
-    LocalProxySettings,
     GeminiAuthType,
     GeminiApiKey,
     GeminiBaseUrl,
@@ -318,19 +255,7 @@ pub enum ProviderFormPage {
     CodexQuickConfig,
     CodexLocalRouting,
     CodexModelCatalog,
-    LocalProxySettings,
     UsageQuery,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalProxySettingsField {
-    UserAgent,
-    HeaderOverrides,
-    BodyOverrides,
-}
-
-impl LocalProxySettingsField {
-    pub const ALL: [Self; 3] = [Self::UserAgent, Self::HeaderOverrides, Self::BodyOverrides];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +263,16 @@ pub enum HermesModelField {
     Id(usize),
     Name(usize),
     ContextLength(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageQueryTemplate {
+    Custom,
+    General,
+    NewApi,
+    GitHubCopilot,
+    TokenPlan,
+    Balance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,18 +287,6 @@ pub enum UsageQueryField {
     AutoInterval,
     CodingPlanProvider,
     Script,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProviderTextField {
-    Main(ProviderAddField),
-    UsageQuery(UsageQueryField),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlineFieldError<F> {
-    pub field: F,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,7 +388,6 @@ pub enum McpAddField {
     Args,
     Url,
     Env,
-    Headers,
     AppClaude,
     AppCodex,
     AppGemini,
@@ -487,14 +409,8 @@ pub enum McpTransport {
     Sse,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpKeyValueKind {
-    Env,
-    Headers,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct McpKeyValueRow {
+pub struct McpEnvVarRow {
     pub key: String,
     pub value: String,
 }
@@ -508,13 +424,11 @@ pub struct ProviderAddFormState {
     pub page: ProviderFormPage,
     pub template_idx: usize,
     pub field_idx: usize,
-    pub text_edit: Option<TextEditSession<ProviderTextField>>,
-    pub field_errors: Vec<InlineFieldError<ProviderAddField>>,
+    pub editing: bool,
     pub usage_query_touched: bool,
     pub usage_query_field_idx: usize,
-    pub usage_query_field_errors: Vec<InlineFieldError<UsageQueryField>>,
+    pub usage_query_editing: bool,
     pub codex_local_routing_field_idx: usize,
-    pub local_proxy_settings_field_idx: usize,
     pub codex_model_catalog_idx: usize,
     pub codex_model_catalog_field: CodexModelCatalogField,
     pub extra: Value,
@@ -529,23 +443,26 @@ pub struct ProviderAddFormState {
     pub codex_preview_section: CodexPreviewSection,
     pub codex_auth_scroll: usize,
     pub codex_config_scroll: usize,
-    claude_fallback_model_touched: bool,
-    claude_model_role_touched: [bool; ClaudeModelRole::COUNT],
+    claude_model_config_touched: bool,
 
     pub claude_api_key: TextInput,
     pub claude_api_key_field: ClaudeApiKeyField,
     pub claude_base_url: TextInput,
     pub claude_api_format: ClaudeApiFormat,
     pub claude_model: TextInput,
+    pub claude_reasoning_model: TextInput,
     pub claude_haiku_model: TextInput,
     pub claude_sonnet_model: TextInput,
     pub claude_opus_model: TextInput,
+    /// Desktop Direct 模式专用：`ANTHROPIC_DEFAULT_FABLE_MODEL` 映射目标。
+    /// 对 Claude 应用无效（Claude 模型配置子页不含 Fable 行）。
     pub claude_fable_model: TextInput,
-    pub claude_subagent_model: TextInput,
-    claude_sonnet_one_m: bool,
-    claude_opus_one_m: bool,
-    claude_fable_one_m: bool,
-    claude_subagent_one_m: bool,
+    /// Desktop Direct 模式专用：4路由的 `supports1m` 标志。
+    /// 默认 `true`（与 `DEFAULT_PROXY_ROUTES` 一致）；对 Claude 应用无效。
+    pub claude_desktop_haiku_1m: bool,
+    pub claude_desktop_sonnet_1m: bool,
+    pub claude_desktop_opus_1m: bool,
+    pub claude_desktop_fable_1m: bool,
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
     pub claude_teammates: bool,
@@ -554,7 +471,6 @@ pub struct ProviderAddFormState {
     claude_tool_search_touched: bool,
     pub claude_disable_auto_upgrade: bool,
     claude_disable_auto_upgrade_touched: bool,
-    pub is_full_url: bool,
     pub claude_quick_config_idx: usize,
     pub codex_goal_mode: bool,
     codex_goal_mode_touched: bool,
@@ -563,8 +479,6 @@ pub struct ProviderAddFormState {
     pub codex_quick_config_idx: usize,
     pub codex_oauth_account_id: Option<String>,
     pub codex_fast_mode: bool,
-    pub codex_impersonate_claude_code: bool,
-    pub codex_max_output_tokens: TextInput,
 
     pub codex_base_url: TextInput,
     pub codex_model: TextInput,
@@ -573,17 +487,12 @@ pub struct ProviderAddFormState {
     pub codex_env_key: TextInput,
     pub codex_api_key: TextInput,
     pub codex_chat_reasoning: CodexChatReasoningConfig,
-    pub codex_prompt_cache_routing: PromptCacheRoutingMode,
     pub codex_model_catalog: Vec<CodexModelCatalogRow>,
     /// Independent "需要本地路由映射" toggle (decoupled from the upstream
     /// format, mirroring upstream a4eb5f37). Gates model-mapping / reasoning
     /// display and persistence; no dedicated stored field — initialized from
     /// whether the provider already carries a catalog.
     pub codex_local_routing_enabled: bool,
-
-    pub custom_user_agent: TextInput,
-    pub local_proxy_header_overrides: BTreeMap<String, String>,
-    pub local_proxy_body_override: Option<Value>,
 
     pub gemini_auth_type: GeminiAuthType,
     pub gemini_api_key: TextInput,
@@ -593,7 +502,6 @@ pub struct ProviderAddFormState {
     pub openclaw_user_agent: bool,
     pub openclaw_models: Vec<Value>,
     pub usage_query_enabled: bool,
-    pub usage_query_official_subscription: bool,
     pub usage_query_template: UsageQueryTemplate,
     pub usage_query_api_key: TextInput,
     pub usage_query_base_url: TextInput,
@@ -622,50 +530,24 @@ pub struct ProviderAddFormState {
     initial_snapshot: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum McpArgsState {
-    /// Canonical argv remains in `extra.server.args` and has not been copied or
-    /// joined for the inline editor.
-    Imported,
-    /// Canonical argv was created by a template or an explicit inline edit.
-    Materialized(Vec<String>),
-}
-
-#[derive(Debug, Clone)]
-struct McpFormSnapshot {
-    source: Arc<McpServer>,
-    id: String,
-    name: String,
-    server_type: McpTransport,
-    command: String,
-    args_state: McpArgsState,
-    url: String,
-    env_rows: Vec<McpKeyValueRow>,
-    header_rows: Vec<McpKeyValueRow>,
-    apps: McpApps,
-}
-
 #[derive(Debug, Clone)]
 pub struct McpAddFormState {
     pub mode: FormMode,
     pub focus: FormFocus,
     pub template_idx: usize,
     pub field_idx: usize,
-    pub text_edit: Option<TextEditSession<McpAddField>>,
-    pub field_errors: Vec<InlineFieldError<McpAddField>>,
-    source: Arc<McpServer>,
+    pub editing: bool,
+    pub extra: Value,
     pub id: TextInput,
     pub name: TextInput,
     pub server_type: McpTransport,
     pub command: TextInput,
     pub args: TextInput,
-    args_state: McpArgsState,
     pub url: TextInput,
-    pub env_rows: Vec<McpKeyValueRow>,
-    pub header_rows: Vec<McpKeyValueRow>,
+    pub env_rows: Vec<McpEnvVarRow>,
     pub apps: McpApps,
     pub json_scroll: usize,
-    initial_snapshot: Option<McpFormSnapshot>,
+    initial_snapshot: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -673,8 +555,7 @@ pub struct PromptMetaFormState {
     pub mode: FormMode,
     pub focus: FormFocus,
     pub field_idx: usize,
-    pub text_edit: Option<TextEditSession<PromptMetaField>>,
-    pub field_errors: Vec<InlineFieldError<PromptMetaField>>,
+    pub editing: bool,
     pub id: TextInput,
     pub name: TextInput,
     pub description: TextInput,
@@ -685,23 +566,19 @@ pub struct PromptMetaFormState {
 // This controls whether the main UI should consider itself in "editing mode" and e.g. respond to vim-style navigation.
 impl ProviderAddFormState {
     pub fn is_editing(&self) -> bool {
-        self.text_edit.is_some()
-    }
-
-    pub(crate) fn opencode_model_original_id(&self) -> Option<&str> {
-        self.opencode_model_original_id.as_deref()
+        self.editing || self.usage_query_editing
     }
 }
 
 impl McpAddFormState {
     pub fn is_editing(&self) -> bool {
-        self.text_edit.is_some()
+        self.editing
     }
 }
 
 impl PromptMetaFormState {
     pub fn is_editing(&self) -> bool {
-        self.text_edit.is_some() || matches!(self.focus, FormFocus::Content)
+        self.editing || matches!(self.focus, FormFocus::Content)
     }
 }
 
@@ -714,8 +591,6 @@ pub enum FormState {
     ProviderAdd(ProviderAddFormState),
     McpAdd(McpAddFormState),
     PromptMeta(PromptMetaFormState),
-    S3Sync(S3SyncFormState),
-    WebDavSync(WebDavSyncFormState),
 }
 
 impl FormState {
@@ -724,8 +599,6 @@ impl FormState {
             FormState::ProviderAdd(form) => form.has_unsaved_changes(),
             FormState::McpAdd(form) => form.has_unsaved_changes(),
             FormState::PromptMeta(form) => form.has_unsaved_changes(),
-            FormState::S3Sync(form) => form.has_unsaved_changes(),
-            FormState::WebDavSync(form) => form.has_unsaved_changes(),
         }
     }
 
@@ -734,8 +607,6 @@ impl FormState {
             FormState::ProviderAdd(form) => form.is_editing(),
             FormState::McpAdd(form) => form.is_editing(),
             FormState::PromptMeta(form) => form.is_editing(),
-            FormState::S3Sync(form) => form.is_editing(),
-            FormState::WebDavSync(form) => form.is_editing(),
         }
     }
 }

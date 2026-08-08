@@ -109,147 +109,6 @@ fn insert_codex_managed_mcp(config: &mut MultiAppConfig) {
 }
 
 #[test]
-fn reapply_codex_official_live_resyncs_mcp_servers() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let live_auth = json!({
-        "auth_mode": "chatgpt",
-        "OPENAI_API_KEY": null,
-        "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
-    });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
-
-    let mut initial_config = MultiAppConfig::default();
-    {
-        let manager = initial_config
-            .get_manager_mut(&AppType::Codex)
-            .expect("codex manager");
-        let mut official = Provider::with_id(
-            "official-provider".to_string(),
-            "Official".to_string(),
-            json!({
-                "auth": {
-                    "auth_mode": "chatgpt",
-                    "OPENAI_API_KEY": null,
-                    "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
-                },
-                "config": ""
-            }),
-            None,
-        );
-        official.category = Some("official".to_string());
-        manager
-            .providers
-            .insert("official-provider".to_string(), official);
-    }
-    insert_codex_managed_mcp(&mut initial_config);
-
-    let state = state_from_config(initial_config);
-    ProviderService::switch(&state, AppType::Codex, "official-provider")
-        .expect("switch to official provider");
-    let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
-        .expect("read config.toml after switch");
-    assert!(
-        live.contains("mcp_servers.echo-server"),
-        "switch should sync enabled MCP servers into live"
-    );
-
-    let reapplied =
-        cc_switch_lib::reapply_current_codex_official_live(&state).expect("reapply official live");
-    assert!(
-        reapplied,
-        "current provider is official, reapply should run"
-    );
-
-    let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
-        .expect("read config.toml after reapply");
-    assert!(
-        live.contains("mcp_servers.echo-server"),
-        "reapply must re-project enabled MCP servers after the full live rewrite, got: {live}"
-    );
-}
-
-#[test]
-fn codex_unified_session_bucket_stays_live_only_across_provider_switches() {
-    let _guard = lock_test_mutex();
-    reset_test_fs();
-    let _home = ensure_test_home();
-
-    let live_auth = json!({
-        "auth_mode": "chatgpt",
-        "OPENAI_API_KEY": null,
-        "tokens": { "access_token": "official-oauth-token", "account_id": "acct" }
-    });
-    write_codex_live_atomic(&live_auth, Some("")).expect("seed official live auth");
-
-    let mut settings = AppSettings::load();
-    settings.unify_codex_session_history = true;
-    update_settings(settings).expect("enable unified Codex session history");
-
-    let mut initial_config = MultiAppConfig::default();
-    {
-        let manager = initial_config
-            .get_manager_mut(&AppType::Codex)
-            .expect("codex manager");
-        let mut official = Provider::with_id(
-            "official-provider".to_string(),
-            "Official".to_string(),
-            json!({
-                "auth": {
-                    "auth_mode": "chatgpt",
-                    "tokens": { "access_token": "official-oauth-token" }
-                },
-                "config": "model_reasoning_effort = \"medium\"\n"
-            }),
-            None,
-        );
-        official.category = Some("official".to_string());
-        manager
-            .providers
-            .insert("official-provider".to_string(), official);
-        manager.providers.insert(
-            "custom-provider".to_string(),
-            codex_provider(
-                "custom-provider",
-                "Custom",
-                "sk-custom",
-                "custom",
-                "https://custom.example/v1",
-            ),
-        );
-    }
-    insert_codex_managed_mcp(&mut initial_config);
-
-    let state = state_from_config(initial_config);
-    ProviderService::switch(&state, AppType::Codex, "official-provider")
-        .expect("switch to official provider");
-
-    let live = std::fs::read_to_string(cc_switch_lib::get_codex_config_path())
-        .expect("read official live config");
-    assert!(live.contains("model_provider = \"custom\""));
-    assert!(live.contains("[model_providers.custom]"));
-    assert!(live.contains("[mcp_servers.echo-server]"));
-
-    ProviderService::switch(&state, AppType::Codex, "custom-provider")
-        .expect("switch away from official provider");
-
-    let providers = ProviderService::list(&state, AppType::Codex).expect("list providers");
-    let stored_official = providers
-        .get("official-provider")
-        .expect("stored official provider");
-    let stored_config = stored_official
-        .settings_config
-        .get("config")
-        .and_then(serde_json::Value::as_str)
-        .expect("stored official config");
-    assert!(!stored_config.contains("model_provider = \"custom\""));
-    assert!(!stored_config.contains("[model_providers.custom]"));
-    assert!(!stored_config.contains("mcp_servers"));
-}
-
-#[test]
 fn provider_service_switch_codex_updates_live_and_config() {
     let _guard = lock_test_mutex();
     reset_test_fs();
@@ -3506,8 +3365,7 @@ fn provider_service_import_openclaw_providers_from_live_imports_valid_live_provi
 }
 
 #[test]
-fn provider_service_import_openclaw_providers_from_live_imports_missing_live_providers_incrementally(
-) {
+fn provider_service_import_openclaw_providers_from_live_updates_existing_and_imports_missing() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3564,8 +3422,8 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
     let providers = openclaw_db_providers(&state);
 
     assert_eq!(
-        imported, 1,
-        "import should skip existing DB rows and only add missing live providers"
+        imported, 2,
+        "import should refresh existing DB rows and add missing live providers"
     );
     assert_eq!(providers.len(), 2);
     assert!(providers.contains_key("openai"));
@@ -3580,9 +3438,9 @@ fn provider_service_import_openclaw_providers_from_live_imports_missing_live_pro
     assert_eq!(
         providers
             .get("openai")
-            .expect("existing provider should be preserved")
+            .expect("existing provider should be refreshed")
             .settings_config["baseUrl"],
-        json!("https://existing.example/v1")
+        json!("https://api.example.com/v1")
     );
     assert_eq!(
         providers
@@ -3654,7 +3512,7 @@ fn provider_service_import_openclaw_providers_from_live_imports_typed_legacy_ali
 }
 
 #[test]
-fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() {
+fn provider_service_import_openclaw_live_skips_blank_ids_and_updates_existing_entries() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -3714,8 +3572,8 @@ fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() 
         .expect("import openclaw live config should succeed");
 
     assert_eq!(
-        imported, 1,
-        "import should skip blank ids and existing DB rows, then add newcomers"
+        imported, 2,
+        "import should skip blank ids, refresh existing DB rows, and add newcomers"
     );
 
     let providers = openclaw_db_providers(&state);
@@ -3738,9 +3596,9 @@ fn provider_service_import_openclaw_live_skips_blank_ids_and_existing_entries() 
     assert_eq!(
         providers
             .get("existing")
-            .expect("existing provider should be preserved")
+            .expect("existing provider should be refreshed")
             .settings_config["baseUrl"],
-        json!("https://existing-db.example/v1")
+        json!("https://existing-live.example/v1")
     );
     assert_eq!(
         providers
@@ -3947,7 +3805,7 @@ fn provider_service_import_openclaw_providers_from_live_preserves_saved_name_for
 
     let imported = ProviderService::import_openclaw_providers_from_live(&state)
         .expect("import openclaw live config should succeed");
-    assert_eq!(imported, 0, "import should skip the existing row");
+    assert_eq!(imported, 1, "import should refresh the existing row");
 
     let providers = openclaw_db_providers(&state);
     let openai = providers
@@ -3960,9 +3818,10 @@ fn provider_service_import_openclaw_providers_from_live_preserves_saved_name_for
     );
     assert_eq!(
         openai.settings_config["baseUrl"],
-        json!("https://saved.example/v1"),
-        "existing OpenClaw rows should not be overwritten by live import"
+        json!("https://live.example/v1"),
+        "existing OpenClaw rows should refresh their live settings"
     );
+    assert_eq!(openai.notes.as_deref(), Some("customized row"));
 }
 
 #[test]

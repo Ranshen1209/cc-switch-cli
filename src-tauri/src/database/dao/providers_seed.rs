@@ -5,6 +5,8 @@
 
 use crate::app_config::AppType;
 
+pub(crate) const CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID: &str = "claude-desktop-official";
+
 pub(crate) struct OfficialProviderSeed {
     pub id: &'static str,
     pub app_type: AppType,
@@ -21,6 +23,15 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         app_type: AppType::Claude,
         name: "Claude Official",
         website_url: "https://www.anthropic.com/claude-code",
+        icon: "anthropic",
+        icon_color: "#D4915D",
+        settings_config_json: r#"{"env":{}}"#,
+    },
+    OfficialProviderSeed {
+        id: CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
+        app_type: AppType::ClaudeDesktop,
+        name: "Claude Desktop Official",
+        website_url: "https://claude.ai/download",
         icon: "anthropic",
         icon_color: "#D4915D",
         settings_config_json: r#"{"env":{}}"#,

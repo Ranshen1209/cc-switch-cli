@@ -2,12 +2,11 @@ use crate::app_config::AppType;
 use crate::cli::i18n;
 use crate::cli::i18n::texts;
 
-use super::app::{App, Focus, Overlay, SettingsItem};
+use super::app::{App, Overlay};
 use super::data::UiData;
 use super::form::{
     CodexLocalRoutingField, CodexModelCatalogField, CodexPreviewSection, FormFocus, FormMode,
-    FormState, LocalProxySettingsField, McpAddField, McpKeyValueKind, ProviderAddField,
-    ProviderFormPage, S3SyncField, UsageQueryField, UsageQueryTemplate, WebDavSyncField,
+    FormState, ProviderAddField, ProviderFormPage, UsageQueryField, UsageQueryTemplate,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +48,6 @@ impl HelpContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HelpTarget {
     Global,
-    Sessions,
-    FailoverQueue,
-    PreferredEditor,
-    CodexOfficialAuthPreservation,
-    CodexUnifiedSessionHistory,
     ProviderTemplate,
     ProviderField {
         app_type: AppType,
@@ -70,9 +64,6 @@ enum HelpTarget {
     CodexLocalRoutingField {
         field: CodexLocalRoutingField,
     },
-    LocalProxySettingsField {
-        field: LocalProxySettingsField,
-    },
     CodexModelCatalogField {
         field: CodexModelCatalogField,
     },
@@ -80,15 +71,6 @@ enum HelpTarget {
         template: UsageQueryTemplate,
     },
     UsageQueryInstructions,
-    S3Field {
-        field: S3SyncField,
-    },
-    WebDavField {
-        field: WebDavSyncField,
-    },
-    McpField {
-        field: McpAddField,
-    },
     Empty,
 }
 
@@ -106,12 +88,22 @@ fn current_help_target(app: &App) -> HelpTarget {
             Overlay::ClaudeApiFormatPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeApiFormat)
             }
-            Overlay::UserAgentPicker { .. } => {
-                provider_local_proxy_overlay_target(app, LocalProxySettingsField::UserAgent)
-            }
-            Overlay::ExternalEditorPicker { .. } => HelpTarget::PreferredEditor,
             Overlay::ClaudeModelPicker { .. } => {
-                provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
+                let field = app
+                    .form
+                    .as_ref()
+                    .and_then(|f| match f {
+                        FormState::ProviderAdd(p) => {
+                            if matches!(p.app_type, crate::app_config::AppType::ClaudeDesktop) {
+                                Some(ProviderAddField::ClaudeDesktopModelConfig)
+                            } else {
+                                Some(ProviderAddField::ClaudeModelConfig)
+                            }
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(ProviderAddField::ClaudeModelConfig);
+                provider_field_overlay_target(app, field)
             }
             Overlay::HermesModelsPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::HermesModels)
@@ -119,74 +111,12 @@ fn current_help_target(app: &App) -> HelpTarget {
             Overlay::ManagedAccountPicker { .. } | Overlay::ManagedAccountActionPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::CodexOAuthAccount)
             }
-            Overlay::FailoverQueueManager { .. } => HelpTarget::FailoverQueue,
-            Overlay::SessionProjectPicker(_) => HelpTarget::Sessions,
-            Overlay::McpKeyValuePicker { kind, .. } => HelpTarget::McpField {
-                field: match kind {
-                    McpKeyValueKind::Env => McpAddField::Env,
-                    McpKeyValueKind::Headers => McpAddField::Headers,
-                },
-            },
-            Overlay::McpKeyValueEntryEditor(editor) => HelpTarget::McpField {
-                field: match editor.kind {
-                    McpKeyValueKind::Env => McpAddField::Env,
-                    McpKeyValueKind::Headers => McpAddField::Headers,
-                },
-            },
-            Overlay::S3PresetPicker { .. } => HelpTarget::S3Field {
-                field: S3SyncField::Preset,
-            },
             _ => HelpTarget::Global,
         };
     }
 
     if app.editor.is_some() || app.filter.active {
         return HelpTarget::Empty;
-    }
-
-    if matches!(app.route, super::route::Route::Sessions) {
-        return HelpTarget::Sessions;
-    }
-
-    if matches!(app.route, super::route::Route::Settings) && matches!(app.focus, Focus::Content) {
-        match SettingsItem::ALL.get(app.settings_idx) {
-            Some(SettingsItem::PreferredEditor) => return HelpTarget::PreferredEditor,
-            Some(SettingsItem::PreserveCodexOfficialAuth) => {
-                return HelpTarget::CodexOfficialAuthPreservation;
-            }
-            Some(SettingsItem::CodexUnifiedSessionHistory) => {
-                return HelpTarget::CodexUnifiedSessionHistory;
-            }
-            _ => {}
-        }
-    }
-
-    if let Some(FormState::S3Sync(form)) = app.form.as_ref() {
-        return HelpTarget::S3Field {
-            field: form.selected_field(),
-        };
-    }
-
-    if let Some(FormState::WebDavSync(form)) = app.form.as_ref() {
-        return HelpTarget::WebDavField {
-            field: form.selected_field(),
-        };
-    }
-
-    if let Some(FormState::McpAdd(form)) = app.form.as_ref() {
-        return match form.focus {
-            FormFocus::Fields => {
-                let fields = form.fields();
-                fields
-                    .get(form.field_idx.min(fields.len().saturating_sub(1)))
-                    .copied()
-                    .map_or(HelpTarget::Global, |field| match field {
-                        McpAddField::Env | McpAddField::Headers => HelpTarget::McpField { field },
-                        _ => HelpTarget::Global,
-                    })
-            }
-            _ => HelpTarget::Global,
-        };
     }
 
     let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() else {
@@ -220,17 +150,6 @@ fn current_help_target(app: &App) -> HelpTarget {
                 .selected_codex_local_routing_field()
                 .map_or(HelpTarget::Empty, |field| {
                     HelpTarget::CodexLocalRoutingField { field }
-                }),
-            _ => HelpTarget::Empty,
-        };
-    }
-
-    if matches!(provider.page, ProviderFormPage::LocalProxySettings) {
-        return match provider.focus {
-            FormFocus::Fields => provider
-                .selected_local_proxy_settings_field()
-                .map_or(HelpTarget::Empty, |field| {
-                    HelpTarget::LocalProxySettingsField { field }
                 }),
             _ => HelpTarget::Empty,
         };
@@ -303,38 +222,6 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::Global => {
             HelpContent::new(texts::tui_help_title(), global_help_lines(app, data))
         }
-        HelpTarget::Sessions => HelpContent::new(
-            texts::tui_sessions_title(),
-            help_lines(
-                "会话始终只显示当前应用，结果由项目范围 × / 搜索共同决定。\n←/→ 切换列表和详情，h/l 是备用键；↑/↓ 逐项移动，PgUp/PgDn 按页移动。p 打开项目选择器；Home/End 在当前会话列表或消息历史中跳到首尾，Shift+←/→ 查看完整目录，Shift+Home/End 直达目录两端。\n详情中的消息按需分页，覆盖完整逻辑历史；为保持响应速度，超长单条正文只显示有界预览。详情内的 / 只过滤当前消息页，保留筛选时仍可用 PgUp/PgDn/Home/End 浏览其他历史页。\nClaude、Codex、Gemini 和 OpenCode 的费用与 token 来自当前仍保留在 proxy_request_logs 中、经有效过滤去重后能以确定性 ID 归属到该会话的本地 usage 记录；Hermes 使用其 state.db 提供的估算。Cost 是根据这些本地可用记录和模型定价得出的尽力估算，不是账单，也不代表历史上曾发生的全部费用。“-”表示没有可归属的 usage、身份有歧义、查询不可用，或存在无法可靠计价的 token 行。Codex 根会话费用不含独立 subagent 线程的费用。\n日志被删除或归档、数据源写入失败、malformed 行、无法归属的代理 Generated ID、尚未触发重查的实时日志及浮点求和误差，都可能让估算与实际费用不同。\n“未知目录”位于项目列表末尾，只包含缺少项目目录的旧会话；精确项目按词法规范化后的完整目录匹配。",
-                "Sessions always show the current app; results combine Project scope × / Search.\nUse ←/→ to switch between the list and details; h/l are aliases. Use ↑/↓ to move one item and PgUp/PgDn to move by a page. Press p to choose a project; Home/End jumps to either end of the active session list or message history, Shift+←/→ reveals the complete directory, and Shift+Home/End jumps to either path end.\nDetail messages are paged on demand across the complete logical history. To stay responsive, an unusually long individual body is shown as a bounded preview. In details, / filters the current message page only; PgUp/PgDn/Home/End still browse other history pages while the filter is retained.\nFor Claude, Codex, Gemini, and OpenCode, Cost and tokens come from locally available usage rows that remain in proxy_request_logs after effective deduplication and can be deterministically attributed to this session. Hermes uses estimates supplied by its state.db. Cost is a best-effort estimate based on these local records and model pricing; it is not a bill and does not represent every historical charge. \"-\" means there is no attributable usage, the identity is ambiguous, the query is unavailable, or at least one token-bearing row cannot be priced reliably. A Codex root session excludes costs from independent subagent threads.\nDeleted or archived logs, source write failures, malformed rows, unattributable proxy Generated IDs, live rows awaiting a requery, and floating-point summation can all make the estimate differ from actual charges.\nUnknown directory is last and contains only legacy sessions without a project directory; exact projects match the complete lexically normalized directory.",
-            ),
-        ),
-        HelpTarget::FailoverQueue => HelpContent::new(
-            crate::t!("Failover Queue", "故障转移队列"),
-            help_lines(
-                "Enter 将当前供应商加入或移出队列。Ctrl+↑/↓ 调整已加入供应商的优先级；J/K 是移动的备用键。按 f 开关自动故障转移。\nP1、P2… 就是实际尝试顺序。开启自动故障转移后，供应商主页的普通切换会停用，由此队列控制路由。\n“当前目标”来自正在运行的代理。健康状态来自历史请求结果：“无记录”不代表健康检查失败，“失败”是尚未达到不健康阈值的连续失败；这里不显示实时断路器状态。",
-                "Press Enter to add or remove the focused provider. Ctrl+Up/Down changes the priority of queued providers; J/K are secondary move aliases. Press f to toggle automatic failover.\nP1, P2, and so on are the actual attempt order. While automatic failover is on, ordinary switching on the Providers page is disabled and this queue controls routing.\nActive target comes from the running proxy. Health is passive history from past request attempts: no record is not a failed health check, and failures means consecutive failures below the unhealthy threshold. This view does not claim to show the live circuit-breaker state.",
-            ),
-        ),
-        HelpTarget::PreferredEditor => HelpContent::new(
-            texts::tui_settings_preferred_editor_label(),
-            help_lines(
-                "打开设置项时，cc-switch 才会检测当前系统中可执行的常见编辑器；检测不会启动任何程序，也不影响启动速度。检测结果只作为候选，必须按 Enter 明确选择后才会保存，不会自动替你选择。有效的 VISUAL 和 EDITOR 命令也会出现在候选中。\n自定义命令会按参数直接执行，不经过 shell，临时文件路径会追加为最后一个参数。带空格的路径或参数需要加引号；自定义输入留空可清除当前选择。\n图形编辑器必须使用等待参数（例如 code --wait），否则进程提前退出后临时文件会被回收。已配置的命令如果启动失败会直接报错，不会静默换用其他编辑器。",
-                "cc-switch detects executable common editors only when you open this setting; detection launches nothing and does not affect startup time. Results are choices only: nothing is saved until you explicitly press Enter, and no editor is selected automatically. Valid VISUAL and EDITOR commands also appear in the list.\nCustom commands are executed directly without a shell, with the temporary file path appended as the final argument. Quote paths or arguments that contain spaces; leave custom input empty to clear the selection.\nGUI editors need a wait flag, such as code --wait, or the temporary file could be removed when the launcher exits early. A configured command reports launch failures instead of silently switching editors.",
-            ),
-        ),
-        HelpTarget::CodexOfficialAuthPreservation => HelpContent::new(
-            texts::codex_preserve_official_auth_label(),
-            help_lines(
-                "控制未开启路由接管时切换第三方供应商是否保留 Codex 官方登录；路由接管期间始终保留\n开启后，非接管切换会将第三方密钥写入 config.toml，而不覆盖现有的官方 ChatGPT 登录。此开关不会替你登录，也不会恢复此前被覆盖的凭据。\nCodex Desktop 的 SSH 项目读取远端用户的 CODEX_HOME、凭据和代理。请在远端 cc-switch-cli 开启本项；切换供应商后重新连接远程项目，使远端 app-server 重新加载配置和模型目录。",
-                "Controls third-party switches when local routing is off. Takeover routing always preserves the Codex official login.\nWhen enabled, direct third-party switches write the third-party key to config.toml without overwriting the existing official ChatGPT login. This setting does not sign you in or recover credentials that were already overwritten.\nCodex Desktop SSH projects use the remote user's CODEX_HOME, credentials, and proxy. Enable this setting in the remote cc-switch-cli, then reconnect the remote project after switching providers so its app-server reloads the config and model catalog.",
-            ),
-        ),
-        HelpTarget::CodexUnifiedSessionHistory => HelpContent::new(
-            texts::codex_unified_session_history_label(),
-            vec![texts::codex_unified_session_history_description().to_string()],
-        ),
         HelpTarget::ProviderTemplate => HelpContent::new(
             tr("供应商模板", "Provider templates"),
             help_lines(
@@ -346,138 +233,13 @@ fn help_for_target(target: HelpTarget, app: &App, data: &UiData) -> HelpContent 
         HelpTarget::ProviderPreview { app_type, section } => provider_preview_help(app_type, section),
         HelpTarget::UsageQueryField { template, field } => usage_query_field_help(template, field),
         HelpTarget::CodexLocalRoutingField { field } => codex_local_routing_field_help(field),
-        HelpTarget::LocalProxySettingsField { field } => local_proxy_settings_field_help(field),
         HelpTarget::CodexModelCatalogField { field } => codex_model_catalog_field_help(field),
         HelpTarget::UsageQueryExtractor { template } => usage_query_extractor_help(template),
         HelpTarget::UsageQueryInstructions => HelpContent::new(
             texts::tui_usage_query_script_help_title(),
             super::form::ProviderAddFormState::usage_query_script_help_lines(),
         ),
-        HelpTarget::S3Field { field } => s3_field_help(field),
-        HelpTarget::WebDavField { field } => webdav_field_help(field),
-        HelpTarget::McpField { field } => mcp_field_help(field),
         HelpTarget::Empty => HelpContent::empty(),
-    }
-}
-
-fn mcp_field_help(field: McpAddField) -> HelpContent {
-    match field {
-        McpAddField::Headers => HelpContent::new(
-            texts::tui_label_headers(),
-            help_lines(
-                "为 HTTP/SSE MCP 请求配置静态 HTTP Headers，例如 `Authorization: Bearer <token>` 或 `X-API-Key`。\nHeaders 保存在 cc-switch 的统一 MCP 配置中，并投影到所选应用。Codex 使用 `http_headers`，其余受支持应用使用 `headers`。",
-                "Configure static HTTP headers for HTTP/SSE MCP requests, such as `Authorization: Bearer <token>` or `X-API-Key`.\nHeaders are stored in cc-switch's unified MCP config and projected to selected apps. Codex uses `http_headers`; other supported apps use `headers`.",
-            ),
-        ),
-        McpAddField::Env => HelpContent::new(
-            texts::tui_label_env(),
-            help_lines(
-                "为 stdio MCP 进程设置环境变量。环境变量名大小写敏感，并按名称排序保存。",
-                "Set environment variables for the stdio MCP process. Names are case-sensitive and saved in sorted order.",
-            ),
-        ),
-        _ => HelpContent::empty(),
-    }
-}
-
-fn s3_field_help(field: S3SyncField) -> HelpContent {
-    match field {
-        S3SyncField::Preset => HelpContent::new(
-            texts::tui_s3_service_preset(),
-            help_lines(
-                "预设只提供适合该服务的 Region 默认值和字段说明，不会覆盖已经填写的值。当前公开 AWS S3、MinIO、Cloudflare R2 和 Custom；OSS/COS/OBS 要等待上游确定 URL Style 后再开放。",
-                "A preset supplies a suitable Region default and contextual guidance; it never overwrites a value you already entered. AWS S3, MinIO, Cloudflare R2, and Custom are currently available. OSS/COS/OBS remain hidden until upstream settles URL-style handling.",
-            ),
-        ),
-        S3SyncField::Region => HelpContent::new(
-            texts::tui_s3_region(),
-            help_lines(
-                "用于 AWS Signature V4 签名的区域。AWS 请填写存储桶所在区域；Cloudflare R2 通常使用 `auto`；MinIO 常用 `us-east-1`，除非服务端另有配置。",
-                "Region used for AWS Signature V4. Use the bucket's region for AWS, usually `auto` for Cloudflare R2, and commonly `us-east-1` for MinIO unless the server says otherwise.",
-            ),
-        ),
-        S3SyncField::Bucket => HelpContent::new(
-            texts::tui_s3_bucket(),
-            help_lines(
-                "用于保存 cc-switch 快照的现有存储桶名称。程序不会自动创建存储桶；凭据需要读取、写入和查询对象的权限。",
-                "Name of an existing bucket used for cc-switch snapshots. The app does not create buckets; the credentials need permission to read, write, and inspect objects.",
-            ),
-        ),
-        S3SyncField::AccessKeyId => HelpContent::new(
-            texts::tui_s3_access_key_id(),
-            help_lines(
-                "S3 兼容服务颁发的 Access Key ID。它保存在本机 settings.json 中，并按本项目约定在编辑表单里明文显示。",
-                "Access Key ID issued by the S3-compatible service. It is stored in the local settings.json and shown as plain text in this editor, following this project's credential-display convention.",
-            ),
-        ),
-        S3SyncField::SecretAccessKey => HelpContent::new(
-            texts::tui_s3_secret_access_key(),
-            help_lines(
-                "与 Access Key ID 配套的 Secret Access Key。此 TUI 按项目约定明文显示且不会写入日志；共享屏幕或录屏时请注意终端内容。未修改该字段时会保留原凭据。",
-                "Secret Access Key paired with the Access Key ID. This TUI shows it as plain text by project convention and does not log it; take care when sharing or recording the terminal. Leaving it untouched preserves the saved credential.",
-            ),
-        ),
-        S3SyncField::Endpoint => HelpContent::new(
-            texts::tui_s3_endpoint(),
-            help_lines(
-                "AWS S3 可留空。R2、MinIO 和其他兼容服务请填写完整的 http/https Endpoint，不要追加存储桶或对象路径。HTTP 可用于本机 MinIO，但远程服务建议使用 HTTPS。",
-                "Leave this empty for AWS S3. For R2, MinIO, and other compatible services, enter the complete HTTP/HTTPS endpoint without a bucket or object path. HTTP is suitable for local MinIO; use HTTPS for remote services.",
-            ),
-        ),
-        S3SyncField::RemoteRoot => HelpContent::new(
-            texts::tui_s3_remote_root(),
-            help_lines(
-                "远端对象的根前缀，默认 `cc-switch-sync`。不同产品或环境需要完全隔离时可更改；留空保存时会恢复默认值。",
-                "Root prefix for remote objects, defaulting to `cc-switch-sync`. Change it to isolate products or environments completely; an empty value is normalized back to the default when saved.",
-            ),
-        ),
-        S3SyncField::Profile => HelpContent::new(
-            texts::tui_s3_profile(),
-            help_lines(
-                "同一远端根目录下的快照命名空间，默认 `default`。不同设备想共享同一份配置时应使用相同 Profile；想彼此隔离则使用不同值。",
-                "Snapshot namespace under the same remote root, defaulting to `default`. Devices that share one configuration should use the same profile; use different values to isolate them.",
-            ),
-        ),
-    }
-}
-
-fn webdav_field_help(field: WebDavSyncField) -> HelpContent {
-    match field {
-        WebDavSyncField::BaseUrl => HelpContent::new(
-            texts::tui_webdav_base_url(),
-            help_lines(
-                "用于存放快照的 WebDAV 目录地址，必须是 http/https URL。请使用专用目录；坚果云通常需要指向 `/dav/...` 下的目录。",
-                "HTTP/HTTPS URL of the WebDAV directory used for snapshots. Use a dedicated directory; Jianguoyun URLs normally point to a directory below `/dav/...`.",
-            ),
-        ),
-        WebDavSyncField::Username => HelpContent::new(
-            texts::tui_webdav_username(),
-            help_lines(
-                "WebDAV 用户名。支持匿名访问的服务可以留空。",
-                "WebDAV username. Leave it empty for a service that permits anonymous access.",
-            ),
-        ),
-        WebDavSyncField::Password => HelpContent::new(
-            texts::tui_webdav_password(),
-            help_lines(
-                "WebDAV 密码或应用专用密码。表单按项目约定明文显示且不会写入日志；未修改时保留原凭据。",
-                "WebDAV password or app-specific password. It is shown as plain text by project convention and is not logged; leaving it untouched preserves the saved credential.",
-            ),
-        ),
-        WebDavSyncField::RemoteRoot => HelpContent::new(
-            texts::tui_s3_remote_root(),
-            help_lines(
-                "WebDAV 目录内的同步根目录，默认 `cc-switch-sync`。留空保存时恢复默认值。",
-                "Sync root inside the WebDAV directory, defaulting to `cc-switch-sync`. An empty value is normalized back to the default when saved.",
-            ),
-        ),
-        WebDavSyncField::Profile => HelpContent::new(
-            texts::tui_s3_profile(),
-            help_lines(
-                "快照命名空间，默认 `default`。需要共享配置的设备应使用相同 Profile。",
-                "Snapshot namespace, defaulting to `default`. Devices sharing one configuration should use the same profile.",
-            ),
-        ),
     }
 }
 
@@ -578,15 +340,10 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         | ProviderAddField::GeminiBaseUrl
         | ProviderAddField::OpenCodeBaseUrl
         | ProviderAddField::HermesBaseUrl => {
-            let body = if matches!(field, ProviderAddField::CodexBaseUrl) {
+            let body = if matches!(app_type, AppType::Codex) {
                 help_lines(
-                    "Codex 原生只支持 OpenAI Responses API 与 GPT 系列模型。\n如果供应商使用 Chat Completions 协议，或模型不是 GPT 系列（如 DeepSeek、Kimi），需要保持本地路由开启，让 cc-switch 做协议和模型路由转换。\n\n聚焦此项时按 f 可切换完整 URL 模式。开启后，本地代理会直接使用这里填写的请求地址，不再拼接请求路径；该模式必须通过本地代理使用。",
-                    "Codex natively supports OpenAI Responses API and GPT-series models.\nIf this provider uses Chat Completions, or the model is not GPT-series, such as DeepSeek or Kimi, keep local routing enabled so cc-switch can translate protocol and model routing.\n\nPress f while this field is focused to toggle Full URL mode. When enabled, the local proxy uses this exact request URL without appending a request path; this mode requires the local proxy.",
-                )
-            } else if matches!(field, ProviderAddField::ClaudeBaseUrl) {
-                help_lines(
-                    "供应商 API 的基础地址。通常不需要在末尾重复补全具体接口路径，除非供应商文档明确要求。\n\n聚焦此项时按 f 可切换完整 URL 模式。开启后，本地代理会直接使用这里填写的请求地址，不再拼接请求路径；该模式必须通过本地代理使用。",
-                    "Base URL for the provider API. Usually you do not need to append the final endpoint path unless the provider docs require it.\n\nPress f while this field is focused to toggle Full URL mode. When enabled, the local proxy uses this exact request URL without appending a request path; this mode requires the local proxy.",
+                    "Codex 原生只支持 OpenAI Responses API 与 GPT 系列模型。\n如果供应商使用 Chat Completions 协议，或模型不是 GPT 系列（如 DeepSeek、Kimi），需要保持本地路由开启，让 cc-switch 做协议和模型路由转换。",
+                    "Codex natively supports OpenAI Responses API and GPT-series models.\nIf this provider uses Chat Completions, or the model is not GPT-series, such as DeepSeek or Kimi, keep local routing enabled so cc-switch can translate protocol and model routing.",
                 )
             } else {
                 help_lines(
@@ -603,8 +360,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         | ProviderAddField::HermesApiKey => HelpContent::new(
             texts::tui_label_api_key(),
             help_lines(
-                "供应商 API Key。保存后会按该应用的配置规则写入存储配置；界面会以明文显示当前值。",
-                "Provider API key. After saving, it is written using this app's config rules. The UI shows the current value in plaintext.",
+                "供应商 API Key。保存后会按该应用的配置规则写入存储配置；界面预览会隐藏敏感内容。",
+                "Provider API key. After saving, it is written using this app's config rules. The preview hides sensitive values.",
             ),
         ),
         ProviderAddField::CodexModel => HelpContent::new(
@@ -614,13 +371,6 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Default Codex model. Third-party non-GPT models usually need local routing.\nUpstream model mapping generates model_catalog_json so Codex /model can show third-party models. Restart Codex after catalog changes.",
             ),
         ),
-        ProviderAddField::CodexPromptCacheRouting => HelpContent::new(
-            texts::tui_label_codex_prompt_cache_routing(),
-            help_lines(
-                "仅用于 Codex Responses → Chat Completions 转换，和模型映射相互独立。\n自动（推荐）：只向已确认兼容的上游发送 prompt_cache_key；未知或自建网关默认不发送。\n开启：用于其他已确认兼容的网关。\n关闭：始终不发送；严格网关因未知字段返回 HTTP 400 时使用。\n请求自带的 key 优先，否则只使用客户端提供的稳定会话 ID。",
-                "Applies only to Codex Responses → Chat Completions conversion and is independent of model mapping.\nAuto (recommended): sends prompt_cache_key only to known-compatible upstreams; unknown or self-hosted gateways default to off.\nEnabled: use it for another gateway you know is compatible.\nDisabled: never sends it; use this if a strict gateway rejects the unknown field with HTTP 400.\nAn explicit request key wins; otherwise only a stable client-provided session ID is used.",
-            ),
-        ),
         ProviderAddField::CodexLocalRouting => HelpContent::new(
             texts::tui_label_codex_model_mapping(),
             help_lines(
@@ -628,50 +378,29 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
                 "Opens the model mapping page. A catalog is generated only when filled: Chat Completions produces compatibility routing (via the local proxy), while native Responses generates model-catalogs.json for Codex direct-connect. Left empty, nothing is generated.\nWith the Chat format, reasoning-capability toggles also appear here.",
             ),
         ),
-        ProviderAddField::LocalProxySettings => HelpContent::new(
-            texts::tui_label_local_proxy_settings(),
-            help_lines(
-                "配置仅由本地路由或代理接管使用的出站请求选项，包括自定义 User-Agent、Header 覆盖和 Body 覆盖。直连客户端配置不会受影响。",
-                "Configures outbound request options used only by local routing or proxy takeover, including a custom User-Agent plus header and body overrides. Direct client configuration is unaffected.",
-            ),
-        ),
         ProviderAddField::ClaudeModelConfig => HelpContent::new(
             texts::tui_label_claude_model_config(),
             help_lines(
-                "配置 Claude 的模型分层。在模型列按 Enter 编辑，按 Space 从 API 自动获取。Sonnet、Opus、Fable 和 Subagent 可用 ←→ 移到 1M 列并按 Enter 切换；1M 只向 Claude Code 声明百万上下文能力，不会检测上游是否真正支持。Fable 留空时依次回退到 Opus 和默认模型；Subagent 控制后台代理任务使用的模型。底层继续使用模型 ID 的 [1M] 后缀，以兼容现有配置。次要快捷键 a 可将当前模型填充到全部角色。",
-                "Configures Claude model tiers. In the model column, press Enter to edit or Space to fetch from the API. Sonnet, Opus, Fable, and Subagent support the 1M column; use ←→ to focus it and Enter to toggle. 1M only declares million-token context support to Claude Code and does not detect upstream capability. An unset Fable falls back to Opus and then the default model; Subagent controls the model used by background agents. The existing [1M] model-ID suffix remains the storage format. The secondary a shortcut fills every role from the current model.",
+                "配置 Claude 的模型分层。不同角色模型会写入对应的运行配置，供客户端按场景选择。",
+                "Configures Claude model tiers. Role-specific models are written into the live config for the client to select by task.",
+            ),
+        ),
+        ProviderAddField::ClaudeDesktopModelConfig => HelpContent::new(
+            texts::tui_label_claude_desktop_model_config(),
+            help_lines(
+                "配置 Claude Desktop Direct 模式的模型映射。Haiku/Sonnet/Opus/Fable 各角色模型分别对应环境变量，供 Claude Desktop 按任务选择。",
+                "Configures model mappings for Claude Desktop Direct mode. Haiku, Sonnet, Opus, and Fable role models are mapped to environment variables for Claude Desktop to select by task.",
             ),
         ),
         ProviderAddField::ClaudeApiFormat if matches!(app_type, AppType::Codex) => {
             HelpContent::new(
                 texts::tui_label_codex_upstream_format(),
                 help_lines(
-                    "选择上游供应商的 API 格式。原生 Responses 直连；Chat Completions 和 Anthropic Messages 均需本地路由转换。",
-                    "Select the upstream provider's API format. Native Responses is direct; Chat Completions and Anthropic Messages require local routing conversion.",
+                    "选择上游供应商的 API 格式。供应商原生是 Responses API 就选 Responses（直连，不转换）；使用 Chat Completions 协议就选 Chat（需通过本地路由转换为 Chat Completions）。",
+                    "Select the upstream provider's API format. Choose Responses when the provider is natively Responses API (direct, no conversion); choose Chat when it uses Chat Completions (converted via local routing).",
                 ),
             )
         }
-        ProviderAddField::CodexAnthropicApiKeyField => HelpContent::new(
-            texts::tui_label_codex_anthropic_auth_field(),
-            help_lines(
-                "选择网关接收 API Key 的请求头：ANTHROPIC_AUTH_TOKEN 发送 Authorization: Bearer；ANTHROPIC_API_KEY 发送 x-api-key。两者只发其一。",
-                "Choose which header carries the API key: ANTHROPIC_AUTH_TOKEN sends Authorization: Bearer; ANTHROPIC_API_KEY sends x-api-key. Only one is sent.",
-            ),
-        ),
-        ProviderAddField::CodexImpersonateClaudeCode => HelpContent::new(
-            texts::tui_label_codex_impersonate_claude_code(),
-            help_lines(
-                "仅在网关限制只能通过 Claude Code 使用时开启。它会模拟 User-Agent、anthropic-beta、x-app，并在系统提示首行注入 Claude Code 身份。",
-                "Enable only when the gateway restricts access to Claude Code. It emulates User-Agent, anthropic-beta, x-app, and injects the Claude Code identity as the first system-prompt line.",
-            ),
-        ),
-        ProviderAddField::CodexMaxOutputTokens => HelpContent::new(
-            texts::tui_label_codex_max_output_tokens(),
-            help_lines(
-                "覆盖 Anthropic 路径的 max_tokens。留空使用默认 8192；不要超过模型或网关的真实输出上限，否则上游可能返回 400。",
-                "Overrides max_tokens on the Anthropic path. Leave empty for the default 8192; do not exceed the model or gateway output ceiling, or the upstream may return 400.",
-            ),
-        ),
         ProviderAddField::ClaudeApiFormat => HelpContent::new(
             texts::tui_label_claude_api_format(),
             help_lines(
@@ -682,8 +411,8 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
         ProviderAddField::ClaudeFallbackModel => HelpContent::new(
             texts::tui_label_claude_fallback_model(),
             help_lines(
-                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。可在模型名末尾追加 [1M] 声明百万上下文支持；此标记不会验证上游能力。",
-                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints. Append [1M] to declare million-token context support; this marker does not verify upstream capability.",
+                "用于未明确落到具体角色模型（Haiku、Sonnet、Opus 等）的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。",
+                "A fallback for requests that don't clearly map to a specific role model (Haiku, Sonnet, Opus, etc.). Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints.",
             ),
         ),
         ProviderAddField::ClaudeQuickConfig => HelpContent::new(
@@ -900,34 +629,8 @@ fn codex_local_routing_field_help(field: CodexLocalRoutingField) -> HelpContent 
     }
 }
 
-fn local_proxy_settings_field_help(field: LocalProxySettingsField) -> HelpContent {
-    match field {
-        LocalProxySettingsField::UserAgent => HelpContent::new(
-            texts::tui_label_custom_user_agent(),
-            help_lines(
-                "替换本地代理转发给供应商 API 的 User-Agent。可选用兼容 Claude Code 的预设，也可以手动填写；留空表示不覆盖。控制字符会被标记为无效，但不会阻止保存。",
-                "Replaces the User-Agent forwarded to the provider API by the local proxy. Choose a Claude Code-compatible preset or enter a custom value; leave blank for no override. Control characters are flagged as invalid but do not block saving.",
-            ),
-        ),
-        LocalProxySettingsField::HeaderOverrides => HelpContent::new(
-            texts::tui_label_local_proxy_header_overrides(),
-            help_lines(
-                "以 JSON 对象配置协议转换后的上游 Header。名称保存为小写，值必须是字符串；认证、内容类型、连接、转发和追踪等由代理管理的 Header 不能覆盖。",
-                "Uses a JSON object to override upstream headers after protocol conversion. Names are stored lowercase and values must be strings; proxy-managed authentication, content, connection, forwarding, and tracing headers cannot be overridden.",
-            ),
-        ),
-        LocalProxySettingsField::BodyOverrides => HelpContent::new(
-            texts::tui_label_local_proxy_body_overrides(),
-            help_lines(
-                "以 JSON 对象覆盖协议转换后的最终上游 Body。适合补充 store: false 等供应商专用字段；顶层 stream 由代理控制，不能覆盖。",
-                "Uses a JSON object to override the final upstream body after protocol conversion. This is suitable for provider-specific fields such as store: false; top-level stream is controlled by the proxy and cannot be overridden.",
-            ),
-        ),
-    }
-}
-
 fn codex_model_catalog_field_help(field: CodexModelCatalogField) -> HelpContent {
-    let mut content = match field {
+    match field {
         CodexModelCatalogField::Model => HelpContent::new(
             tr("模型 ID", "Model ID"),
             help_lines(
@@ -949,12 +652,7 @@ fn codex_model_catalog_field_help(field: CodexModelCatalogField) -> HelpContent 
                 "Tells Codex this model's context window. Leave empty to avoid overriding it; filled values should match the provider's actual model capability.",
             ),
         ),
-    };
-    content.lines.extend(help_lines(
-        "模型目录只在 Codex/app-server 启动时加载。修改后请重启 Codex；Desktop SSH 项目请重新连接，目录来自远端同一用户的 CODEX_HOME。",
-        "The model catalog is loaded when Codex/app-server starts. Restart Codex after editing it; reconnect Desktop SSH projects because the catalog comes from the same remote user's CODEX_HOME.",
-    ));
-    content
+    }
 }
 
 fn provider_preview_help(app_type: AppType, section: Option<CodexPreviewSection>) -> HelpContent {
@@ -973,18 +671,11 @@ fn provider_preview_help(app_type: AppType, section: Option<CodexPreviewSection>
                 "This previews the Codex config.toml to be saved.\nAdvanced settings such as local routing, reasoning capability, model catalog, Goal mode, and remote compaction are reflected here. Presets are usually configured automatically; custom providers are inferred from name and URL, so manual edits are needed only when detection is wrong.",
             ),
         ),
-        (AppType::Claude, _) => HelpContent::new(
-            texts::tui_provider_config_title(),
-            help_lines(
-                "这里预览将保存的供应商配置。Proxy 开启时，Claude 实际读取的 settings.json 会由代理临时接管，因此会显示本地代理地址、占位凭据和模型映射，而不是这里的真实上游配置。按 Enter 可打开编辑器进行高级修改。",
-                "This previews the stored provider config. While Proxy is on, Claude's live settings.json is temporarily managed by the proxy, so it contains the local proxy URL, placeholder credentials, and model mappings instead of the real upstream config shown here. Press Enter to open the advanced editor.",
-            ),
-        ),
         _ => HelpContent::new(
-            texts::tui_provider_config_title(),
+            texts::tui_form_json_title(),
             help_lines(
-                "右侧预览展示将保存的供应商配置。按 Enter 可打开编辑器进行高级修改。",
-                "The right preview shows the provider config to be saved. Press Enter to open the advanced editor.",
+                "右侧预览展示保存后的配置形状。按 Enter 可打开编辑器进行高级修改。",
+                "The right preview shows the saved config shape. Press Enter to open the editor for advanced edits.",
             ),
         ),
     }
@@ -999,20 +690,13 @@ fn usage_query_field_help(template: UsageQueryTemplate, field: UsageQueryField) 
                 "When enabled, cc-switch queries provider balance or quota using the selected template. When disabled, no automatic query runs.",
             ),
         ),
-        UsageQueryField::Template => {
-            let body = if matches!(template, UsageQueryTemplate::OfficialSubscription) {
-                help_lines(
-                    "官方 Claude、Codex 和 Gemini 供应商只提供官方订阅模板。该模板读取本机 CLI 的 OAuth 凭据，不需要脚本或额外凭据。",
-                    "Official Claude, Codex, and Gemini providers expose only the official subscription template. It uses local CLI OAuth credentials and needs no script or extra credentials.",
-                )
-            } else {
-                help_lines(
-                    "TUI 只提供自定义、通用、NewAPI、余额四种模板。\n计费计划模板不在 TUI 中显示；模板会决定哪些字段可见，以及提取器代码是否可编辑。",
-                    "The TUI exposes only custom, general, newapi, and balance.\nToken Plan is not shown in the TUI. The template controls visible fields and whether extractor code can be edited.",
-                )
-            };
-            HelpContent::new(texts::tui_usage_query_template(), body)
-        }
+        UsageQueryField::Template => HelpContent::new(
+            texts::tui_usage_query_template(),
+            help_lines(
+                "TUI 只提供自定义、通用、NewAPI、余额四种模板。\n计费计划模板不在 TUI 中显示；模板会决定哪些字段可见，以及提取器代码是否可编辑。",
+                "The TUI exposes only custom, general, newapi, and balance.\nToken Plan is not shown in the TUI. The template controls visible fields and whether extractor code can be edited.",
+            ),
+        ),
         UsageQueryField::ApiKey => HelpContent::new(
             texts::tui_usage_query_credentials_config(),
             help_lines(
@@ -1080,9 +764,7 @@ fn usage_query_extractor_help(template: UsageQueryTemplate) -> HelpContent {
             "余额模板使用内置查询逻辑。通常不需要脚本字段；如果显示提取器预览，只用于说明当前模板行为。",
             "The balance template uses built-in query logic. It usually does not need script fields; any extractor preview only explains template behavior.",
         ),
-        UsageQueryTemplate::GitHubCopilot
-        | UsageQueryTemplate::TokenPlan
-        | UsageQueryTemplate::OfficialSubscription => {
+        UsageQueryTemplate::GitHubCopilot | UsageQueryTemplate::TokenPlan => {
             vec![tr("此处无提示", "No help here").to_string()]
         }
     };
@@ -1121,13 +803,6 @@ fn provider_field_overlay_target(app: &App, field: ProviderAddField) -> HelpTarg
         app_type: provider.app_type.clone(),
         field,
     }
-}
-
-fn provider_local_proxy_overlay_target(app: &App, field: LocalProxySettingsField) -> HelpTarget {
-    if !matches!(app.form.as_ref(), Some(FormState::ProviderAdd(_))) {
-        return HelpTarget::Global;
-    }
-    HelpTarget::LocalProxySettingsField { field }
 }
 
 fn provider_usage_query_overlay_target(app: &App, field: UsageQueryField) -> HelpTarget {

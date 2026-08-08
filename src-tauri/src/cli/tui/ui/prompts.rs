@@ -74,6 +74,7 @@ pub(super) fn render_prompts(
             theme,
             texts::tui_prompts_empty_title(),
             texts::tui_prompts_empty_subtitle(),
+            &[("a", texts::tui_key_add())],
         );
         return;
     }

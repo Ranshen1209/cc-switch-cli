@@ -29,71 +29,36 @@ impl App {
         }
     }
 
-    pub(super) fn handle_mcp_focus_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
+    pub(super) fn handle_mcp_focus_key(&mut self, key: KeyEvent) -> Option<Action> {
         let Some(FormState::McpAdd(mcp)) = self.form.as_ref() else {
             return None;
         };
 
         match mcp.focus {
-            FormFocus::Fields => self.handle_mcp_fields_key(key, data),
+            FormFocus::Fields => self.handle_mcp_fields_key(key),
             FormFocus::JsonPreview => self.handle_mcp_json_preview_key(key),
             FormFocus::Templates | FormFocus::Content => None,
         }
     }
 
-    pub(super) fn build_mcp_form_save_action(&mut self, data: &UiData) -> Action {
-        let args_valid = match self.form.as_mut() {
-            Some(FormState::McpAdd(mcp)) if !mcp.server_type.is_remote() => mcp.commit_args_input(),
-            _ => true,
+    pub(super) fn build_mcp_form_save_action(&mut self) -> Action {
+        let Some(FormState::McpAdd(mcp)) = self.form.as_ref() else {
+            return Action::None;
         };
-        let validation = self.form.as_ref().and_then(|form| match form {
-            FormState::McpAdd(mcp) if mcp.id.is_blank() => {
-                Some((McpAddField::Id, texts::tui_toast_mcp_missing_fields()))
-            }
-            FormState::McpAdd(mcp)
-                if matches!(mcp.mode, FormMode::Add)
-                    && data
-                        .mcp
-                        .rows
-                        .iter()
-                        .any(|row| row.id == mcp.id.value.trim()) =>
-            {
-                Some((McpAddField::Id, texts::tui_toast_mcp_id_exists()))
-            }
-            FormState::McpAdd(mcp) if mcp.name.is_blank() => {
-                Some((McpAddField::Name, texts::tui_toast_mcp_missing_fields()))
-            }
-            FormState::McpAdd(mcp) if mcp.server_type.is_remote() && mcp.url.is_blank() => {
-                Some((McpAddField::Url, texts::tui_toast_url_empty()))
-            }
-            FormState::McpAdd(mcp) if !mcp.server_type.is_remote() && mcp.command.is_blank() => {
-                Some((McpAddField::Command, texts::tui_toast_command_empty()))
-            }
-            FormState::McpAdd(_) if !args_valid => {
-                Some((McpAddField::Args, texts::tui_mcp_args_invalid()))
-            }
-            _ => None,
-        });
-        if let Some((field, message)) = validation {
-            if let Some(FormState::McpAdd(mcp)) = self.form.as_mut() {
-                mcp.focus = FormFocus::Fields;
-                if let Some(index) = mcp
-                    .fields()
-                    .iter()
-                    .position(|candidate| *candidate == field)
-                {
-                    mcp.field_idx = index;
-                }
-                mcp.set_field_error(field, message);
-            }
-            self.push_toast(message, ToastKind::Warning);
+
+        if !mcp.has_required_fields() {
+            self.push_toast(texts::tui_toast_mcp_missing_fields(), ToastKind::Warning);
             return Action::None;
         }
-
-        let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
+        if mcp.server_type.is_remote() {
+            if mcp.url.is_blank() {
+                self.push_toast(texts::tui_toast_url_empty(), ToastKind::Warning);
+                return Action::None;
+            }
+        } else if mcp.command.is_blank() {
+            self.push_toast(texts::tui_toast_command_empty(), ToastKind::Warning);
             return Action::None;
-        };
-        mcp.field_errors.clear();
+        }
 
         let content = serde_json::to_string_pretty(&mcp.to_mcp_server_json_value())
             .unwrap_or_else(|_| "{}".to_string());
@@ -107,46 +72,30 @@ impl App {
         }
     }
 
-    fn handle_mcp_fields_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
-        let editing_field = self.form.as_ref().and_then(|form| match form {
-            FormState::McpAdd(mcp) => mcp.text_edit_target(),
-            _ => None,
-        });
-        if let Some(field) = editing_field {
-            return self.handle_mcp_field_editing(field, key, data);
-        }
+    fn handle_mcp_fields_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let (fields, selected, editing) = self.prepare_mcp_field_selection()?;
 
-        let (fields, selected) = self.prepare_mcp_field_selection()?;
-        self.handle_mcp_field_navigation(fields, selected, key)
+        if editing {
+            self.handle_mcp_field_editing(selected, key)
+        } else {
+            self.handle_mcp_field_navigation(fields, selected, key)
+        }
     }
 
-    fn handle_mcp_field_editing(
-        &mut self,
-        selected: McpAddField,
-        key: KeyEvent,
-        data: &UiData,
-    ) -> Option<Action> {
+    fn handle_mcp_field_editing(&mut self, selected: McpAddField, key: KeyEvent) -> Option<Action> {
+        let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
+            return None;
+        };
+
         match key.code {
-            KeyCode::Esc => {
-                let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
-                    return None;
-                };
-                mcp.cancel_text_edit();
-                Some(Action::None)
-            }
-            KeyCode::Enter => {
-                self.commit_active_text_edit(data);
+            KeyCode::Esc | KeyCode::Enter => {
+                mcp.editing = false;
                 Some(Action::None)
             }
             _ => {
                 TextEditCommand::from_key(key)?;
-                let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
-                    return None;
-                };
                 if let Some(input) = mcp.input_mut(selected) {
-                    if input.apply_key(key).is_some_and(|edit| edit.changed) {
-                        mcp.clear_field_error(selected);
-                    }
+                    input.apply_key(key);
                 }
                 Some(Action::None)
             }
@@ -180,21 +129,13 @@ impl App {
                 };
                 match selected {
                     McpAddField::Type => {
-                        if matches!(key.code, KeyCode::Enter) {
-                            self.overlay = Overlay::McpTypePicker {
-                                selected: mcp.server_type.picker_index(),
-                            };
-                        }
+                        self.overlay = Overlay::McpTypePicker {
+                            selected: mcp.server_type.picker_index(),
+                        };
                     }
-                    McpAddField::Env | McpAddField::Headers => {
-                        if matches!(key.code, KeyCode::Enter) {
-                            let kind = if selected == McpAddField::Headers {
-                                McpKeyValueKind::Headers
-                            } else {
-                                McpKeyValueKind::Env
-                            };
-                            self.overlay = Overlay::McpKeyValuePicker { kind, selected: 0 };
-                        }
+                    McpAddField::Env => {
+                        let selected = 0;
+                        self.overlay = Overlay::McpEnvPicker { selected };
                     }
                     McpAddField::AppClaude => mcp.apps.claude = !mcp.apps.claude,
                     McpAddField::AppCodex => mcp.apps.codex = !mcp.apps.codex,
@@ -205,8 +146,8 @@ impl App {
                         if selected == McpAddField::Id && mcp.locked_id().is_some() {
                             return Some(Action::None);
                         }
-                        if matches!(key.code, KeyCode::Enter) {
-                            mcp.begin_text_edit(selected);
+                        if mcp.input(selected).is_some() {
+                            mcp.editing = true;
                         }
                     }
                 }
@@ -242,7 +183,7 @@ impl App {
         }
     }
 
-    fn prepare_mcp_field_selection(&mut self) -> Option<(Vec<McpAddField>, McpAddField)> {
+    fn prepare_mcp_field_selection(&mut self) -> Option<(Vec<McpAddField>, McpAddField, bool)> {
         let Some(FormState::McpAdd(mcp)) = self.form.as_mut() else {
             return None;
         };
@@ -258,6 +199,6 @@ impl App {
         }
 
         let selected = fields.get(mcp.field_idx).copied()?;
-        Some((fields, selected))
+        Some((fields, selected, mcp.editing))
     }
 }

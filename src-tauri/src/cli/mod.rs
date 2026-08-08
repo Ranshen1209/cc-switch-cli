@@ -402,51 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_settings_codex_auth_preservation_subcommands() {
-        let show = Cli::parse_from([
-            "cc-switch",
-            "settings",
-            "codex-auth-preservation",
-            "show",
-            "--json",
-        ]);
-        assert!(matches!(
-            show.command,
-            Some(Commands::Settings(
-                super::commands::settings::SettingsCommand::CodexAuthPreservation(
-                    super::commands::settings::CodexAuthPreservationCommand::Show { json: true },
-                ),
-            ))
-        ));
-
-        let enable =
-            Cli::parse_from(["cc-switch", "settings", "codex-auth-preservation", "enable"]);
-        assert!(matches!(
-            enable.command,
-            Some(Commands::Settings(
-                super::commands::settings::SettingsCommand::CodexAuthPreservation(
-                    super::commands::settings::CodexAuthPreservationCommand::Enable,
-                ),
-            ))
-        ));
-
-        let disable = Cli::parse_from([
-            "cc-switch",
-            "settings",
-            "codex-auth-preservation",
-            "disable",
-        ]);
-        assert!(matches!(
-            disable.command,
-            Some(Commands::Settings(
-                super::commands::settings::SettingsCommand::CodexAuthPreservation(
-                    super::commands::settings::CodexAuthPreservationCommand::Disable,
-                ),
-            ))
-        ));
-    }
-
-    #[test]
     fn parses_settings_codex_history_disable_restore_subcommand() {
         let cli = Cli::parse_from([
             "cc-switch",
@@ -1001,47 +956,13 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "provider", "add", "--template", "codex-oauth"]);
 
         match cli.command {
-            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
-                template,
-                ..
-            })) => {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add(command))) => {
                 assert_eq!(
-                    template,
+                    command.template,
                     Some(super::commands::provider_input::ProviderAddTemplate::CodexOauth)
                 );
             }
             _ => panic!("expected provider add command with template"),
-        }
-    }
-
-    #[test]
-    fn parses_provider_add_claude_role_model_options() {
-        let cli = Cli::parse_from([
-            "cc-switch",
-            "provider",
-            "add",
-            "--name",
-            "roles",
-            "--base-url",
-            "https://api.example.com",
-            "--api-key",
-            "sk-test",
-            "--fable-model",
-            "fable[1M]",
-            "--subagent-model",
-            "subagent[1M]",
-        ]);
-
-        match cli.command {
-            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
-                fable_model,
-                subagent_model,
-                ..
-            })) => {
-                assert_eq!(fable_model.as_deref(), Some("fable[1M]"));
-                assert_eq!(subagent_model.as_deref(), Some("subagent[1M]"));
-            }
-            _ => panic!("expected provider add command with Claude role models"),
         }
     }
 
@@ -1261,34 +1182,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_provider_usage_query_official_subscription_template() {
-        let cli = Cli::parse_from([
-            "cc-switch",
-            "provider",
-            "usage-query",
-            "set",
-            "official",
-            "--enabled",
-            "--template",
-            "official-subscription",
-        ]);
-
-        match cli.command {
-            Some(Commands::Provider(super::commands::provider::ProviderCommand::UsageQuery(
-                super::commands::provider_usage_query::ProviderUsageQueryCommand::Set(command),
-            ))) => {
-                assert_eq!(
-                    command.template,
-                    Some(
-                        super::commands::provider_usage_query::UsageQueryTemplate::OfficialSubscription
-                    )
-                );
-            }
-            _ => panic!("expected official subscription usage-query command"),
-        }
-    }
-
-    #[test]
     fn parses_provider_usage_query_clear_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "provider", "usage-query", "clear", "demo"]);
 
@@ -1463,76 +1356,6 @@ mod tests {
                 super::commands::config_webdav::WebDavCommand::CheckConnection,
             ))) => {}
             _ => panic!("expected config webdav check-connection command"),
-        }
-    }
-
-    #[test]
-    fn parses_config_s3_show_subcommand() {
-        let cli = Cli::parse_from(["cc-switch", "config", "s3", "show"]);
-
-        match cli.command {
-            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
-                super::commands::config_s3::S3Command::Show,
-            ))) => {}
-            _ => panic!("expected config s3 show command"),
-        }
-    }
-
-    #[test]
-    fn parses_config_s3_set_subcommand() {
-        let cli = Cli::parse_from([
-            "cc-switch",
-            "config",
-            "s3",
-            "set",
-            "--region",
-            "auto",
-            "--bucket",
-            "demo",
-            "--access-key-id",
-            "AKID",
-            "--secret-access-key",
-            "SECRET",
-            "--endpoint",
-            "https://example.r2.cloudflarestorage.com",
-            "--enable",
-        ]);
-
-        match cli.command {
-            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
-                super::commands::config_s3::S3Command::Set {
-                    region,
-                    bucket,
-                    access_key_id,
-                    secret_access_key,
-                    endpoint,
-                    enable,
-                    ..
-                },
-            ))) => {
-                assert_eq!(region.as_deref(), Some("auto"));
-                assert_eq!(bucket.as_deref(), Some("demo"));
-                assert_eq!(access_key_id.as_deref(), Some("AKID"));
-                assert_eq!(secret_access_key.as_deref(), Some("SECRET"));
-                assert_eq!(
-                    endpoint.as_deref(),
-                    Some("https://example.r2.cloudflarestorage.com")
-                );
-                assert!(enable);
-            }
-            _ => panic!("expected config s3 set command"),
-        }
-    }
-
-    #[test]
-    fn parses_config_s3_check_connection_subcommand() {
-        let cli = Cli::parse_from(["cc-switch", "config", "s3", "check-connection"]);
-
-        match cli.command {
-            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
-                super::commands::config_s3::S3Command::CheckConnection,
-            ))) => {}
-            _ => panic!("expected config s3 check-connection command"),
         }
     }
 

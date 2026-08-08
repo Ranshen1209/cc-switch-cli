@@ -11,6 +11,7 @@ mod app_config {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum AppType {
         Claude,
+        ClaudeDesktop,
         Codex,
         Gemini,
         OpenCode,
@@ -22,6 +23,7 @@ mod app_config {
         pub fn as_str(&self) -> &'static str {
             match self {
                 AppType::Claude => "claude",
+                AppType::ClaudeDesktop => "claude-desktop",
                 AppType::Codex => "codex",
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
@@ -316,6 +318,7 @@ fn default_visible_apps_hide_gemini() {
         visible.ordered_enabled(),
         vec![
             AppType::Claude,
+            AppType::ClaudeDesktop,
             AppType::Codex,
             AppType::OpenCode,
             AppType::Hermes,
@@ -332,6 +335,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
 
     set_visible_apps(VisibleApps {
         claude: false,
+        claude_desktop: false,
         codex: true,
         gemini: true,
         opencode: false,
@@ -349,6 +353,7 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
         value["visibleApps"],
         json!({
             "claude": false,
+            "claude-desktop": false,
             "codex": true,
             "gemini": true,
             "opencode": false,
@@ -383,6 +388,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
         visible,
         VisibleApps {
             claude: false,
+            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
@@ -393,6 +399,7 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
     assert_eq!(
         visible.ordered_enabled(),
         vec![
+            AppType::ClaudeDesktop,
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
@@ -420,6 +427,7 @@ fn load_partial_visible_apps_object_uses_defaults_for_missing_keys() {
         get_visible_apps(),
         VisibleApps {
             claude: false,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -495,6 +503,7 @@ fn set_visible_apps_rejects_zero_selection() {
 
     let err = set_visible_apps(VisibleApps {
         claude: false,
+        claude_desktop: false,
         codex: false,
         gemini: false,
         opencode: false,
@@ -517,6 +526,7 @@ fn update_settings_rejects_all_false_visible_apps() {
     let settings = AppSettings {
         visible_apps: VisibleApps {
             claude: false,
+            claude_desktop: false,
             codex: false,
             gemini: false,
             opencode: false,
@@ -568,6 +578,7 @@ fn load_normalizes_all_false_visible_apps_to_defaults() {
         json!({
             "visibleApps": {
                 "claude": false,
+                "claude-desktop": false,
                 "codex": false,
                 "gemini": false,
                 "opencode": false,
@@ -612,6 +623,7 @@ fn malformed_visible_apps_json_falls_back_to_full_defaults() {
 fn next_visible_app_wraps_and_skips_hidden_entries() {
     let visible = VisibleApps {
         claude: true,
+        claude_desktop: false,
         codex: false,
         gemini: false,
         opencode: true,

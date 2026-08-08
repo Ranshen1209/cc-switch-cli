@@ -1,11 +1,10 @@
 // Core modules
 mod app_config;
+pub mod claude_desktop_config;
 mod claude_mcp;
-mod claude_model_config;
 mod claude_plugin;
 mod codex_config;
 mod codex_history_migration;
-mod codex_state_db;
 pub mod commands;
 mod config;
 #[cfg(unix)]
@@ -20,15 +19,12 @@ mod import_export;
 #[allow(dead_code)]
 mod init_status;
 mod mcp;
-mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
 mod prompt;
 mod prompt_files;
 mod provider;
 mod provider_defaults;
-mod provider_preset_models;
-mod provider_preset_sponsors;
 mod proxy;
 mod services;
 mod session_manager;
@@ -51,8 +47,8 @@ pub use claude_plugin::{
 };
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use config::{
-    get_app_config_dir, get_claude_mcp_path, get_claude_settings_path, read_json_file,
-    validate_config_dir,
+    check_permissions, get_app_config_dir, get_claude_mcp_path, get_claude_settings_path,
+    prompt_fix_permissions, read_json_file, validate_config_dir,
 };
 pub use database::{Database, FailoverQueueItem};
 pub use deeplink::{
@@ -67,21 +63,21 @@ pub use mcp::{
     sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
-pub use provider::{Provider, ProviderMeta, UsageScript};
+pub use provider::{
+    ClaudeDesktopMode, ClaudeDesktopModelRoute, Provider, ProviderMeta, UsageScript,
+};
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
-    reapply_current_codex_official_live, AuthService, ConfigService, CredentialStatus,
-    EndpointLatency, ExtraUsage, HealthStatus, ImportSkillSelection, ManagedAuthAccount,
-    ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService, PromptService, ProviderService,
-    ProxyService, QuotaTier, S3RemoteInfo, S3SyncService, S3SyncSummary, SkillService,
+    AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,
+    ImportSkillSelection, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus,
+    McpService, PromptService, ProviderService, ProxyService, QuotaTier, SkillService,
     SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota,
     SyncDecision, WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
-    get_enable_claude_plugin_integration, get_s3_sync_settings, get_skip_claude_onboarding,
-    get_webdav_sync_settings, set_enable_claude_plugin_integration, set_s3_sync_settings,
-    set_skip_claude_onboarding, set_webdav_sync_settings, update_s3_sync_status, update_settings,
-    update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings, S3SyncSettings,
+    get_enable_claude_plugin_integration, get_skip_claude_onboarding, get_webdav_sync_settings,
+    set_enable_claude_plugin_integration, set_skip_claude_onboarding, set_webdav_sync_settings,
+    update_settings, update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings,
     WebDavSyncSettings, WebDavSyncStatus,
 };
 pub use store::AppState;

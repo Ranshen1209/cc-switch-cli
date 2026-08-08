@@ -23,15 +23,6 @@ impl App {
         self.filter.active || !self.displayed_filter_input().value.trim().is_empty()
     }
 
-    pub(crate) fn displayed_filter_title(&self) -> &'static str {
-        match self.displayed_filter_scope() {
-            FilterScope::Global => crate::cli::i18n::texts::tui_filter_title(),
-            FilterScope::SessionMessages => {
-                crate::cli::i18n::texts::tui_session_message_page_filter_title()
-            }
-        }
-    }
-
     fn displayed_filter_scope(&self) -> FilterScope {
         if self.filter.active {
             return self.filter.scope;
@@ -69,8 +60,6 @@ impl App {
             toast: None,
             should_quit: false,
             pending_deep_search: None,
-            pending_project_catalog: false,
-            pending_project_filter: None,
             last_size: Size::new(0, 0),
             tick: 0,
             proxy_input_activity_samples: Vec::new(),
@@ -81,19 +70,11 @@ impl App {
             proxy_visual_transition: None,
             quota_auto_target_key: None,
             quota_last_auto_tick: None,
-            usage_last_auto_sync_tick: None,
-            usage_proxy_activity_dirty: false,
-            usage_last_proxy_refresh_tick: None,
-            usage_sync_round_started_tick: None,
             prompt_import_prompted_apps: HashSet::new(),
             common_config_notice_confirmed: true,
             usage_query_notice_confirmed: true,
             local_env_results: Vec::new(),
-            local_env_pending: crate::services::local_env_check::LocalTool::all()
-                .iter()
-                .copied()
-                .collect(),
-            local_env_generation: 0,
+            local_env_loading: true,
             usage: UsageState::default(),
             pricing: PricingState::default(),
             sessions: SessionsState::default(),
@@ -122,8 +103,6 @@ impl App {
             openclaw_daily_memory_search_query: String::new(),
             openclaw_daily_memory_search_results: Vec::new(),
             config_webdav_idx: 0,
-            config_cloud_sync_idx: 0,
-            config_s3_idx: 0,
             webdav_quick_setup_username: None,
             language_idx: 0,
             settings_idx: 0,
@@ -140,33 +119,6 @@ impl App {
             .get(self.nav_idx)
             .copied()
             .unwrap_or(NavItem::Main)
-    }
-
-    pub(crate) fn begin_local_env_refresh(&mut self) -> u64 {
-        self.local_env_generation = self.local_env_generation.wrapping_add(1).max(1);
-        self.local_env_results.clear();
-        self.local_env_pending = crate::services::local_env_check::LocalTool::all()
-            .iter()
-            .copied()
-            .collect();
-        self.local_env_generation
-    }
-
-    pub(crate) fn fail_local_env_refresh(&mut self, generation: u64) {
-        if self.local_env_generation == generation {
-            self.local_env_pending.clear();
-        }
-    }
-
-    pub(crate) fn stop_local_env_refresh(&mut self) {
-        self.local_env_pending.clear();
-    }
-
-    pub(crate) fn is_local_env_pending(
-        &self,
-        tool: crate::services::local_env_check::LocalTool,
-    ) -> bool {
-        self.local_env_pending.contains(&tool)
     }
 
     pub(crate) fn nav_items(&self) -> &'static [NavItem] {
@@ -213,7 +165,7 @@ impl App {
                     NavItem::Config
                 }
             }
-            Route::ConfigCloudSync | Route::ConfigWebDav | Route::ConfigS3 => NavItem::Config,
+            Route::ConfigWebDav => NavItem::Config,
             Route::Skills
             | Route::SkillsDiscover
             | Route::SkillsRepos
@@ -245,7 +197,6 @@ impl App {
         }
 
         self.route = route.clone();
-        self.clear_out_of_scope_action_toast();
         self.focus = route_default_focus(&route);
 
         let nav_item = Self::nav_item_for_route(&self.app_type, &route);
@@ -336,28 +287,6 @@ impl App {
         }
     }
 
-    /// Remember when the current session-usage sync round started, so a refresh
-    /// indicator can tell a two-second incremental sync from a multi-minute
-    /// first import.
-    /// The main loop feeds this the services-side snapshot's liveness once per
-    /// tick; the round's start tick is the first tick it was seen alive.
-    ///
-    /// KNOWN LIMIT: liveness is sampled once per tick, so two back-to-back
-    /// rounds that start and finish inside the same tick read as one long
-    /// round, and the second can inherit the first's escalation percentage for
-    /// a frame. Harmless — the number only ever appears after ten seconds of
-    /// continuous work — and the alternative is a round id the services side
-    /// does not publish.
-    pub(crate) fn note_session_sync_round(&mut self, active: bool) {
-        if !active {
-            self.usage_sync_round_started_tick = None;
-            return;
-        }
-        if self.usage_sync_round_started_tick.is_none() {
-            self.usage_sync_round_started_tick = Some(self.tick);
-        }
-    }
-
     fn expire_managed_auth_login_if_needed(&mut self) {
         let Some(login) = self.managed_auth_login.as_ref() else {
             return;
@@ -406,60 +335,9 @@ impl App {
         }
     }
 
-    /// Usage projection consumed by the current route.
-    ///
-    /// Fixed presets share one aggregate cache entry. Main deliberately asks
-    /// for that fixed projection even if the Usage page was left on a custom
-    /// range, while Usage routes keep following the user's active range.
-    pub(crate) fn usage_projection_for_current_route(&self) -> Option<data::UsageRangePreset> {
-        match &self.route {
-            Route::Main => Some(data::UsageRangePreset::ThirtyDays),
-            Route::Usage | Route::UsageLogs | Route::UsageLogDetail { .. } => {
-                Some(self.usage.range)
-            }
-            _ => None,
-        }
-    }
-
-    /// Range needed by the shared Usage/Pricing worker for the current route.
-    /// Pricing participates in on-demand and manual loads, but keeps its
-    /// existing refresh policy.
-    pub(crate) fn usage_pricing_load_range_for_current_route(
-        &self,
-    ) -> Option<data::UsageRangePreset> {
-        match &self.route {
-            Route::Pricing => Some(data::UsageRangePreset::SevenDays),
-            _ => self.usage_projection_for_current_route(),
-        }
-    }
-
-    /// Fixed projections that can refresh from proxy activity without
-    /// interrupting an interactive log query. Custom windows and nested log
-    /// routes retain the existing session-sync and manual-refresh paths.
-    pub(crate) fn proxy_refreshed_usage_projection_for_current_route(
-        &self,
-    ) -> Option<data::UsageRangePreset> {
-        match &self.route {
-            Route::Main => Some(data::UsageRangePreset::ThirtyDays),
-            Route::Usage if !matches!(self.usage.range, data::UsageRangePreset::Custom(_)) => {
-                Some(self.usage.range)
-            }
-            _ => None,
-        }
-    }
-
     pub(crate) fn should_poll_proxy_activity(&self) -> bool {
-        let fast_poll_due = (matches!(self.route, Route::Main)
-            || matches!(self.overlay, Overlay::FailoverQueueManager { .. }))
-            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS);
-        let usage_poll_due = matches!(self.route, Route::Usage)
-            && self
-                .proxy_refreshed_usage_projection_for_current_route()
-                .is_some()
-            && self
-                .tick
-                .is_multiple_of(super::super::USAGE_PROXY_REFRESH_INTERVAL_TICKS);
-        fast_poll_due || usage_poll_due
+        matches!(self.route, Route::Main)
+            && self.tick.is_multiple_of(PROXY_ACTIVITY_POLL_INTERVAL_TICKS)
     }
 
     pub(crate) fn reset_proxy_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -467,8 +345,6 @@ impl App {
         self.proxy_output_activity_samples.clear();
         self.proxy_activity_last_input_tokens = Some(input_tokens);
         self.proxy_activity_last_output_tokens = Some(output_tokens);
-        self.usage_proxy_activity_dirty = false;
-        self.usage_last_proxy_refresh_tick = Some(self.tick);
     }
 
     pub(crate) fn observe_proxy_token_activity(&mut self, input_tokens: u64, output_tokens: u64) {
@@ -483,26 +359,20 @@ impl App {
             return;
         };
 
-        let counters_reset = input_tokens < previous_input || output_tokens < previous_output;
-        let (input_delta, output_delta) = if counters_reset {
-            self.proxy_input_activity_samples.clear();
-            self.proxy_output_activity_samples.clear();
-            (0, 0)
-        } else {
-            (
-                input_tokens.saturating_sub(previous_input),
-                output_tokens.saturating_sub(previous_output),
-            )
-        };
+        let (input_delta, output_delta) =
+            if input_tokens < previous_input || output_tokens < previous_output {
+                self.proxy_input_activity_samples.clear();
+                self.proxy_output_activity_samples.clear();
+                (0, 0)
+            } else {
+                (
+                    input_tokens.saturating_sub(previous_input),
+                    output_tokens.saturating_sub(previous_output),
+                )
+            };
 
         self.proxy_input_activity_samples.push(input_delta);
         self.proxy_output_activity_samples.push(output_delta);
-        // A proxy restart can reset its in-memory counters after it has already
-        // persisted usage that the current aggregate has not seen. Treat the
-        // rollback as activity: one conservative refresh is cheaper than
-        // leaving the visible fixed Usage projection stale until another
-        // request arrives.
-        self.usage_proxy_activity_dirty |= counters_reset || input_delta > 0 || output_delta > 0;
 
         if self.proxy_input_activity_samples.len() > PROXY_ACTIVITY_WINDOW {
             let overflow = self.proxy_input_activity_samples.len() - PROXY_ACTIVITY_WINDOW;
@@ -514,49 +384,12 @@ impl App {
         }
     }
 
-    /// Consume proxy usage activity once its aggregate refresh interval has
-    /// elapsed. Further traffic sets the bit again while a query is running,
-    /// which collapses a busy stream into at most one follow-up query.
-    pub(crate) fn take_proxy_usage_refresh_due(&mut self, interval_ticks: u64) -> bool {
-        if !self.usage_proxy_activity_dirty {
-            return false;
-        }
-        let last_tick = *self.usage_last_proxy_refresh_tick.get_or_insert(self.tick);
-        if self.tick.saturating_sub(last_tick) < interval_ticks {
-            return false;
-        }
-        self.usage_proxy_activity_dirty = false;
-        self.usage_last_proxy_refresh_tick = Some(self.tick);
-        true
-    }
-
     pub fn push_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
         self.toast = Some(Toast::new(message, kind));
     }
 
     pub fn push_persistent_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
         self.toast = Some(Toast::persistent(message, kind));
-    }
-
-    pub fn push_copyable_toast(
-        &mut self,
-        message: impl Into<String>,
-        kind: ToastKind,
-        text: impl Into<String>,
-    ) {
-        let scope = ToastActionScope::new(self.app_type.clone(), self.route.clone());
-        self.toast = Some(Toast::copyable(message, kind, text, scope));
-    }
-
-    pub(crate) fn clear_out_of_scope_action_toast(&mut self) {
-        let is_out_of_scope = self
-            .toast
-            .as_ref()
-            .and_then(|toast| toast.action.as_ref())
-            .is_some_and(|action| !action.is_available_in(&self.app_type, &self.route));
-        if is_out_of_scope {
-            self.toast = None;
-        }
     }
 
     pub(crate) fn clear_managed_auth_login_toast(&mut self) {
@@ -633,10 +466,7 @@ impl App {
         if self.editor.is_some() || self.filter.active || self.form_text_input_is_active() {
             return false;
         }
-        let project_picker = matches!(self.overlay, Overlay::SessionProjectPicker(_));
-        if matches!(self.overlay, Overlay::Help(_))
-            || (self.overlay_text_input_is_active() && !project_picker)
-        {
+        if matches!(self.overlay, Overlay::Help(_)) || self.overlay_text_input_is_active() {
             return false;
         }
         !self.overlay.is_active()
@@ -683,24 +513,6 @@ impl App {
             || self.form_text_input_is_active()
     }
 
-    fn toast_action_input_is_available(&self) -> bool {
-        !self.overlay.is_active()
-            && self.editor.is_none()
-            && self.form.is_none()
-            && !self.filter.active
-    }
-
-    pub(crate) fn available_toast_action(&self) -> Option<&ToastAction> {
-        if !self.toast_action_input_is_available() {
-            return None;
-        }
-        self.toast
-            .as_ref()?
-            .action
-            .as_ref()
-            .filter(|action| action.is_available_in(&self.app_type, &self.route))
-    }
-
     fn normalize_vim_navigation_key(&self, key: KeyEvent) -> KeyEvent {
         if self.text_input_is_active() {
             return key;
@@ -724,10 +536,6 @@ impl App {
 
     pub fn on_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         self.clamp_selections(data);
-        self.on_key_after_clamp(key, data)
-    }
-
-    fn on_key_after_clamp(&mut self, key: KeyEvent, data: &UiData) -> Action {
         if !self.overlay.is_active() {
             self.pending_overlay = None;
         }
@@ -735,18 +543,6 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
             return Action::Quit;
-        }
-
-        if key.modifiers.is_empty() {
-            if let (Some(action), KeyCode::Char(ch)) = (self.available_toast_action(), key.code) {
-                if action.shortcut() == ch {
-                    match action {
-                        ToastAction::CopyToClipboard { text, .. } => {
-                            return Action::CopyToClipboard { text: text.clone() };
-                        }
-                    }
-                }
-            }
         }
 
         if self.managed_auth_login.is_some()
@@ -857,6 +653,15 @@ impl App {
                 return self.on_usage_key(key, data);
             }
             KeyCode::Char('q') | KeyCode::Esc => {
+                // If in sessions "show all providers" mode, Esc exits that mode
+                // instead of navigating back.
+                if matches!(self.route, Route::Sessions) && self.sessions.show_all_providers {
+                    self.sessions.show_all_providers = false;
+                    self.sessions.loaded_once = false;
+                    self.sessions.selected_idx = 0;
+                    self.sessions.clear_detail();
+                    return Action::None;
+                }
                 return self.on_back_key();
             }
             _ => {}
@@ -873,50 +678,6 @@ impl App {
             Focus::Nav => self.on_nav_key(key),
             Focus::Content => self.on_content_key(key, data),
         }
-    }
-
-    pub(crate) fn on_wheel(
-        &mut self,
-        direction: crate::cli::tui::input::ScrollDirection,
-        steps: u32,
-        gesture: crate::cli::tui::input::WheelGestureId,
-        data: &UiData,
-    ) -> Action {
-        if !self.overlay.is_active()
-            && self.editor.is_none()
-            && self.form.is_none()
-            && matches!(self.focus, Focus::Content)
-            && matches!(self.route, Route::Sessions)
-        {
-            return self.on_sessions_wheel(direction, steps, gesture, data);
-        }
-        if !self.overlay.is_active()
-            && self.editor.is_none()
-            && self.form.is_none()
-            && !self.filter.active
-            && matches!(self.focus, Focus::Content)
-            && matches!(self.route, Route::UsageLogs)
-        {
-            return self.on_usage_logs_wheel(direction, steps, gesture, data);
-        }
-
-        // Non-paged surfaces retain ordinary arrow semantics, but a raw burst is
-        // bounded and applied before the next draw. This prevents hundreds of
-        // queued wheel reports from each triggering a global clamp and frame.
-        let code = match direction {
-            crate::cli::tui::input::ScrollDirection::Up => KeyCode::Up,
-            crate::cli::tui::input::ScrollDirection::Down => KeyCode::Down,
-        };
-        let repeats = usize::try_from(steps).unwrap_or(usize::MAX).clamp(1, 12);
-        self.clamp_selections(data);
-        let mut action = Action::None;
-        for _ in 0..repeats {
-            let next = self.on_key_after_clamp(KeyEvent::new(code, KeyModifiers::NONE), data);
-            if !matches!(next, Action::None) {
-                action = next;
-            }
-        }
-        action
     }
 
     pub(crate) fn on_back_key(&mut self) -> Action {
@@ -938,7 +699,6 @@ impl App {
         let is_daily_memory = matches!(scope, FilterScope::Global)
             && matches!(self.route, Route::ConfigOpenClawDailyMemory);
         let mut filter_changed = false;
-        let mut cancel_session_search = false;
         let action = match key.code {
             KeyCode::Esc => {
                 filter_changed = !self.active_filter_input_mut().value.is_empty();
@@ -951,12 +711,11 @@ impl App {
                 // after Esc.
                 if matches!(self.route, Route::Sessions) && matches!(scope, FilterScope::Global) {
                     self.sessions.deep_search_query = None;
-                    self.sessions.clear_deep_search_results();
+                    self.sessions.deep_search_results.clear();
                     self.sessions.deep_search_pending = None;
                     // Drop any in-flight search too, so its result is ignored on
                     // arrival and the "searching" spinner stops immediately.
                     self.sessions.deep_search_active = None;
-                    cancel_session_search = true;
                 }
                 if is_daily_memory {
                     self.openclaw_daily_memory_search_results.clear();
@@ -975,13 +734,13 @@ impl App {
                         query: self.filter.input.value.clone(),
                     }
                 } else if matches!(self.route, Route::Sessions) {
-                    let q = self.filter.input.value.trim().to_lowercase();
+                    let q = self.filter.input.value.trim().to_string();
                     if q.is_empty() {
                         self.sessions.deep_search_query = None;
-                        self.sessions.clear_deep_search_results();
+                        self.sessions.deep_search_results.clear();
                         self.sessions.deep_search_pending = None;
                         self.sessions.deep_search_active = None;
-                        Action::SessionsDeepSearchCancel
+                        Action::None
                     } else {
                         // If deep search has already completed for this query,
                         // open the selected session's detail directly instead
@@ -1026,7 +785,7 @@ impl App {
                 // In sessions page, set pending deep search only when text content changes
                 // (not on cursor movement via Left/Right keys)
                 if edit.changed && matches!(self.route, Route::Sessions) {
-                    let q = self.filter.input.value.trim().to_lowercase();
+                    let q = self.filter.input.value.trim().to_string();
                     // Only re-trigger if the query string actually changed
                     let current_query = self
                         .sessions
@@ -1039,16 +798,14 @@ impl App {
                     } else if q.is_empty() {
                         self.sessions.deep_search_pending = None;
                         self.sessions.deep_search_query = None;
-                        self.sessions.clear_deep_search_results();
+                        self.sessions.deep_search_results.clear();
                         self.sessions.deep_search_active = None;
-                        cancel_session_search = true;
                     } else {
                         self.sessions.deep_search_pending = Some((q, 0));
                         // The query changed, so any in-flight search is now
                         // stale: invalidate it so its result is not accepted
                         // under the new query text.
                         self.sessions.deep_search_active = None;
-                        cancel_session_search = true;
                     }
                 }
                 if is_daily_memory && edit.changed && self.filter.input.value.is_empty() {
@@ -1061,11 +818,7 @@ impl App {
             }
         };
         self.sync_after_filter_key(data, filter_changed, scope);
-        if cancel_session_search && matches!(action, Action::None) {
-            Action::SessionsDeepSearchCancel
-        } else {
-            action
-        }
+        action
     }
 
     pub(crate) fn on_nav_key(&mut self, key: KeyEvent) -> Action {
@@ -1099,7 +852,7 @@ impl App {
             Route::Providers => self.on_providers_key(key, data),
             Route::Usage => self.on_usage_key(key, data),
             Route::UsageLogs => self.on_usage_logs_key(key, data),
-            Route::UsageLogDetail { rowid } => self.on_usage_log_detail_key(key, rowid),
+            Route::UsageLogDetail { request_id } => self.on_usage_log_detail_key(key, &request_id),
             Route::Pricing => self.on_pricing_key(key, data),
             Route::Sessions => self.on_sessions_key(key, data),
             Route::Mcp => self.on_mcp_key(key, data),
@@ -1111,9 +864,7 @@ impl App {
             Route::ConfigOpenClawEnv => self.on_config_openclaw_env_key(key, data),
             Route::ConfigOpenClawTools => self.on_config_openclaw_tools_key(key, data),
             Route::ConfigOpenClawAgents => self.on_config_openclaw_agents_key(key, data),
-            Route::ConfigCloudSync => self.on_config_cloud_sync_key(key),
             Route::ConfigWebDav => self.on_config_webdav_key(key, data),
-            Route::ConfigS3 => self.on_config_s3_key(key, data),
             Route::Skills => self.on_skills_installed_key(key, data),
             Route::SkillsDiscover => self.on_skills_discover_key(key),
             Route::SkillsRepos => self.on_skills_repos_key(key, data),
@@ -1182,55 +933,20 @@ impl App {
             self.prompt_idx = self.prompt_idx.min(prompt_len - 1);
         }
 
-        let visible_session_rows = visible_sessions_for_state(
-            &self.filter,
-            &self.app_type,
-            self.sessions.provider_id.as_deref(),
-            &self.sessions.project_scope,
-            &self.sessions.rows,
-            self.sessions.detail_key.as_deref(),
-            self.sessions.messages_loaded,
-            &self.sessions.messages,
-            self.sessions.deep_search_query.as_deref(),
-            &self.sessions.deep_search_results,
-            self.sessions
-                .materialized_view_is_current(self.filter.query_lower().as_deref()),
-            self.sessions.rows_revision,
-            self.sessions.messages_revision,
-            self.sessions.deep_search_seq,
-            &self.sessions.visibility_cache,
-        );
+        let visible_session_rows =
+            visible_sessions_for_state(&self.filter, &self.app_type, &self.sessions);
         let sessions_len = visible_session_rows.len();
-        self.sessions.selected_idx = if sessions_len == 0 {
-            0
-        } else {
-            self.sessions.selected_idx.min(sessions_len - 1)
-        };
-        self.sessions
-            .pagination
-            .sync_len(self.sessions.logical_total_rows());
-        if sessions_len > 0 && !self.sessions.remote.input_is_blocked() {
-            let page_start = self
-                .sessions
-                .remote
-                .current_page()
-                .saturating_mul(crate::session_manager::paged_manifest::PAGE_SIZE);
-            let absolute = page_start.saturating_add(self.sessions.selected_idx);
-            if self.sessions.pagination.selected_index() != Some(absolute) {
-                self.sessions.pagination.select(absolute);
-            }
-        }
-        let selected_session = visible_session_rows.get(self.sessions.selected_idx);
         let session_detail_missing = self.sessions.detail_key.as_deref().is_some_and(|key| {
-            selected_session.is_none_or(|session| !session_key_matches(session, key))
-                && !visible_session_rows
-                    .iter()
-                    .any(|session| session_key_matches(session, key))
+            !visible_session_rows
+                .iter()
+                .any(|session| session_key(session) == key)
         });
-        if session_detail_missing
-            && !self.sessions.remote.input_is_blocked()
-            && self.sessions.pending_manifest.is_none()
-        {
+        if sessions_len == 0 {
+            self.sessions.selected_idx = 0;
+        } else {
+            self.sessions.selected_idx = self.sessions.selected_idx.min(sessions_len - 1);
+        }
+        if session_detail_missing {
             self.sessions.clear_detail();
         }
         clamp_session_message_selection(&mut self.sessions);
@@ -1247,12 +963,6 @@ impl App {
         } else {
             self.usage.logs_idx = self.usage.logs_idx.min(usage_logs_len - 1);
         }
-        self.usage.sync_log_pager(
-            &self.app_type,
-            self.usage.range,
-            data.usage.recent_logs_for(self.usage.range),
-            data.usage.logs_total_for(self.usage.range),
-        );
 
         let pricing_len = visible_pricing_rows(&self.filter, data).len();
         if pricing_len == 0 {
@@ -1325,10 +1035,5 @@ impl App {
         } else {
             self.config_webdav_idx = self.config_webdav_idx.min(config_webdav_len - 1);
         }
-
-        self.config_cloud_sync_idx = self
-            .config_cloud_sync_idx
-            .min(CloudSyncBackend::ALL.len().saturating_sub(1));
-        self.clamp_s3_config_selection(data);
     }
 }

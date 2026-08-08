@@ -15,6 +15,9 @@ pub(super) enum LiveSnapshot {
     Claude {
         settings: Option<Value>,
     },
+    ClaudeDesktop {
+        snapshot: crate::claude_desktop_config::ClaudeDesktopConfigSnapshot,
+    },
     Codex {
         auth: Option<Value>,
         config: Option<String>,
@@ -44,6 +47,9 @@ impl LiveSnapshot {
                 } else if path.exists() {
                     delete_file(&path)?;
                 }
+            }
+            LiveSnapshot::ClaudeDesktop { snapshot } => {
+                crate::claude_desktop_config::restore_config_snapshot(snapshot)?;
             }
             LiveSnapshot::Codex { auth, config } => {
                 let auth_path = get_codex_auth_path();
@@ -123,6 +129,9 @@ pub(super) fn capture_live_snapshot(app_type: &AppType) -> Result<LiveSnapshot, 
             };
             Ok(LiveSnapshot::Claude { settings })
         }
+        AppType::ClaudeDesktop => Ok(LiveSnapshot::ClaudeDesktop {
+            snapshot: crate::claude_desktop_config::snapshot_current_config()?,
+        }),
         AppType::Codex => {
             let auth_path = get_codex_auth_path();
             let config_path = get_codex_config_path();
@@ -183,7 +192,7 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
         return Ok(0);
     }
 
-    let mut imported = 0usize;
+    let mut changed = 0usize;
     let existing_ids = state.db.get_provider_ids("hermes")?;
 
     for (id, settings_config) in providers {
@@ -191,12 +200,31 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
             log::warn!("Skipping Hermes provider with empty id");
             continue;
         }
-        if existing_ids.contains(&id) {
-            log::debug!("Hermes provider '{id}' already exists in database, skipping");
-            continue;
-        }
         if !settings_config.is_object() {
             log::warn!("Skipping Hermes provider '{id}': config is not an object");
+            continue;
+        }
+
+        if existing_ids.contains(&id) {
+            match state.db.get_provider_by_id(&id, "hermes") {
+                Ok(Some(existing)) if existing.settings_config != settings_config => {
+                    let mut provider = existing;
+                    provider.settings_config = settings_config;
+                    if let Err(err) = state.db.save_provider("hermes", &provider) {
+                        log::warn!(
+                            "Failed to update Hermes provider '{id}' from live config: {err}"
+                        );
+                    } else {
+                        changed += 1;
+                        log::info!("Updated Hermes provider '{id}' from live config");
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    log::warn!("Hermes provider '{id}' disappeared while importing live config")
+                }
+                Err(err) => log::warn!("Failed to look up Hermes provider '{id}': {err}"),
+            }
             continue;
         }
 
@@ -218,11 +246,11 @@ pub fn import_hermes_providers_from_live(state: &AppState) -> Result<usize, AppE
             continue;
         }
 
-        imported += 1;
+        changed += 1;
         log::info!("Imported Hermes provider '{id}' from live config");
     }
 
-    Ok(imported)
+    Ok(changed)
 }
 
 pub fn sync_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
@@ -352,7 +380,7 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
         return Ok(0);
     }
 
-    let mut imported = 0usize;
+    let mut changed = 0usize;
     let existing_ids = state.db.get_provider_ids("openclaw")?;
 
     for (id, config) in providers {
@@ -364,11 +392,6 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
             log::warn!("Skipping OpenClaw provider '{id}': no models defined");
             continue;
         }
-        if existing_ids.contains(&id) {
-            log::debug!("OpenClaw provider '{id}' already exists in database, skipping");
-            continue;
-        }
-
         let settings_config = match serde_json::to_value(&config) {
             Ok(value) => value,
             Err(err) => {
@@ -376,6 +399,35 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
                 continue;
             }
         };
+
+        if existing_ids.contains(&id) {
+            match state.db.get_provider_by_id(&id, "openclaw") {
+                Ok(Some(existing)) if existing.settings_config != settings_config => {
+                    let mut provider = existing;
+                    provider.settings_config = settings_config;
+                    if let Err(err) = state.db.save_provider("openclaw", &provider) {
+                        log::warn!(
+                            "Failed to update OpenClaw provider '{id}' from live config: {err}"
+                        );
+                    } else {
+                        let mut app_config = state.config.write().map_err(AppError::from)?;
+                        app_config.ensure_app(&AppType::OpenClaw);
+                        if let Some(manager) = app_config.get_manager_mut(&AppType::OpenClaw) {
+                            manager.providers.insert(id.clone(), provider);
+                        }
+                        changed += 1;
+                        log::info!("Updated OpenClaw provider '{id}' from live config");
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    log::warn!("OpenClaw provider '{id}' disappeared while importing live config")
+                }
+                Err(err) => log::warn!("Failed to look up OpenClaw provider '{id}': {err}"),
+            }
+            continue;
+        }
+
         let display_name = config
             .models
             .first()
@@ -400,11 +452,11 @@ pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, Ap
             }
         }
 
-        imported += 1;
+        changed += 1;
         log::info!("Imported OpenClaw provider '{id}' from live config");
     }
 
-    Ok(imported)
+    Ok(changed)
 }
 
 pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, AppError> {
@@ -413,15 +465,10 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
         return Ok(0);
     }
 
-    let mut imported = 0usize;
+    let mut changed = 0usize;
     let existing_ids = state.db.get_provider_ids("opencode")?;
 
     for (id, config) in providers {
-        if existing_ids.contains(&id) {
-            log::debug!("OpenCode provider '{id}' already exists in database, skipping");
-            continue;
-        }
-
         let settings_config = match serde_json::to_value(&config) {
             Ok(value) => value,
             Err(err) => {
@@ -429,6 +476,34 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
                 continue;
             }
         };
+
+        if existing_ids.contains(&id) {
+            match state.db.get_provider_by_id(&id, "opencode") {
+                Ok(Some(existing)) => {
+                    let display_name = config.name.clone().unwrap_or_else(|| existing.name.clone());
+                    if existing.settings_config != settings_config || existing.name != display_name
+                    {
+                        let mut provider = existing;
+                        provider.name = display_name;
+                        provider.settings_config = settings_config;
+                        if let Err(err) = state.db.save_provider("opencode", &provider) {
+                            log::warn!(
+                                "Failed to update OpenCode provider '{id}' from live config: {err}"
+                            );
+                        } else {
+                            changed += 1;
+                            log::info!("Updated OpenCode provider '{id}' from live config");
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::warn!("OpenCode provider '{id}' disappeared while importing live config")
+                }
+                Err(err) => log::warn!("Failed to look up OpenCode provider '{id}': {err}"),
+            }
+            continue;
+        }
+
         let mut provider = Provider::with_id(
             id.clone(),
             config.name.clone().unwrap_or_else(|| id.clone()),
@@ -445,9 +520,9 @@ pub fn import_opencode_providers_from_live(state: &AppState) -> Result<usize, Ap
             continue;
         }
 
-        imported += 1;
+        changed += 1;
         log::info!("Imported OpenCode provider '{id}' from live config");
     }
 
-    Ok(imported)
+    Ok(changed)
 }

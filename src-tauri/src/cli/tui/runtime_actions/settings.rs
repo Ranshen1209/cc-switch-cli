@@ -204,30 +204,25 @@ pub(super) fn set_openclaw_config_dir(
     Ok(())
 }
 
-pub(super) fn set_preferred_editor(
-    ctx: &mut RuntimeActionContext<'_>,
-    command: Option<String>,
-) -> Result<(), AppError> {
-    if let Some(command) = command.as_deref() {
-        crate::cli::editor::validate_preferred_editor_command(command)?;
-    }
-
-    crate::settings::set_preferred_editor(command)?;
-    ctx.app.push_toast(
-        texts::tui_toast_preferred_editor_saved(),
-        super::super::app::ToastKind::Success,
-    );
-    Ok(())
-}
-
-pub(super) fn set_preserve_codex_official_auth(
+pub(super) fn set_codex_unified_session_history(
     ctx: &mut RuntimeActionContext<'_>,
     enabled: bool,
 ) -> Result<(), AppError> {
-    crate::settings::set_preserve_codex_official_auth_on_switch(enabled)?;
+    let outcome =
+        crate::services::codex_history::set_unified_session_history_enabled(enabled, false, false)?;
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+
     ctx.app.push_toast(
-        texts::tui_toast_codex_official_auth_preservation_toggled(enabled),
-        ToastKind::Success,
+        if outcome.changed {
+            texts::tui_toast_codex_unified_session_history_toggled(enabled)
+        } else {
+            texts::tui_toast_codex_unified_session_history_already(enabled)
+        },
+        if outcome.changed {
+            ToastKind::Success
+        } else {
+            ToastKind::Info
+        },
     );
     Ok(())
 }
@@ -711,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn set_codex_official_auth_preservation_persists_setting() {
+    fn set_codex_unified_session_history_persists_setting() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestEnvGuard::isolated(temp_home.path());
 
@@ -740,15 +735,14 @@ mod tests {
             managed_auth_req_tx: None,
         };
 
-        set_preserve_codex_official_auth(&mut ctx, true)
-            .expect("enable Codex official auth preservation");
+        set_codex_unified_session_history(&mut ctx, true).expect("enable unified history");
 
-        assert!(crate::settings::preserve_codex_official_auth_on_switch());
+        assert!(crate::settings::unify_codex_session_history());
         assert!(matches!(
             ctx.app.toast.as_ref(),
             Some(toast) if toast.kind == ToastKind::Success
                 && toast.message
-                    == texts::tui_toast_codex_official_auth_preservation_toggled(true)
+                    == texts::tui_toast_codex_unified_session_history_toggled(true)
         ));
     }
 }

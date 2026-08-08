@@ -474,7 +474,6 @@ impl Database {
                 "claude" => (6, 90, 180, 8, 3, 90, 0.7, 15),
                 "codex" => (3, 60, 120, 4, 2, 60, 0.6, 10),
                 "gemini" => (5, 60, 120, 4, 2, 60, 0.6, 10),
-                "grokbuild" => (3, 60, 120, 4, 2, 60, 0.6, 10),
                 _ => (3, 60, 120, 4, 2, 60, 0.6, 10), // 默认值
             };
 
@@ -502,7 +501,7 @@ impl Database {
         Ok(())
     }
 
-    /// 初始化 proxy_config 表的每应用数据
+    /// 初始化 proxy_config 表的三行数据
     ///
     /// 使用与 schema.rs seed 相同的 per-app 默认值
     async fn init_proxy_config_rows(&self) -> Result<(), AppError> {
@@ -541,18 +540,6 @@ impl Database {
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
             ) VALUES ('gemini', 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
-            [],
-        )
-        .map_err(|e| AppError::Database(e.to_string()))?;
-
-        // grokbuild: Responses protocol, same timeout defaults as Codex.
-        conn.execute(
-            "INSERT OR IGNORE INTO proxy_config (
-                app_type, max_retries,
-                streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
-                circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
-                circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES ('grokbuild', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -762,43 +749,6 @@ impl Database {
             }),
             Err(e) => Err(AppError::Database(e.to_string())),
         }
-    }
-
-    /// 获取指定应用已有的 Provider 健康记录。
-    ///
-    /// 与 [`Self::get_provider_health`] 不同，这个批量查询不会为缺少记录的
-    /// Provider 合成“健康”状态。调用方因此可以区分“尚无请求记录”和
-    /// “已有成功记录且当前健康”，同时避免为列表中的每一项单独查询。
-    pub async fn list_provider_health_for_app(
-        &self,
-        app_type: &str,
-    ) -> Result<Vec<ProviderHealth>, AppError> {
-        let conn = lock_conn!(self.conn);
-        let mut stmt = conn
-            .prepare(
-                "SELECT provider_id, app_type, is_healthy, consecutive_failures,
-                        last_success_at, last_failure_at, last_error, updated_at
-                 FROM provider_health
-                 WHERE app_type = ?1",
-            )
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let rows = stmt
-            .query_map([app_type], |row| {
-                Ok(ProviderHealth {
-                    provider_id: row.get(0)?,
-                    app_type: row.get(1)?,
-                    is_healthy: row.get::<_, i64>(2)? != 0,
-                    consecutive_failures: row.get::<_, i64>(3)? as u32,
-                    last_success_at: row.get(4)?,
-                    last_failure_at: row.get(5)?,
-                    last_error: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            })
-            .map_err(|e| AppError::Database(e.to_string()))?;
-
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AppError::Database(e.to_string()))
     }
 
     /// 更新Provider健康状态

@@ -176,7 +176,6 @@ mod tests {
     use super::compute_local_midnight_cutoff;
     use crate::database::Database;
     use crate::error::AppError;
-    use crate::services::sql_helpers::INPUT_TOKEN_SEMANTICS_FRESH;
     use chrono::{Local, TimeZone};
 
     fn local_dt(
@@ -334,6 +333,13 @@ mod tests {
     }
 
     #[test]
+    fn test_rollup_noop_when_no_old_data() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        assert_eq!(db.rollup_and_prune(30)?, 0);
+        Ok(())
+    }
+
+    #[test]
     fn test_rollup_normalizes_total_cache_semantics_to_fresh() -> Result<(), AppError> {
         let db = Database::memory()?;
         let old_ts = chrono::Utc::now().timestamp() - 40 * 86400;
@@ -362,15 +368,8 @@ mod tests {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
-        assert_eq!(row, (70, 10, 20, INPUT_TOKEN_SEMANTICS_FRESH));
+        assert_eq!(row, (70, 10, 20, 2));
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_rollup_noop_when_no_old_data() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        assert_eq!(db.rollup_and_prune(30)?, 0);
         Ok(())
     }
 

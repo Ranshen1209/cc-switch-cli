@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, Gauge, GraphType, LineGauge,
         List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
@@ -20,15 +20,14 @@ use serde_json::Value;
 use super::{
     app,
     app::{
-        App, CloudSyncBackend, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay,
-        S3ConfigItem, SessionsPane, Toast, ToastAction, ToastKind, WebDavConfigItem,
+        App, ConfigItem, ConfirmAction, Focus, LoadingKind, Overlay, SessionsPane, ToastKind,
+        WebDavConfigItem,
     },
     data::{McpRow, ProviderRow, UiData},
     form::{
-        ClaudeModelPickerColumn, CodexPreviewSection, FormFocus, FormState, GeminiAuthType,
-        McpAddField, McpKeyValueKind, PromptMetaField, ProviderAddField,
+        CodexPreviewSection, FormFocus, FormState, GeminiAuthType, McpAddField, PromptMetaField,
+        ProviderAddField,
     },
-    icons,
     route::{NavItem, Route},
     theme,
     theme::theme_for,
@@ -38,7 +37,6 @@ mod chrome;
 mod config;
 mod editor;
 mod forms;
-mod home_chart;
 mod main_page;
 mod mcp;
 mod overlay;
@@ -61,7 +59,6 @@ use chrome::*;
 use config::*;
 use editor::*;
 use forms::*;
-use home_chart::*;
 use main_page::*;
 use mcp::*;
 use overlay::*;
@@ -162,8 +159,8 @@ fn render_content(
         Route::Providers => render_providers(frame, app, data, content_area, theme),
         Route::Usage => render_usage(frame, app, data, content_area, theme),
         Route::UsageLogs => render_usage_logs(frame, app, data, content_area, theme),
-        Route::UsageLogDetail { rowid } => {
-            render_usage_log_detail(frame, app, data, content_area, theme, *rowid)
+        Route::UsageLogDetail { request_id } => {
+            render_usage_log_detail(frame, app, data, content_area, theme, request_id)
         }
         Route::Pricing => render_pricing(frame, app, data, content_area, theme),
         Route::Sessions => render_sessions(frame, app, data, content_area, theme),
@@ -185,9 +182,7 @@ fn render_content(
                 render_config(frame, app, data, content_area, theme)
             }
         }
-        Route::ConfigCloudSync => render_config_cloud_sync(frame, app, data, content_area, theme),
         Route::ConfigWebDav => render_config_webdav(frame, app, data, content_area, theme),
-        Route::ConfigS3 => render_config_s3(frame, app, data, content_area, theme),
         Route::Skills => render_skills_installed(frame, app, data, content_area, theme),
         Route::SkillsDiscover => render_skills_discover(frame, app, data, content_area, theme),
         Route::SkillsRepos => render_skills_repos(frame, app, data, content_area, theme),
@@ -225,7 +220,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
         } else {
             Style::default().fg(theme.dim)
         })
-        .title(app.displayed_filter_title());
+        .title(texts::tui_filter_title());
 
     frame.render_widget(outer.clone(), area);
 

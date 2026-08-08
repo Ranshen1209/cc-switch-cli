@@ -28,7 +28,6 @@ use crate::config::{
 };
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta, UsageScript};
-use crate::services::mcp::McpService;
 use crate::store::AppState;
 
 use gemini_auth::GeminiAuthType;
@@ -73,19 +72,17 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 
     let common_config_snippet = state.db.get_config_snippet(AppType::Codex.as_str())?;
     ProviderService::write_live_snapshot(
+        state.db.as_ref(),
         &AppType::Codex,
         provider,
         common_config_snippet.as_deref(),
         true,
     )?;
-    // 重写 live 会整体替换 config.toml（有意设计），[mcp_servers] 随之丢失，
-    // 写完必须立刻从 DB 重新投影启用的 MCP。只投影 Codex 而非
-    // sync_all_enabled：后者按应用顺序逐应用短路，排在 Codex 前面的无关
-    // 应用 live 损坏会阻断 Codex 的重投影，让刚被清掉的 [mcp_servers]
-    // 无人补回。投影失败降级为警告：此时 live 已按新开关状态落盘，
-    // 若把错误上抛并回滚设置，会制造“设置=旧值、live=新桶”的会话分裂。
-    if let Err(err) = McpService::sync_enabled_for_app(state, &AppType::Codex) {
-        log::warn!("统一会话开关重写 live 后重投影 Codex MCP 失败（将在下次同步时自愈）: {err}");
+    if let Err(err) = crate::services::mcp::McpService::sync_enabled_for_app(state, &AppType::Codex)
+    {
+        log::warn!(
+            "Failed to re-project Codex MCP after unified-session live rewrite; it will self-heal on the next sync: {err}"
+        );
     }
     Ok(true)
 }
@@ -158,7 +155,6 @@ struct PostCommitAction {
     common_config_snippet: Option<String>,
     previous_common_config_snippet: Option<String>,
     takeover_active: bool,
-    sync_proxy_live: bool,
     activate_provider: bool,
 }
 
@@ -171,15 +167,15 @@ struct PreparedPostCommitAction {
 #[derive(Clone)]
 enum PreparedPostCommitEffect {
     Live(PreparedLiveWrite),
-    ProxyLiveBackup {
-        snapshot: Value,
-        previous_backup: Option<String>,
-    },
+    ProxyLiveBackup(Value),
 }
 
 #[derive(Clone)]
 enum PreparedLiveWrite {
     Noop,
+    ClaudeDesktop {
+        provider: Box<Provider>,
+    },
     Claude {
         settings: Value,
     },
@@ -482,6 +478,8 @@ impl ProviderService {
             template_type: Some("token_plan".to_string()),
             auto_query_interval: Some(5),
             coding_plan_provider: Some(coding_plan_provider.to_string()),
+            team_organization_id: None,
+            team_project_id: None,
         });
     }
 
@@ -506,7 +504,31 @@ impl ProviderService {
     }
 
     fn codex_config_has_base_url(config_text: &str) -> bool {
-        crate::codex_config::extract_codex_base_url(config_text).is_some()
+        let Ok(table) = toml::from_str::<toml::Table>(config_text.trim()) else {
+            return false;
+        };
+
+        if table
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return true;
+        }
+
+        let Some(provider_key) = table.get("model_provider").and_then(|value| value.as_str())
+        else {
+            return false;
+        };
+
+        table
+            .get("model_providers")
+            .and_then(|value| value.as_table())
+            .and_then(|providers| providers.get(provider_key))
+            .and_then(|value| value.as_table())
+            .and_then(|provider| provider.get("base_url"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
     }
 
     pub fn sync_openclaw_to_live(state: &AppState) -> Result<(), AppError> {
@@ -531,7 +553,13 @@ impl ProviderService {
         };
 
         for provider in &providers {
-            Self::write_live_snapshot(&AppType::OpenClaw, provider, snippet.as_deref(), true)?;
+            Self::write_live_snapshot(
+                state.db.as_ref(),
+                &AppType::OpenClaw,
+                provider,
+                snippet.as_deref(),
+                true,
+            )?;
         }
 
         Ok(())
@@ -761,9 +789,6 @@ impl ProviderService {
         action: PostCommitAction,
     ) -> Result<PreparedPostCommitAction, AppError> {
         let effect = if action.takeover_active {
-            let previous_backup =
-                futures::executor::block_on(state.db.get_live_backup(action.app_type.as_str()))?
-                    .map(|backup| backup.original_config);
             let backup_snapshot =
                 futures::executor::block_on(state.proxy_service.prepare_live_backup_from_provider(
                     action.app_type.as_str(),
@@ -771,10 +796,7 @@ impl ProviderService {
                     action.previous_provider.as_ref(),
                 ))
                 .map_err(AppError::Message)?;
-            PreparedPostCommitEffect::ProxyLiveBackup {
-                snapshot: backup_snapshot,
-                previous_backup,
-            }
+            PreparedPostCommitEffect::ProxyLiveBackup(backup_snapshot)
         } else {
             let apply_common_config = action
                 .provider
@@ -783,6 +805,7 @@ impl ProviderService {
                 .and_then(|meta| meta.apply_common_config)
                 .unwrap_or(false);
             PreparedPostCommitEffect::Live(Self::prepare_live_snapshot(
+                state.db.as_ref(),
                 &action.app_type,
                 &action.provider,
                 action.previous_provider.as_ref(),
@@ -801,7 +824,7 @@ impl ProviderService {
     ) -> Result<(), AppError> {
         match &prepared.effect {
             PreparedPostCommitEffect::Live(live) => {
-                Self::apply_prepared_live_snapshot(live)?;
+                Self::apply_prepared_live_snapshot(state.db.as_ref(), live)?;
                 if prepared.action.activate_provider
                     && matches!(prepared.action.app_type, AppType::Hermes)
                 {
@@ -811,82 +834,24 @@ impl ProviderService {
                     )?;
                 }
             }
-            PreparedPostCommitEffect::ProxyLiveBackup {
-                snapshot,
-                previous_backup,
-            } => {
+            PreparedPostCommitEffect::ProxyLiveBackup(snapshot) => {
                 futures::executor::block_on(
                     state
                         .proxy_service
                         .save_live_backup_snapshot(prepared.action.app_type.as_str(), snapshot),
                 )
                 .map_err(AppError::Message)?;
-
-                let sync_result = if prepared.action.sync_proxy_live {
-                    match state.proxy_service.is_running_blocking() {
-                        Ok(true) => {
-                            let app_name = prepared.action.app_type.as_str();
-                            let result = match prepared.action.app_type {
-                                AppType::Claude => futures::executor::block_on(
-                                    state
-                                        .proxy_service
-                                        .sync_claude_live_from_provider_while_proxy_active(
-                                            &prepared.action.provider,
-                                        ),
-                                ),
-                                AppType::Codex => futures::executor::block_on(
-                                    state
-                                        .proxy_service
-                                        .sync_codex_live_from_provider_while_proxy_active(
-                                            &prepared.action.provider,
-                                        ),
-                                ),
-                                _ => Ok(()),
-                            };
-                            result.map_err(|error| {
-                                AppError::localized(
-                                    "provider.update.proxy_live_sync_failed",
-                                    format!("同步 {app_name} Live 配置失败: {error}"),
-                                    format!("Failed to sync {app_name} live config: {error}"),
-                                )
-                            })
-                        }
-                        Ok(false) => Ok(()),
-                        Err(error) => Err(AppError::Message(error)),
-                    }
-                } else {
-                    Ok(())
-                };
-
-                if let Err(sync_error) = sync_result {
-                    let restore_result = match previous_backup {
-                        Some(previous_backup) => {
-                            futures::executor::block_on(state.db.save_live_backup(
-                                prepared.action.app_type.as_str(),
-                                previous_backup,
-                            ))
-                        }
-                        None => futures::executor::block_on(
-                            state
-                                .db
-                                .delete_live_backup(prepared.action.app_type.as_str()),
-                        ),
-                    };
-                    if let Err(restore_error) = restore_result {
-                        return Err(AppError::localized(
-                            "provider.update.proxy_backup_rollback_failed",
-                            format!("{sync_error}；恢复 Live 备份失败: {restore_error}"),
-                            format!("{sync_error}; failed to restore live backup: {restore_error}"),
-                        ));
-                    }
-                    return Err(sync_error);
-                }
             }
         }
 
         if prepared.action.sync_mcp {
             use crate::services::mcp::McpService;
-            McpService::sync_all_enabled(state)?;
+            if let Err(err) = McpService::sync_enabled_for_app(state, &prepared.action.app_type) {
+                log::warn!(
+                    "Failed to re-project {} MCP after provider update; it will self-heal on the next sync: {err}",
+                    prepared.action.app_type.as_str()
+                );
+            }
         }
         if !prepared.action.takeover_active
             && prepared.action.refresh_snapshot
@@ -911,6 +876,7 @@ impl ProviderService {
         provider_id: &str,
     ) -> Result<(), AppError> {
         match app_type {
+            AppType::ClaudeDesktop => {}
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
                 if !settings_path.exists() {
@@ -1268,7 +1234,9 @@ impl ProviderService {
                 strict_current_provider_id,
                 old_snippet,
             ),
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
+            AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+                Ok(())
+            }
         };
 
         match result {
@@ -1340,7 +1308,6 @@ impl ProviderService {
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             previous_common_config_snippet,
             takeover_active,
-            sync_proxy_live: false,
             activate_provider: false,
         }))
     }
@@ -1390,7 +1357,9 @@ impl ProviderService {
             }
             AppType::Gemini => live_settings.get("env") != provider_settings.get("env"),
             AppType::Claude => live_settings != provider_settings,
-            AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+            AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+                false
+            }
         }
     }
 
@@ -1520,6 +1489,7 @@ impl ProviderService {
     ) -> Result<String, AppError> {
         match app_type {
             AppType::Claude => Self::extract_claude_common_config(settings_config),
+            AppType::ClaudeDesktop => Ok(String::new()),
             AppType::Codex => Self::extract_codex_common_config(settings_config),
             AppType::Gemini => Self::extract_gemini_common_config(settings_config),
             AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
@@ -1530,7 +1500,41 @@ impl ProviderService {
 
     fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
         let mut config = settings.clone();
-        common_config::sanitize_extracted_claude_common_config(&mut config);
+
+        const ENV_EXCLUDES: &[&str] = &[
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_REASONING_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+            "ANTHROPIC_BASE_URL",
+        ];
+        const TOP_LEVEL_EXCLUDES: &[&str] = &["apiBaseUrl", "primaryModel", "smallFastModel"];
+
+        if let Some(env) = config.get_mut("env").and_then(Value::as_object_mut) {
+            for key in ENV_EXCLUDES {
+                env.remove(*key);
+            }
+            if env.is_empty() {
+                if let Some(obj) = config.as_object_mut() {
+                    obj.remove("env");
+                }
+            }
+        }
+
+        if let Some(obj) = config.as_object_mut() {
+            for key in TOP_LEVEL_EXCLUDES {
+                obj.remove(*key);
+            }
+        }
 
         if config.as_object().is_none_or(|obj| obj.is_empty()) {
             return Ok("{}".to_string());
@@ -1554,7 +1558,7 @@ impl ProviderService {
         let mut snippet = serde_json::Map::new();
         if let Some(env) = env {
             for (key, value) in env {
-                if key == "GOOGLE_GEMINI_BASE_URL" || common_config::is_sensitive_config_key(key) {
+                if key == "GOOGLE_GEMINI_BASE_URL" || key == "GEMINI_API_KEY" {
                     continue;
                 }
                 let Value::String(v) = value else {
@@ -1964,7 +1968,6 @@ impl ProviderService {
                     common_config_snippet,
                     previous_common_config_snippet: None,
                     takeover_active: false,
-                    sync_proxy_live: false,
                     activate_provider: false,
                 })
             } else {
@@ -1995,19 +1998,6 @@ impl ProviderService {
                 crate::settings::get_effective_current_provider(&state.db, &app_type)?,
                 state.db.get_current_provider(app_type.as_str())?,
             )
-        };
-        let (takeover_active, live_taken_over) = if app_type.is_additive_mode() {
-            (false, false)
-        } else {
-            let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            (has_live_backup || live_taken_over, live_taken_over)
         };
 
         Self::run_transaction(state, move |config| {
@@ -2121,14 +2111,11 @@ impl ProviderService {
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
-                    sync_mcp: matches!(&app_type_clone, AppType::Codex) && !takeover_active,
+                    sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
                     previous_common_config_snippet: None,
-                    takeover_active,
-                    sync_proxy_live: (takeover_active
-                        && matches!(&app_type_clone, AppType::Claude))
-                        || (live_taken_over && matches!(&app_type_clone, AppType::Codex)),
+                    takeover_active: false,
                     activate_provider: false,
                 })
             } else {
@@ -2152,6 +2139,13 @@ impl ProviderService {
         }
 
         let settings_config = match app_type {
+            AppType::ClaudeDesktop => {
+                return Err(AppError::localized(
+                    "claude_desktop.import_unsupported",
+                    "Claude Desktop 配置由专用 profile 管理，无法导入为默认供应商",
+                    "Claude Desktop configuration is managed by dedicated profiles and cannot be imported as a default provider",
+                ));
+            }
             AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog()?,
             AppType::Claude => {
                 let settings_path = get_claude_settings_path();
@@ -2263,6 +2257,11 @@ impl ProviderService {
     /// 读取当前 live 配置
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
         match app_type {
+            AppType::ClaudeDesktop => Err(AppError::localized(
+                "claude_desktop.live.read_unsupported",
+                "Claude Desktop 配置由专用 profile 管理，无法作为普通 live 配置读取",
+                "Claude Desktop configuration is managed by dedicated profiles and cannot be read as regular live settings",
+            )),
             AppType::Codex => crate::codex_config::read_codex_live_settings_with_model_catalog(),
             AppType::Claude => {
                 let path = get_claude_settings_path();
@@ -2655,7 +2654,13 @@ impl ProviderService {
                 continue;
             }
 
-            Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)?;
+            Self::write_live_snapshot(
+                state.db.as_ref(),
+                app_type,
+                provider,
+                snippet.as_deref(),
+                true,
+            )?;
         }
 
         if let Err(e) =
@@ -2664,15 +2669,13 @@ impl ProviderService {
             log::warn!("sync_current_to_live: Prompt 同步失败: {e}");
         }
 
-        if let Err(e) = McpService::sync_all_enabled(state) {
-            log::warn!("sync_current_to_live: MCP 同步失败: {e}");
-        }
+        let mcp_result = McpService::sync_all_enabled(state);
 
         if let Err(e) = crate::services::skill::SkillService::sync_all_enabled_best_effort() {
             log::warn!("sync_current_to_live: Skills 同步失败: {e}");
         }
 
-        Ok(())
+        mcp_result
     }
 
     fn prepare_switch_post_commit_action(
@@ -2710,7 +2713,6 @@ impl ProviderService {
                 common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
                 previous_common_config_snippet: None,
                 takeover_active: false,
-                sync_proxy_live: false,
                 activate_provider: matches!(app_type, AppType::Hermes),
             });
         }
@@ -2725,6 +2727,20 @@ impl ProviderService {
                     .cloned()
             });
         let provider = match app_type {
+            AppType::ClaudeDesktop => {
+                let manager = config
+                    .get_manager_mut(app_type)
+                    .ok_or_else(|| Self::app_not_found(app_type))?;
+                let provider = manager.providers.get(provider_id).cloned().ok_or_else(|| {
+                    AppError::localized(
+                        "provider.not_found",
+                        format!("供应商不存在: {provider_id}"),
+                        format!("Provider not found: {provider_id}"),
+                    )
+                })?;
+                manager.current = provider_id.to_string();
+                provider
+            }
             AppType::Codex => {
                 Self::prepare_switch_codex(config, provider_id, effective_current_provider)?
             }
@@ -2744,12 +2760,11 @@ impl ProviderService {
             provider,
             previous_provider,
             backup,
-            sync_mcp: true,
-            refresh_snapshot: true,
+            sync_mcp: !matches!(app_type, AppType::ClaudeDesktop),
+            refresh_snapshot: !matches!(app_type, AppType::ClaudeDesktop),
             common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
             previous_common_config_snippet,
             takeover_active: false,
-            sync_proxy_live: false,
             activate_provider: false,
         })
     }
@@ -2828,12 +2843,14 @@ impl ProviderService {
     }
 
     fn write_live_snapshot(
+        db: &crate::database::Database,
         app_type: &AppType,
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
         let prepared = Self::prepare_live_snapshot(
+            db,
             app_type,
             provider,
             None,
@@ -2841,10 +2858,11 @@ impl ProviderService {
             None,
             apply_common_config,
         )?;
-        Self::apply_prepared_live_snapshot(&prepared)
+        Self::apply_prepared_live_snapshot(db, &prepared)
     }
 
     fn prepare_live_snapshot(
+        db: &crate::database::Database,
         app_type: &AppType,
         provider: &Provider,
         previous_provider: Option<&Provider>,
@@ -2860,6 +2878,18 @@ impl ProviderService {
         );
 
         match app_type {
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::validate_provider(provider)?;
+                if matches!(
+                    crate::claude_desktop_config::provider_mode(provider),
+                    crate::provider::ClaudeDesktopMode::Proxy
+                ) {
+                    crate::claude_desktop_config::proxy_gateway_base_url_from_db(db)?;
+                }
+                Ok(PreparedLiveWrite::ClaudeDesktop {
+                    provider: Box::new(provider.clone()),
+                })
+            }
             AppType::Codex => Self::prepare_codex_live_write(
                 provider,
                 common_config_snippet,
@@ -2954,9 +2984,15 @@ impl ProviderService {
         }
     }
 
-    fn apply_prepared_live_snapshot(prepared: &PreparedLiveWrite) -> Result<(), AppError> {
+    fn apply_prepared_live_snapshot(
+        db: &crate::database::Database,
+        prepared: &PreparedLiveWrite,
+    ) -> Result<(), AppError> {
         match prepared {
             PreparedLiveWrite::Noop => Ok(()),
+            PreparedLiveWrite::ClaudeDesktop { provider } => {
+                crate::claude_desktop_config::apply_provider(db, provider.as_ref())
+            }
             PreparedLiveWrite::Claude { .. } => Self::apply_claude_live_write(prepared),
             PreparedLiveWrite::Codex { .. } => Self::apply_codex_live_write(prepared),
             PreparedLiveWrite::Gemini { .. } | PreparedLiveWrite::GeminiSecurityFlag { .. } => {
@@ -3078,6 +3114,9 @@ impl ProviderService {
         );
 
         match app_type {
+            AppType::ClaudeDesktop => Err(AppError::Config(
+                "Claude Desktop does not use proxy takeover backups".into(),
+            )),
             AppType::Claude => {
                 let mut effective = common_config::build_effective_settings_with_common_config(
                     app_type,
@@ -3203,6 +3242,9 @@ impl ProviderService {
                     ));
                 }
             }
+            AppType::ClaudeDesktop => {
+                crate::claude_desktop_config::validate_provider(provider)?;
+            }
             AppType::Codex => {
                 let settings = provider.settings_config.as_object().ok_or_else(|| {
                     AppError::localized(
@@ -3285,7 +3327,7 @@ impl ProviderService {
             }
         }
 
-        // 🔧 验证并清理 UsageScript 配置（所有应用类型通用）
+        //  验证并清理 UsageScript 配置（所有应用类型通用）
         if let Some(meta) = &provider.meta {
             if let Some(usage_script) = &meta.usage_script {
                 Self::validate_usage_script(usage_script)?;
@@ -3442,6 +3484,9 @@ impl ProviderService {
         }
 
         match app_type {
+            AppType::ClaudeDesktop => {
+                let _ = provider_snapshot;
+            }
             AppType::Codex => {
                 crate::codex_config::delete_codex_provider_config(
                     provider_id,

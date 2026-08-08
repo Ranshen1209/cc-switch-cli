@@ -154,7 +154,7 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
     }
 
     if i18n::is_chinese() {
-        let summary = format!(
+        let mut summary = format!(
             "{} 个目录模型 · 30天使用 {} 个 · 30天未匹配 {} 个模型 · {} tokens · {} total",
             data.pricing.total_models(),
             data.pricing.recently_used_models(),
@@ -162,24 +162,15 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
             format_token_compact(data.pricing.recent_total_tokens()),
             format_money(data.pricing.recent_total_cost_usd())
         );
-        let summary = if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
-            format!(
-                "{summary} · 未匹配 {}",
+        if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
+            summary.push_str(&format!(
+                " · 未匹配 {}",
                 format_money(data.pricing.recent_unmatched_total_cost_usd)
-            )
-        } else {
-            summary
-        };
-        if app
-            .usage
-            .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
-        {
-            format!("{}{}", pricing_refresh_prefix(app), summary)
-        } else {
-            summary
+            ));
         }
+        summary
     } else {
-        let summary = format!(
+        let mut summary = format!(
             "{} catalog models · {} used 30d · {} unmatched models 30d · {} tokens · {} total",
             data.pricing.total_models(),
             data.pricing.recently_used_models(),
@@ -187,30 +178,14 @@ fn pricing_summary_line(app: &App, data: &UiData) -> String {
             format_token_compact(data.pricing.recent_total_tokens()),
             format_money(data.pricing.recent_total_cost_usd())
         );
-        let summary = if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
-            format!(
-                "{summary} · {} unmatched",
+        if data.pricing.recent_unmatched_total_cost_usd > 0.0 {
+            summary.push_str(&format!(
+                " · {} unmatched",
                 format_money(data.pricing.recent_unmatched_total_cost_usd)
-            )
-        } else {
-            summary
-        };
-        if app
-            .usage
-            .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
-        {
-            format!("{}{}", pricing_refresh_prefix(app), summary)
-        } else {
-            summary
+            ));
         }
+        summary
     }
-}
-
-/// The pricing summary is a plain string, so it carries the indicator's glyph
-/// and label without its accent styling — but off the same frame source, so it
-/// stays in step with every other spinner on screen.
-fn pricing_refresh_prefix(app: &App) -> String {
-    format!("{} {} · ", spinner_frame(app.tick), texts::tui_refreshing())
 }
 
 fn current_pricing_is_loading(app: &App, data: &UiData) -> bool {

@@ -222,11 +222,11 @@ fn list_installed() -> Result<(), AppError> {
         table.add_row(vec![
             skill.directory,
             skill.name,
-            if skill.apps.claude { "✓" } else { " " }.to_string(),
-            if skill.apps.codex { "✓" } else { " " }.to_string(),
-            if skill.apps.gemini { "✓" } else { " " }.to_string(),
-            if skill.apps.opencode { "✓" } else { " " }.to_string(),
-            if skill.apps.hermes { "✓" } else { " " }.to_string(),
+            if skill.apps.claude { "OK" } else { "" }.to_string(),
+            if skill.apps.codex { "OK" } else { "" }.to_string(),
+            if skill.apps.gemini { "OK" } else { "" }.to_string(),
+            if skill.apps.opencode { "OK" } else { "" }.to_string(),
+            if skill.apps.hermes { "OK" } else { "" }.to_string(),
         ]);
     }
 
@@ -254,7 +254,7 @@ fn discover_skills(query: Option<&str>) -> Result<(), AppError> {
     table.set_header(vec!["", "Directory", "Name"]);
     for skill in skills {
         table.add_row(vec![
-            if skill.installed { "✓" } else { " " }.to_string(),
+            if skill.installed { "OK" } else { "" }.to_string(),
             skill.directory,
             skill.name,
         ]);
@@ -270,7 +270,7 @@ fn install_skill(app_type: &AppType, spec: &str) -> Result<(), AppError> {
     println!(
         "{}",
         success(&format!(
-            "✓ Installed skill '{}' (enabled for {})",
+            "OK Installed skill '{}' (enabled for {})",
             installed.directory,
             app_type.as_str()
         ))
@@ -280,7 +280,7 @@ fn install_skill(app_type: &AppType, spec: &str) -> Result<(), AppError> {
 
 fn uninstall_skill(spec: &str) -> Result<(), AppError> {
     SkillService::uninstall(spec)?;
-    println!("{}", success(&format!("✓ Uninstalled skill '{spec}'")));
+    println!("{}", success(&format!("OK Uninstalled skill '{spec}'")));
     Ok(())
 }
 
@@ -297,7 +297,7 @@ fn toggle_skill(
     println!(
         "{}",
         success(&format!(
-            "✓ {} '{}' for {}",
+            "OK {} '{}' for {}",
             if enabled { "Enabled" } else { "Disabled" },
             spec,
             app_target_names(&apps)
@@ -311,7 +311,7 @@ fn sync_skills(app: Option<&AppType>) -> Result<(), AppError> {
         ensure_supported_skills_app(app, "sync")?;
     }
     SkillService::sync_all_enabled(app)?;
-    println!("{}", success("✓ Skills synced successfully"));
+    println!("{}", success("OK Skills synced successfully"));
     Ok(())
 }
 
@@ -322,7 +322,7 @@ fn set_skill_apps(spec: &str, raw_apps: &[String]) -> Result<(), AppError> {
     println!(
         "{}",
         success(&format!(
-            "✓ Set skill '{}' apps to {}",
+            "OK Set skill '{}' apps to {}",
             spec,
             app_target_names(&targets)
         ))
@@ -369,7 +369,10 @@ fn import_from_apps(raw_apps: Vec<String>, directories: Vec<String>) -> Result<(
     };
     println!(
         "{}",
-        success(&format!("✓ Imported {} skill(s) into SSOT", imported.len()))
+        success(&format!(
+            "OK Imported {} skill(s) into SSOT",
+            imported.len()
+        ))
     );
     Ok(())
 }
@@ -403,16 +406,16 @@ fn show_skill_info(spec: &str) -> Result<(), AppError> {
 
     println!("{}", highlight("Skill"));
     println!("Directory: {}", record.directory);
-    println!("Name:      {}", record.name);
+    println!("Name: {}", record.name);
     if let Some(desc) = record
         .description
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
-        println!("Desc:      {}", desc);
+        println!("Desc: {}", desc);
     }
     println!(
-        "Enabled:   claude={} codex={} gemini={} opencode={} hermes={}",
+        "Enabled: claude={} codex={} gemini={} opencode={} hermes={}",
         record.apps.claude,
         record.apps.codex,
         record.apps.gemini,
@@ -445,7 +448,7 @@ fn list_repos() -> Result<(), AppError> {
     table.set_header(vec!["Enabled", "Repo", "Branch"]);
     for repo in repos {
         table.add_row(vec![
-            if repo.enabled { "✓" } else { " " }.to_string(),
+            if repo.enabled { "OK" } else { "" }.to_string(),
             format!("{}/{}", repo.owner, repo.name),
             repo.branch,
         ]);
@@ -457,14 +460,14 @@ fn list_repos() -> Result<(), AppError> {
 fn add_repo(_url: &str) -> Result<(), AppError> {
     let repo = parse_repo_spec(_url)?;
     SkillService::upsert_repo(repo)?;
-    println!("{}", success("✓ Repository added."));
+    println!("{}", success("OK Repository added."));
     Ok(())
 }
 
 fn remove_repo(_url: &str) -> Result<(), AppError> {
     let repo = parse_repo_spec(_url)?;
     SkillService::remove_repo(&repo.owner, &repo.name)?;
-    println!("{}", success("✓ Repository removed."));
+    println!("{}", success("OK Repository removed."));
     Ok(())
 }
 
@@ -484,7 +487,7 @@ fn set_repo_enabled(url: &str, enabled: bool) -> Result<(), AppError> {
     println!(
         "{}",
         success(&format!(
-            "✓ Repository {}.",
+            "OK Repository {}.",
             if enabled { "enabled" } else { "disabled" }
         ))
     );
@@ -502,7 +505,7 @@ fn sync_method(method: Option<SyncMethod>) -> Result<(), AppError> {
             SkillService::set_sync_method(method)?;
             println!(
                 "{}",
-                success(&format!("✓ Skill sync method set to {method:?}"))
+                success(&format!("OK Skill sync method set to {method:?}"))
             );
         }
         None => {

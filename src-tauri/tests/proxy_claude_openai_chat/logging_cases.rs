@@ -205,7 +205,6 @@ async fn proxy_claude_buffered_transform_failure_logs_error_request_with_session
     assert_eq!(log_values[3], "claude-3-7-sonnet");
     assert_eq!(log_values[4], "claude-3-7-sonnet");
     assert_eq!(log_values[5], "");
-    assert_eq!(log_values[10], "2");
     assert_eq!(log_values[19], "502");
     assert_eq!(log_values[21], "claude-session-failure");
     assert!(log_values[20].contains("parse upstream json failed"));

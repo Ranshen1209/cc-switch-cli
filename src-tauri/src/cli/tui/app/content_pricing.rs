@@ -33,7 +33,7 @@ impl App {
                 self.open_pricing_delete_confirm(data);
                 Action::None
             }
-            KeyCode::Char('r') => Action::UsageRefresh,
+            KeyCode::Char('r') => Action::ReloadData,
             _ => Action::None,
         }
     }

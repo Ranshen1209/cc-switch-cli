@@ -41,9 +41,9 @@ pub use codex::CodexAdapter;
 pub use codex::{
     apply_codex_chat_upstream_model, apply_codex_upstream_model,
     codex_provider_catalog_tool_profile, codex_provider_upstream_model,
-    codex_provider_uses_anthropic, codex_provider_uses_chat_completions,
-    inject_codex_chat_prompt_cache_key, is_origin_only_url, resolve_codex_chat_reasoning_config,
-    should_convert_codex_responses_to_anthropic, should_convert_codex_responses_to_chat,
+    codex_provider_uses_anthropic, codex_provider_uses_chat_completions, is_origin_only_url,
+    resolve_codex_chat_reasoning_config, should_convert_codex_responses_to_anthropic,
+    should_convert_codex_responses_to_chat,
 };
 pub use gemini::GeminiAdapter;
 
@@ -87,7 +87,7 @@ impl ProviderType {
     #[allow(dead_code)]
     pub fn from_app_type_and_config(app_type: &AppType, provider: &Provider) -> Self {
         match app_type {
-            AppType::Claude => {
+            AppType::Claude | AppType::ClaudeDesktop => {
                 if get_claude_api_format(provider) == "gemini_native" {
                     let adapter = ClaudeAdapter::new();
                     return match adapter.extract_auth(provider).map(|auth| auth.strategy) {
@@ -192,7 +192,7 @@ impl std::str::FromStr for ProviderType {
 
 pub fn get_adapter(app_type: &AppType) -> Box<dyn ProviderAdapter> {
     match app_type {
-        AppType::Claude => Box::new(ClaudeAdapter::new()),
+        AppType::Claude | AppType::ClaudeDesktop => Box::new(ClaudeAdapter::new()),
         AppType::Codex => Box::new(CodexAdapter::new()),
         AppType::Gemini => Box::new(GeminiAdapter::new()),
         AppType::OpenCode => Box::new(CodexAdapter::new()),

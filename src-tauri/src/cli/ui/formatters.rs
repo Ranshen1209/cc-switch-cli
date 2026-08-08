@@ -6,8 +6,8 @@ pub fn to_json<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
 
 pub fn format_bool(value: bool) -> &'static str {
     if value {
-        "✓"
+        "OK"
     } else {
-        "✗"
+        "FAIL"
     }
 }

@@ -127,9 +127,37 @@ fn load_valid_v2_config_succeeds() {
     assert!(loaded
         .get_manager(&cc_switch_lib::AppType::Claude)
         .is_some());
+    assert!(loaded
+        .get_manager(&cc_switch_lib::AppType::ClaudeDesktop)
+        .is_some());
     assert!(loaded.get_manager(&cc_switch_lib::AppType::Codex).is_some());
     assert!(loaded
         .get_manager(&cc_switch_lib::AppType::OpenClaw)
+        .is_some());
+}
+
+#[test]
+fn load_v2_config_adds_missing_claude_desktop_manager() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+    let path = cfg_path();
+    fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
+
+    let mut value = serde_json::to_value(MultiAppConfig::default()).expect("serialize config");
+    value
+        .as_object_mut()
+        .expect("config object")
+        .remove("claude-desktop");
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(&value).expect("serialize legacy config"),
+    )
+    .expect("write v2 config");
+
+    let loaded = MultiAppConfig::load().expect("load migrated config");
+    assert!(loaded
+        .get_manager(&cc_switch_lib::AppType::ClaudeDesktop)
         .is_some());
 }
 

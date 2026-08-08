@@ -3,15 +3,10 @@ use super::provider_state::codex_model_catalog_row_from_value;
 use super::{
     claude_disable_auto_upgrade_enabled, claude_hide_attribution_enabled, claude_teammates_enabled,
     claude_tool_search_enabled, detect_balance_provider_for_usage_query,
-    detect_coding_plan_provider_for_usage_query, normalize_local_proxy_header_overrides,
-    ClaudeApiFormat, ClaudeModelRole, CodexWireApi, PromptCacheRoutingMode, ProviderAddFormState,
-    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    detect_coding_plan_provider_for_usage_query, ClaudeApiFormat, CodexWireApi,
+    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 use crate::app_config::AppType;
-use crate::claude_model_config::{
-    CLAUDE_DEFAULT_MODEL_ENV_KEY, CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY,
-    CLAUDE_SUBAGENT_MODEL_ENV_KEY,
-};
 use crate::provider::Provider;
 use serde_json::Value;
 
@@ -21,53 +16,17 @@ pub(super) fn populate_form_from_provider(
     provider: &Provider,
 ) {
     match app_type {
-        AppType::Claude => populate_claude_form(form, provider),
+        AppType::Claude | AppType::ClaudeDesktop => populate_claude_form(form, provider),
         AppType::Codex => populate_codex_form(form, provider),
         AppType::Gemini => populate_gemini_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
         AppType::Hermes => populate_hermes_form(form, provider),
         AppType::OpenClaw => populate_openclaw_form(form, provider),
     }
-    form.is_full_url = form.supports_full_url_mode()
-        && provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.is_full_url)
-            .unwrap_or(false);
-    populate_local_proxy_settings_form(form, provider);
     populate_usage_query_form(form, provider);
 }
 
-fn populate_local_proxy_settings_form(form: &mut ProviderAddFormState, provider: &Provider) {
-    let Some(meta) = provider.meta.as_ref() else {
-        return;
-    };
-
-    if let Some(user_agent) = meta.custom_user_agent.as_deref() {
-        form.custom_user_agent.set(user_agent);
-    }
-    if let Some(overrides) = meta.local_proxy_request_overrides.as_ref() {
-        let original_headers = overrides
-            .headers
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        form.local_proxy_header_overrides = normalize_local_proxy_header_overrides(
-            overrides
-                .headers
-                .iter()
-                .map(|(name, value)| (name.clone(), value.clone())),
-        )
-        .unwrap_or(original_headers);
-        form.local_proxy_body_override = overrides.body.clone();
-    }
-}
-
 fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provider) {
-    form.usage_query_official_subscription = provider
-        .official_subscription_tool(&form.app_type)
-        .is_some();
-
     let Some(script) = provider
         .meta
         .as_ref()
@@ -76,20 +35,6 @@ fn populate_usage_query_form(form: &mut ProviderAddFormState, provider: &Provide
         form.refresh_default_usage_query_template();
         return;
     };
-
-    if form.usage_query_official_subscription
-        && script.template_type.as_deref()
-            != Some(UsageQueryTemplate::OfficialSubscription.as_str())
-    {
-        // The desktop UI resets incompatible saved templates when an official
-        // Claude/Codex/Gemini provider opens its Usage Query editor.
-        form.usage_query_enabled = false;
-        form.usage_query_template = UsageQueryTemplate::OfficialSubscription;
-        form.usage_query_timeout.set("10");
-        form.usage_query_auto_interval.set("5");
-        form.usage_query_code.clear();
-        return;
-    }
 
     form.usage_query_enabled = script.enabled;
     form.usage_query_timeout
@@ -186,46 +131,84 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
         {
             form.claude_base_url.set(url);
         }
-        if let Some(model) = env
-            .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
-            .and_then(|value| value.as_str())
-        {
+        if let Some(model) = env.get("ANTHROPIC_MODEL").and_then(|value| value.as_str()) {
             form.claude_model.set(model);
         }
-        let model = env
-            .get(CLAUDE_DEFAULT_MODEL_ENV_KEY)
-            .and_then(|value| value.as_str());
-        let small_fast = env
-            .get(CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY)
-            .and_then(|value| value.as_str());
-        let role_model = |role: ClaudeModelRole| {
-            env.get(role.model_env_key())
-                .and_then(|value| value.as_str())
-        };
-
-        if let Some(haiku) = role_model(ClaudeModelRole::Haiku).or(small_fast).or(model) {
-            form.set_claude_model_from_config(ClaudeModelRole::Haiku.index(), haiku);
-        }
-        if let Some(sonnet) = role_model(ClaudeModelRole::Sonnet).or(model).or(small_fast) {
-            form.set_claude_model_from_config(ClaudeModelRole::Sonnet.index(), sonnet);
-        }
-        let opus = role_model(ClaudeModelRole::Opus).or(model).or(small_fast);
-        if let Some(opus) = opus {
-            form.set_claude_model_from_config(ClaudeModelRole::Opus.index(), opus);
-        }
-        if let Some(fable) = role_model(ClaudeModelRole::Fable).or(opus) {
-            form.set_claude_model_from_config(ClaudeModelRole::Fable.index(), fable);
-        }
-        if let Some(subagent) = env
-            .get(CLAUDE_SUBAGENT_MODEL_ENV_KEY)
+        if let Some(reasoning) = env
+            .get("ANTHROPIC_REASONING_MODEL")
             .and_then(|value| value.as_str())
         {
-            form.set_claude_model_from_config(ClaudeModelRole::Subagent.index(), subagent);
+            form.claude_reasoning_model.set(reasoning);
+        }
+
+        let model = env.get("ANTHROPIC_MODEL").and_then(|value| value.as_str());
+        let small_fast = env
+            .get("ANTHROPIC_SMALL_FAST_MODEL")
+            .and_then(|value| value.as_str());
+
+        if let Some(haiku) = env
+            .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            .and_then(|value| value.as_str())
+            .or(small_fast)
+            .or(model)
+        {
+            form.claude_haiku_model.set(haiku);
+        }
+        if let Some(sonnet) = env
+            .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            .and_then(|value| value.as_str())
+            .or(model)
+            .or(small_fast)
+        {
+            form.claude_sonnet_model.set(sonnet);
+        }
+        if let Some(opus) = env
+            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            .and_then(|value| value.as_str())
+            .or(model)
+            .or(small_fast)
+        {
+            form.claude_opus_model.set(opus);
+        }
+        if let Some(fable) = env
+            .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(|value| value.as_str())
+        {
+            form.claude_fable_model.set(fable);
+        }
+    }
+    // 加载 ClaudeDesktop 路由的 supports_1m 标志
+    if matches!(form.app_type, crate::app_config::AppType::ClaudeDesktop) {
+        if let Some(routes) = provider
+            .meta
+            .as_ref()
+            .map(|m| &m.claude_desktop_model_routes)
+        {
+            const ROLE_KEYS: [(&str, usize); 4] = [
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 0),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", 1),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", 2),
+                ("ANTHROPIC_DEFAULT_FABLE_MODEL", 3),
+            ];
+            for (key, idx) in &ROLE_KEYS {
+                if let Some(route) = routes.get(*key) {
+                    // 未设置时默认 true（与 DEFAULT_PROXY_ROUTES 一致）
+                    let flag = route.supports_1m.unwrap_or(true);
+                    match idx {
+                        0 => form.claude_desktop_haiku_1m = flag,
+                        1 => form.claude_desktop_sonnet_1m = flag,
+                        2 => form.claude_desktop_opus_1m = flag,
+                        3 => form.claude_desktop_fable_1m = flag,
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 }
 
 fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    let mut parsed_wire_api = None;
     if let Some(config) = provider
         .settings_config
         .get("config")
@@ -237,6 +220,9 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
         }
         if let Some(model) = parsed.model {
             form.codex_model.set(model);
+        }
+        if let Some(wire_api) = parsed.wire_api {
+            parsed_wire_api = Some(wire_api);
         }
         if let Some(requires_openai_auth) = parsed.requires_openai_auth {
             form.codex_requires_openai_auth = requires_openai_auth;
@@ -257,40 +243,13 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
             form.codex_api_key.set(key);
         }
     }
-    form.claude_api_format = parse_codex_api_format(provider);
-    form.claude_api_key_field = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.api_key_field.as_deref())
-        .filter(|field| *field == "ANTHROPIC_API_KEY")
-        .map(|_| crate::provider::ClaudeApiKeyField::ApiKey)
-        .unwrap_or(crate::provider::ClaudeApiKeyField::AuthToken);
-    form.codex_impersonate_claude_code = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.impersonate_claude_code)
-        == Some(true);
-    if let Some(max_output_tokens) = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.max_output_tokens)
-        .filter(|value| *value > 0)
-    {
-        form.codex_max_output_tokens
-            .set(max_output_tokens.to_string());
-    }
+    form.claude_api_format = parse_codex_api_format(provider, parsed_wire_api);
     form.codex_wire_api = CodexWireApi::Responses;
     form.codex_chat_reasoning = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
         .unwrap_or_default();
-    form.codex_prompt_cache_routing = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.prompt_cache_routing.as_deref())
-        .map(PromptCacheRoutingMode::from_raw)
-        .unwrap_or(PromptCacheRoutingMode::Auto);
     form.codex_model_catalog = provider
         .settings_config
         .get("modelCatalog")
@@ -309,10 +268,6 @@ fn populate_codex_form(form: &mut ProviderAddFormState, provider: &Provider) {
 }
 
 fn populate_gemini_form(form: &mut ProviderAddFormState, provider: &Provider) {
-    // The upstream model is an add-form default only. Existing providers that
-    // intentionally omit GEMINI_MODEL must remain unset when edited or copied.
-    form.gemini_model.set("");
-
     if let Some(env) = provider
         .settings_config
         .get("env")
@@ -523,14 +478,35 @@ fn parse_claude_api_format(provider: &Provider) -> ClaudeApiFormat {
     }
 }
 
-fn parse_codex_api_format(provider: &Provider) -> ClaudeApiFormat {
-    if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
-        return ClaudeApiFormat::Anthropic;
+fn parse_codex_api_format(provider: &Provider, wire_api: Option<CodexWireApi>) -> ClaudeApiFormat {
+    if let Some(api_format) = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.as_deref())
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("api_format")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            provider
+                .settings_config
+                .get("apiFormat")
+                .and_then(|value| value.as_str())
+        })
+    {
+        return match api_format {
+            "anthropic" => ClaudeApiFormat::Anthropic,
+            "openai_chat" => ClaudeApiFormat::OpenAiChat,
+            _ => ClaudeApiFormat::OpenAiResponses,
+        };
     }
-    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
-        return ClaudeApiFormat::OpenAiChat;
+
+    match wire_api {
+        Some(CodexWireApi::Chat) => ClaudeApiFormat::OpenAiChat,
+        _ => ClaudeApiFormat::OpenAiResponses,
     }
-    ClaudeApiFormat::OpenAiResponses
 }
 
 fn opencode_model_rank(model: &Value) -> usize {

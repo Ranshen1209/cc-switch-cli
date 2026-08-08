@@ -571,20 +571,10 @@ async fn proxy_claude_streaming_idle_timeout_does_not_sync_failover_state() {
             .as_deref(),
         Some("claude-stream-current")
     );
-    assert_eq!(
-        completed.current_provider_id.as_deref(),
-        Some("claude-stream-failover")
-    );
-    assert_eq!(
-        completed.current_provider.as_deref(),
-        Some("Claude Stream Failover")
-    );
+    assert_eq!(completed.current_provider_id, None);
+    assert_eq!(completed.current_provider, None);
     assert_eq!(completed.failover_count, 0);
-    assert_eq!(completed.active_targets.len(), 1);
-    assert_eq!(
-        completed.active_targets[0].provider_id,
-        "claude-stream-failover"
-    );
+    assert!(completed.active_targets.is_empty());
 
     service.stop().await.expect("stop proxy service");
     upstream_handle.abort();
@@ -678,8 +668,12 @@ async fn proxy_claude_streaming_first_chunk_timeout_after_headers_uses_app_confi
         .await
         .expect("send request to proxy");
 
-    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-    let body = response.text().await.expect("read timeout response");
+    assert!(
+        response.status().is_success(),
+        "stream should be established before timeout"
+    );
+    let body = response.text().await.expect("read timeout event stream");
+    assert!(body.contains("event: error"));
     assert!(body.contains("stream timeout after 1s"));
 
     service.stop().await.expect("stop proxy service");
@@ -774,8 +768,12 @@ async fn proxy_claude_streaming_first_byte_timeout_spans_headers_and_first_chunk
         .await
         .expect("send request to proxy");
 
-    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-    let body = response.text().await.expect("read timeout response");
+    assert!(
+        response.status().is_success(),
+        "stream should be established before timeout"
+    );
+    let body = response.text().await.expect("read timeout event stream");
+    assert!(body.contains("event: error"));
     assert!(body.contains("stream timeout after 1s"));
 
     service.stop().await.expect("stop proxy service");

@@ -7,9 +7,8 @@ use serde_json::Value;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::cli::tui::data::{
-    ProviderRuntimeSnapshot, ProxySnapshot, QuotaSnapshotGeneration, QuotaTarget, UiDataReloadToken,
-};
+use crate::cli::tui::data::ProxySnapshot;
+use crate::cli::tui::data::QuotaTarget;
 use crate::provider::Provider;
 use crate::services::{EndpointLatency, HealthStatus, StreamCheckResult, SyncDecision};
 
@@ -55,17 +54,12 @@ pub(crate) enum StreamCheckMsg {
 }
 
 pub(crate) enum LocalEnvReq {
-    Refresh { generation: u64 },
-    Shutdown,
+    Refresh,
 }
 
 pub(crate) enum LocalEnvMsg {
-    ToolFinished {
-        generation: u64,
-        result: crate::services::local_env_check::ToolCheckResult,
-    },
-    BatchFinished {
-        generation: u64,
+    Finished {
+        result: Vec<crate::services::local_env_check::ToolCheckResult>,
     },
 }
 
@@ -73,28 +67,11 @@ pub(crate) enum LocalEnvMsg {
 pub(crate) enum SessionReq {
     Refresh {
         request_id: u64,
-        scope_epoch: u64,
         provider_id: String,
-        /// Manual `r` (and delete-recovery) rebuilds from provider sources and
-        /// ignores cached `(mtime, size)` metadata. False opens the persisted
-        /// manifest only, falling back to one bootstrap build when none exists.
+        /// When true (manual `r` reload), ignore the cached `(mtime, size)`
+        /// snapshot and re-parse every file; the fresh results still refresh the
+        /// persistent cache.
         force: bool,
-    },
-    LoadPage {
-        request_id: u64,
-        token: crate::cli::tui::app::SessionPageToken,
-        page: usize,
-        reader: crate::session_manager::paged_manifest::ManifestReader,
-    },
-    LocateManifest {
-        request_id: u64,
-        scope_epoch: u64,
-        source: crate::cli::tui::app::SessionPageSource,
-        scope: String,
-        generation: String,
-        fallback_absolute: usize,
-        anchor: Option<crate::cli::tui::app::SessionRowIdentity>,
-        reader: crate::session_manager::paged_manifest::ManifestReader,
     },
     LoadMessages {
         request_id: u64,
@@ -102,23 +79,6 @@ pub(crate) enum SessionReq {
         provider_id: String,
         source_path: String,
     },
-    LoadMessagePage {
-        request_id: u64,
-        key: String,
-        transcript_generation: String,
-        page: usize,
-        /// Page that owns the current user selection. If `page` was only a
-        /// speculative prefetch and its generation is stale, refresh this page
-        /// instead so a background revision change cannot move the viewport.
-        refresh_page: usize,
-        /// Stable message identity that owned the selection when a speculative
-        /// request began. Refresh follows it across insertion/reordering.
-        refresh_message_key: Option<String>,
-        reader: crate::session_manager::transcript::TranscriptReader,
-    },
-    /// Invalidate the current bounded detail read without entering the ordered
-    /// delete/control lane.
-    CancelMessages,
     Delete {
         request_id: u64,
         key: String,
@@ -128,190 +88,55 @@ pub(crate) enum SessionReq {
     },
     Search {
         request_id: u64,
-        scope_epoch: u64,
-        view: crate::session_manager::project_scope::SessionViewSpec,
-        base: crate::cli::tui::app::SessionPageToken,
-        base_reader: crate::session_manager::paged_manifest::ManifestReader,
-        query_namespace: crate::session_manager::paged_manifest::QueryManifestNamespace,
-    },
-    /// Stop the current deep search without affecting refresh, message-load, or
-    /// delete work. Query edits and route/scope changes send this immediately;
-    /// the search dispatcher advances its generation so provider loops can
-    /// cooperatively stop disk and CPU work.
-    CancelSearch,
-    ProjectCatalog {
-        request_id: u64,
-        scope_epoch: u64,
-        base: crate::cli::tui::app::SessionPageToken,
-        base_reader: crate::session_manager::paged_manifest::ManifestReader,
-    },
-    CancelProjectCatalog,
-    ProjectFilter {
-        request_id: u64,
-        scope_epoch: u64,
-        scope: String,
-        base_generation: String,
         query: String,
-        catalog: std::sync::Arc<crate::session_manager::project_scope::SessionProjectCatalog>,
-        project_offset: usize,
-        fixed_matches: Vec<usize>,
-        trailing_matches: Vec<usize>,
+        sessions: Vec<crate::session_manager::SessionMeta>,
     },
-    CancelProjectFilter,
-}
-
-pub(crate) enum LoadedMessagePage {
-    Page(crate::session_manager::transcript::TranscriptPage),
-    Refreshed(Box<RefreshedMessagePages>),
-}
-
-pub(crate) struct RefreshedMessagePages {
-    pub(crate) reader: crate::session_manager::transcript::TranscriptReader,
-    pub(crate) active_page: crate::session_manager::transcript::TranscriptPage,
-    pub(crate) requested_page: Option<crate::session_manager::transcript::TranscriptPage>,
 }
 
 pub(crate) enum SessionMsg {
-    /// Fixed-cost scope open: at most one immutable 100-row manifest page.
-    ScopeOpened {
+    /// Stale-while-revalidate first paint: the list built straight from the
+    /// persistent cache, sent before the (slower) revalidating scan finishes so
+    /// the page renders immediately while the refresh indicator stays on.
+    ScanCachedSnapshot {
         request_id: u64,
-        scope_epoch: u64,
-        scope: String,
-        /// True when a valid persisted manifest satisfied this request and no
-        /// source revalidation follows. A cache miss keeps the scan active
-        /// while the same worker performs the one-time bootstrap build.
-        complete: bool,
-        result: Result<
-            Option<(
-                crate::session_manager::paged_manifest::ManifestReader,
-                crate::session_manager::paged_manifest::ManifestPage,
-            )>,
-            String,
-        >,
-    },
-    ScanProvisional {
-        request_id: u64,
-        scope_epoch: u64,
-        scope: String,
         rows: Vec<crate::session_manager::SessionMeta>,
     },
-    /// Authoritative rebuild publication. It contains only page zero; selection
-    /// reconciliation reads bounded pages on the worker before switching.
-    ManifestPublished {
+    /// Progressive fill for the "all providers" scan: one provider's freshly
+    /// revalidated list, sent as soon as that provider finishes so a genuine
+    /// full scan (first-ever run, manual reload) paints provider by provider
+    /// instead of all at once. The refresh indicator stays on until
+    /// `ScanFinished`.
+    ScanPartial {
         request_id: u64,
-        scope_epoch: u64,
-        scope: String,
-        result: Result<
-            (
-                crate::session_manager::paged_manifest::PublishedManifest,
-                crate::session_manager::paged_manifest::ManifestReader,
-            ),
-            String,
-        >,
+        provider_id: String,
+        rows: Vec<crate::session_manager::SessionMeta>,
     },
-    CostOverlayReady {
-        cost_seq: u64,
-        page_token: crate::cli::tui::app::SessionPageToken,
-        page_index: usize,
-        identities: Vec<crate::cli::tui::app::SessionRowIdentity>,
-        overlays: std::collections::HashMap<
-            crate::services::session_cost::SessionCostIdentity,
-            crate::session_manager::SessionUsageSummary,
-        >,
-    },
-    PageLoaded {
+    ScanFinished {
         request_id: u64,
-        token: crate::cli::tui::app::SessionPageToken,
-        page: usize,
-        result: Result<crate::session_manager::paged_manifest::ManifestPage, String>,
-    },
-    ManifestLocated {
-        request_id: u64,
-        scope_epoch: u64,
-        generation: String,
-        result: Result<
-            (
-                crate::session_manager::paged_manifest::ManifestReader,
-                crate::session_manager::paged_manifest::ManifestPage,
-                usize,
-            ),
-            String,
-        >,
+        result: Result<Vec<crate::session_manager::SessionMeta>, String>,
     },
     MessagesLoaded {
         request_id: u64,
         key: String,
-        result: Result<
-            (
-                crate::session_manager::transcript::TranscriptReader,
-                crate::session_manager::transcript::TranscriptPage,
-            ),
-            String,
-        >,
-    },
-    MessagePageLoaded {
-        request_id: u64,
-        key: String,
-        transcript_generation: String,
-        page: usize,
-        result: Result<LoadedMessagePage, String>,
+        result: Result<Vec<crate::session_manager::SessionMessage>, String>,
     },
     DeleteFinished {
         request_id: u64,
         key: String,
         result: Result<(), String>,
     },
-    ManifestsPurged {
+    SearchFinished {
         request_id: u64,
-        key: String,
-        base: Vec<(
-            String,
-            crate::session_manager::paged_manifest::PublishedManifest,
-            crate::session_manager::paged_manifest::ManifestReader,
-        )>,
-    },
-    QueryPublished {
-        request_id: u64,
-        scope_epoch: u64,
-        scope: String,
-        base_generation: String,
-        view: crate::session_manager::project_scope::SessionViewSpec,
-        query_namespace: crate::session_manager::paged_manifest::QueryManifestNamespace,
-        result: Result<
-            (
-                crate::session_manager::paged_manifest::PublishedManifest,
-                crate::session_manager::paged_manifest::ManifestReader,
-            ),
-            String,
-        >,
-    },
-    ProjectCatalogBuilt {
-        request_id: u64,
-        scope_epoch: u64,
-        scope: String,
-        base_generation: String,
-        result: Result<crate::session_manager::project_scope::SessionProjectCatalog, String>,
-    },
-    ProjectFilterBuilt {
-        request_id: u64,
-        scope_epoch: u64,
-        scope: String,
-        base_generation: String,
-        query: String,
-        result: Result<Vec<usize>, String>,
+        result: Result<Vec<crate::session_manager::SessionSearchHit>, String>,
     },
 }
 
 pub(crate) enum QuotaReq {
-    Refresh {
-        generation: QuotaSnapshotGeneration,
-        target: QuotaTarget,
-    },
+    Refresh { target: QuotaTarget },
 }
 
 pub(crate) enum QuotaMsg {
     Finished {
-        generation: QuotaSnapshotGeneration,
         target: QuotaTarget,
         result: Result<crate::cli::tui::data::ProviderUsageQuota, String>,
     },
@@ -374,96 +199,30 @@ pub(crate) enum UsagePricingReq {
         app_type: AppType,
         range: crate::cli::tui::data::UsageRangePreset,
     },
-    LoadLogPage {
-        request_id: u64,
-        generation: u64,
-        app_state_epoch: u64,
-        app_type: AppType,
-        range: crate::cli::tui::data::UsageRangePreset,
-        page: usize,
-        cursor: crate::cli::tui::data::UsageLogCursor,
-        direction: crate::cli::tui::data::UsageLogPageDirection,
-        limit: usize,
-    },
-    LoadLogDetail {
-        request_id: u64,
-        generation: u64,
-        app_state_epoch: u64,
-        app_type: AppType,
-        range: crate::cli::tui::data::UsageRangePreset,
-        log_rowid: i64,
-    },
     DropState {
         ack: mpsc::Sender<()>,
     },
 }
 
 pub(crate) enum UsagePricingMsg {
-    LogHeadLoaded {
-        request_id: u64,
-        generation: u64,
-        app_state_epoch: u64,
-        app_type: AppType,
-        range: crate::cli::tui::data::UsageRangePreset,
-        result: Result<crate::cli::tui::data::UsageLogPage, UsageLogLoadError>,
-    },
     Loaded {
         request_id: u64,
         generation: u64,
         app_state_epoch: u64,
         app_type: AppType,
         range: crate::cli::tui::data::UsageRangePreset,
-        result: Box<Result<crate::cli::tui::data::UsagePricingData, UsagePricingLoadError>>,
+        result: Result<crate::cli::tui::data::UsagePricingData, String>,
     },
-    LogPageLoaded {
-        request_id: u64,
-        generation: u64,
-        app_state_epoch: u64,
-        app_type: AppType,
-        range: crate::cli::tui::data::UsageRangePreset,
-        page: usize,
-        direction: crate::cli::tui::data::UsageLogPageDirection,
-        result: Result<crate::cli::tui::data::UsageLogPage, UsageLogLoadError>,
-    },
-    LogDetailLoaded {
-        request_id: u64,
-        generation: u64,
-        app_state_epoch: u64,
-        app_type: AppType,
-        range: crate::cli::tui::data::UsageRangePreset,
-        log_rowid: i64,
-        result: Result<Option<crate::cli::tui::data::UsageLogRow>, UsageLogLoadError>,
-    },
-}
-
-#[derive(Debug)]
-pub(crate) enum UsageLogLoadError {
-    Cancelled,
-    Failed(String),
-}
-
-#[derive(Debug)]
-pub(crate) enum UsagePricingLoadError {
-    /// The query was deliberately interrupted because a newer request or a
-    /// DropState barrier superseded it. This is control flow, not a user-facing
-    /// failure.
-    Cancelled,
-    Failed(String),
 }
 
 pub(crate) enum SessionUsageSyncReq {
     Run { request_id: u64 },
-    RebuildCodex { request_id: u64 },
 }
 
 pub(crate) enum SessionUsageSyncMsg {
     Finished {
         request_id: u64,
         result: Result<(), String>,
-    },
-    CodexRebuilt {
-        request_id: u64,
-        result: Result<crate::services::session_usage::SessionSyncResult, String>,
     },
 }
 
@@ -499,16 +258,7 @@ pub(crate) enum WebDavReqKind {
     Upload,
     Download,
     MigrateV1ToV2,
-    JianguoyunQuickSetup {
-        username: String,
-        password: String,
-    },
-    S3CheckConnection,
-    S3FetchRemoteInfo {
-        intent: crate::cli::tui::app::CloudSyncTransferIntent,
-    },
-    S3Upload,
-    S3Download,
+    JianguoyunQuickSetup { username: String, password: String },
 }
 
 #[derive(Debug, Clone)]
@@ -533,19 +283,6 @@ pub(crate) enum WebDavDone {
         message: String,
     },
     JianguoyunConfigured,
-    S3ConnectionChecked,
-    S3RemoteInfoFetched {
-        intent: crate::cli::tui::app::CloudSyncTransferIntent,
-        info: Option<crate::services::S3RemoteInfo>,
-    },
-    S3Uploaded {
-        decision: SyncDecision,
-        message: String,
-    },
-    S3Downloaded {
-        decision: SyncDecision,
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -626,33 +363,15 @@ pub(crate) struct StreamCheckSystem {
 }
 
 pub(crate) struct LocalEnvSystem {
-    pub(crate) req_tx: tokio::sync::mpsc::UnboundedSender<LocalEnvReq>,
+    pub(crate) req_tx: mpsc::Sender<LocalEnvReq>,
     pub(crate) result_rx: mpsc::Receiver<LocalEnvMsg>,
-    pub(crate) _handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Drop for LocalEnvSystem {
-    fn drop(&mut self) {
-        let _ = self.req_tx.send(LocalEnvReq::Shutdown);
-        let Some(handle) = self._handle.take() else {
-            return;
-        };
-        if handle.thread().id() == std::thread::current().id() {
-            log::warn!("local environment worker attempted to join itself during shutdown");
-            return;
-        }
-        if handle.join().is_err() {
-            log::warn!("local environment worker panicked during shutdown");
-        }
-    }
+    pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
 pub(crate) struct SessionSystem {
     pub(crate) req_tx: mpsc::Sender<SessionReq>,
-    pub(crate) cost_req_tx:
-        crate::cli::tui::runtime_systems::session_cost::SessionCostRequestSender,
     pub(crate) result_rx: mpsc::Receiver<SessionMsg>,
-    pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
 pub(crate) struct QuotaSystem {
@@ -670,7 +389,7 @@ pub(crate) struct AppDataSystem {
 pub(crate) struct UsagePricingSystem {
     pub(crate) req_tx: mpsc::Sender<UsagePricingReq>,
     pub(crate) result_rx: mpsc::Receiver<UsagePricingMsg>,
-    pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
+    pub(crate) _handle: std::thread::JoinHandle<()>,
 }
 
 pub(crate) struct SessionUsageSyncSystem {
@@ -685,18 +404,10 @@ pub(crate) enum ProxyReq {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
-        base_reload_token: UiDataReloadToken,
     },
     RefreshSnapshot {
         request_id: u64,
         app_type: AppType,
-    },
-}
-
-pub(crate) enum ManagedSessionOutcome {
-    Failed(String),
-    Applied {
-        snapshot: Result<Box<ProviderRuntimeSnapshot>, String>,
     },
 }
 
@@ -705,13 +416,12 @@ pub(crate) enum ProxyMsg {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
-        base_reload_token: UiDataReloadToken,
-        outcome: ManagedSessionOutcome,
+        result: Result<(), String>,
     },
     SnapshotRefreshed {
         request_id: u64,
         app_type: AppType,
-        result: Result<ProxySnapshot, String>,
+        result: Result<Box<ProxySnapshot>, String>,
     },
 }
 
@@ -719,31 +429,6 @@ pub(crate) struct ProxySystem {
     pub(crate) req_tx: mpsc::Sender<ProxyReq>,
     pub(crate) result_rx: mpsc::Receiver<ProxyMsg>,
     pub(crate) _handle: std::thread::JoinHandle<()>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CodexHistoryReq {
-    pub(crate) request_id: u64,
-    pub(crate) enabled: bool,
-    pub(crate) migrate_existing: bool,
-    pub(crate) restore_after_disable: bool,
-}
-
-pub(crate) enum CodexHistoryMsg {
-    Saved {
-        request_id: u64,
-        enabled: bool,
-        result: Result<crate::services::codex_history::CodexHistoryToggleOutcome, String>,
-    },
-    RestoreFinished(
-        Result<crate::codex_history_migration::CodexOfficialHistoryRestoreOutcome, String>,
-    ),
-}
-
-pub(crate) struct CodexHistorySystem {
-    pub(crate) req_tx: mpsc::Sender<CodexHistoryReq>,
-    pub(crate) result_rx: mpsc::Receiver<CodexHistoryMsg>,
-    pub(crate) _handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 pub(crate) struct SkillsSystem {
@@ -791,9 +476,7 @@ pub(crate) enum ModelFetchReq {
     Fetch {
         request_id: u64,
         base_url: String,
-        is_full_url: bool,
         api_key: Option<String>,
-        custom_user_agent: Option<String>,
         codex_oauth: bool,
         codex_oauth_account_id: Option<String>,
         field: ProviderAddField,
@@ -834,29 +517,11 @@ pub(crate) fn model_fetch_strategy_for_field(field: ProviderAddField) -> ModelFe
 pub(crate) fn build_model_fetch_candidate_urls(
     base_url: &str,
     strategy: ModelFetchStrategy,
-    is_full_url: bool,
 ) -> Vec<String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Vec::new();
     }
-
-    if is_full_url {
-        let mut urls = Vec::new();
-        if let Some(index) = base.find("/v1/") {
-            urls.push(format!("{}/v1/models", &base[..index]));
-        } else if let Some(index) = base.rfind('/') {
-            let root = &base[..index];
-            if root
-                .find("://")
-                .is_some_and(|scheme| root.len() > scheme.saturating_add(3))
-            {
-                urls.push(format!("{root}/v1/models"));
-            }
-        }
-        return urls;
-    }
-
     if base.ends_with("/models") {
         return vec![base.to_string()];
     }
@@ -947,18 +612,12 @@ pub(crate) fn parse_model_ids_from_response(payload: &Value) -> Vec<String> {
 
 pub(crate) async fn fetch_provider_models_for_tui(
     base_url: &str,
-    is_full_url: bool,
     api_key: Option<&str>,
-    custom_user_agent: Option<&str>,
     strategy: ModelFetchStrategy,
 ) -> Result<Vec<String>, String> {
-    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy, is_full_url);
+    let candidate_urls = build_model_fetch_candidate_urls(base_url, strategy);
     if candidate_urls.is_empty() {
-        return Err(if is_full_url && !base_url.trim().is_empty() {
-            "Cannot derive models endpoint from full URL".to_string()
-        } else {
-            "URL cannot be empty".to_string()
-        });
+        return Err("URL cannot be empty".to_string());
     }
 
     let client = reqwest::Client::builder()
@@ -967,9 +626,6 @@ pub(crate) async fn fetch_provider_models_for_tui(
         .map_err(|e| format!("build http client failed: {e}"))?;
 
     let key = api_key.map(str::trim).filter(|k| !k.is_empty());
-    let custom_user_agent = crate::provider::parse_custom_user_agent(custom_user_agent)
-        .ok()
-        .flatten();
     let mut last_err = String::from("unknown error");
 
     for url in candidate_urls {
@@ -983,9 +639,6 @@ pub(crate) async fn fetch_provider_models_for_tui(
                     .header("anthropic-version", "2023-06-01"),
                 ModelFetchStrategy::GoogleApiKey => req.header("x-goog-api-key", key),
             };
-        }
-        if let Some(user_agent) = &custom_user_agent {
-            req = req.header(reqwest::header::USER_AGENT, user_agent.clone());
         }
 
         match req.send().await {

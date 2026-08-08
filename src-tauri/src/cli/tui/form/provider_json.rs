@@ -1,122 +1,19 @@
 use crate::app_config::AppType;
-use crate::claude_model_config::{
-    set_claude_role_model, CLAUDE_DEFAULT_MODEL_ENV_KEY, CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY,
-};
 use crate::provider::{ClaudeApiKeyField, CodexChatReasoningConfig};
-use crate::provider_preset_models::CODEX_DEFAULT_MODEL;
 use crate::services::ProviderService;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
-use super::codex_config::{build_codex_third_party_config_toml, update_codex_config_snippet};
+use super::codex_config::{
+    build_codex_provider_config_toml, clean_codex_provider_key, update_codex_config_snippet,
+};
 use super::{
-    normalize_local_proxy_header_overrides, parse_codex_model_catalog_context_window,
-    ClaudeApiFormat, ClaudeModelRole, GeminiAuthType, PromptCacheRoutingMode, ProviderAddFormState,
-    UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL, OPENCLAW_DEFAULT_USER_AGENT,
+    parse_codex_model_catalog_context_window, ClaudeApiFormat, GeminiAuthType,
+    ProviderAddFormState, UsageQueryTemplate, OPENCLAW_DEFAULT_API_PROTOCOL,
+    OPENCLAW_DEFAULT_USER_AGENT,
 };
 
 impl ProviderAddFormState {
-    pub(crate) fn existing_codex_config_text(&self) -> &str {
-        self.extra
-            .get("settingsConfig")
-            .and_then(Value::as_object)
-            .and_then(|settings| settings.get("config"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-    }
-
-    pub(crate) fn effective_codex_config_text(&self) -> String {
-        if self.is_codex_official_provider() {
-            return self.effective_official_codex_config_text();
-        }
-
-        let fallback_model = if self.codex_model.is_blank() {
-            CODEX_DEFAULT_MODEL
-        } else {
-            self.codex_model.value.trim()
-        };
-        let model = if self.codex_local_routing_enabled() {
-            self.codex_model_catalog
-                .iter()
-                .map(|row| row.model.trim())
-                .find(|model| !model.is_empty())
-                .unwrap_or(fallback_model)
-        } else {
-            fallback_model
-        };
-        self.effective_custom_codex_config_text(model)
-    }
-
-    fn codex_config_and_model_catalog_for_save(&self) -> (String, Vec<Value>) {
-        if self.is_codex_official_provider() {
-            return (self.effective_official_codex_config_text(), Vec::new());
-        }
-
-        let model_catalog = if self.codex_local_routing_enabled() {
-            self.normalized_codex_model_catalog_for_save()
-        } else {
-            Vec::new()
-        };
-        let model = if !model_catalog.is_empty() {
-            model_catalog[0]["model"]
-                .as_str()
-                .unwrap_or(CODEX_DEFAULT_MODEL)
-        } else if self.codex_model.is_blank() {
-            CODEX_DEFAULT_MODEL
-        } else {
-            self.codex_model.value.trim()
-        };
-        (
-            self.effective_custom_codex_config_text(model),
-            model_catalog,
-        )
-    }
-
-    fn effective_official_codex_config_text(&self) -> String {
-        let existing_config = self.existing_codex_config_text();
-        let mut config = crate::codex_config::strip_codex_provider_config_text(existing_config)
-            .map_err(|_| ())
-            .unwrap_or_else(|_| existing_config.trim().to_string());
-        if self.codex_goal_mode_touched {
-            config = crate::codex_config::set_codex_goal_mode(&config, self.codex_goal_mode);
-        }
-        config
-    }
-
-    fn effective_custom_codex_config_text(&self, model: &str) -> String {
-        let existing_config = self.existing_codex_config_text();
-        let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
-        let base_config = if existing_config.trim().is_empty() {
-            build_codex_third_party_config_toml(
-                self.name.value.trim(),
-                base_url,
-                model,
-                self.codex_wire_api,
-            )
-        } else {
-            existing_config.to_string()
-        };
-        let mut config = update_codex_config_snippet(
-            &base_config,
-            base_url,
-            model,
-            self.codex_wire_api,
-            self.codex_requires_openai_auth,
-            self.codex_env_key.value.trim(),
-        );
-        if self.codex_goal_mode_touched {
-            config = crate::codex_config::set_codex_goal_mode(&config, self.codex_goal_mode);
-        }
-        if self.codex_remote_compaction_touched {
-            config = crate::codex_config::set_codex_remote_compaction(
-                &config,
-                self.codex_remote_compaction,
-                self.name.value.trim(),
-            );
-        }
-        config
-    }
-
     pub fn to_provider_json_value(&self) -> Value {
         let mut provider_obj = match self.extra.clone() {
             Value::Object(map) => map,
@@ -146,7 +43,7 @@ impl ProviderAddFormState {
             .expect("settingsConfig must be a JSON object");
 
         match self.app_type {
-            AppType::Claude => {
+            AppType::Claude | AppType::ClaudeDesktop => {
                 let env_value = settings_obj
                     .entry("env".to_string())
                     .or_insert_with(|| json!({}));
@@ -176,21 +73,36 @@ impl ProviderAddFormState {
                         &self.claude_base_url.value,
                     );
                 }
-                if self.claude_fallback_model_touched {
+                if self.claude_model_config_touched {
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
                     set_or_remove_trimmed(
                         env_obj,
-                        CLAUDE_DEFAULT_MODEL_ENV_KEY,
-                        &self.claude_model.value,
+                        "ANTHROPIC_REASONING_MODEL",
+                        &self.claude_reasoning_model.value,
                     );
-                }
-                for role in ClaudeModelRole::ALL {
-                    if self.claude_model_role_was_touched(role.index()) {
-                        let model = self.claude_model_value_for_config(role.index());
-                        set_claude_role_model(env_obj, role, &model);
+                    set_or_remove_trimmed(
+                        env_obj,
+                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                        &self.claude_haiku_model.value,
+                    );
+                    set_or_remove_trimmed(
+                        env_obj,
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                        &self.claude_sonnet_model.value,
+                    );
+                    set_or_remove_trimmed(
+                        env_obj,
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                        &self.claude_opus_model.value,
+                    );
+                    if matches!(self.app_type, AppType::ClaudeDesktop) {
+                        set_or_remove_trimmed(
+                            env_obj,
+                            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                            &self.claude_fable_model.value,
+                        );
                     }
-                }
-                if self.claude_fallback_model_touched || self.any_claude_model_role_was_touched() {
-                    env_obj.remove(CLAUDE_LEGACY_SMALL_FAST_MODEL_ENV_KEY);
+                    env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 if self.claude_teammates_touched {
                     if self.claude_teammates {
@@ -232,9 +144,26 @@ impl ProviderAddFormState {
                 }
             }
             AppType::Codex => {
-                let (config_toml, model_catalog) = self.codex_config_and_model_catalog_for_save();
-                settings_obj.insert("config".to_string(), Value::String(config_toml));
                 if self.is_codex_official_provider() {
+                    let existing_config = settings_obj
+                        .get("config")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let mut cleaned_config =
+                        crate::codex_config::strip_codex_provider_config_text(existing_config)
+                            .map_err(|_| ())
+                            .unwrap_or_else(|_| existing_config.trim().to_string());
+                    // Goal mode is a top-level [features] setting, so it applies
+                    // to official providers too (remote compaction is custom-only
+                    // and its toggle is hidden here, hence not applied).
+                    if self.codex_goal_mode_touched {
+                        cleaned_config = crate::codex_config::set_codex_goal_mode(
+                            &cleaned_config,
+                            self.codex_goal_mode,
+                        );
+                    }
+                    settings_obj.insert("config".to_string(), Value::String(cleaned_config));
+
                     let auth_value = settings_obj
                         .entry("auth".to_string())
                         .or_insert_with(|| json!({}));
@@ -243,6 +172,70 @@ impl ProviderAddFormState {
                     }
                     settings_obj.remove("modelCatalog");
                 } else {
+                    let provider_key =
+                        clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
+                    let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
+                    // Model mapping (catalog) is gated by the independent
+                    // "需要本地路由映射" toggle (decoupled from the upstream
+                    // format). When on it persists for both Chat (proxy routing)
+                    // and native Responses (direct-connect catalog); its first
+                    // entry becomes the active config model.
+                    let model_catalog = if self.codex_local_routing_enabled() {
+                        self.normalized_codex_model_catalog_for_save()
+                    } else {
+                        Vec::new()
+                    };
+                    let model = if !model_catalog.is_empty() {
+                        model_catalog[0]["model"].as_str().unwrap_or("gpt-5.4")
+                    } else if self.codex_model.is_blank() {
+                        "gpt-5.4"
+                    } else {
+                        self.codex_model.value.trim()
+                    };
+
+                    let existing_config = settings_obj
+                        .get("config")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let base_config = if existing_config.trim().is_empty() {
+                        build_codex_provider_config_toml(
+                            &provider_key,
+                            base_url,
+                            model,
+                            self.codex_wire_api,
+                        )
+                    } else {
+                        existing_config.to_string()
+                    };
+                    let mut config_toml = update_codex_config_snippet(
+                        &base_config,
+                        base_url,
+                        model,
+                        self.codex_wire_api,
+                        self.codex_requires_openai_auth,
+                        self.codex_env_key.value.trim(),
+                    );
+                    // Quick-config toggles rewrite the config TOML in place,
+                    // mirroring upstream's CodexConfigSections. Only touched
+                    // toggles change the config so existing keys are preserved.
+                    if self.codex_goal_mode_touched {
+                        config_toml = crate::codex_config::set_codex_goal_mode(
+                            &config_toml,
+                            self.codex_goal_mode,
+                        );
+                    }
+                    if self.codex_remote_compaction_touched {
+                        // Empty fallback → the helper restores `name` to the
+                        // config's own active `model_provider` id (CC-Switch's
+                        // default name), which is correct even when the imported
+                        // config's provider id differs from our cleaned key.
+                        config_toml = crate::codex_config::set_codex_remote_compaction(
+                            &config_toml,
+                            self.codex_remote_compaction,
+                            "",
+                        );
+                    }
+                    settings_obj.insert("config".to_string(), Value::String(config_toml));
                     if !model_catalog.is_empty() {
                         settings_obj.insert(
                             "modelCatalog".to_string(),
@@ -356,8 +349,8 @@ impl ProviderAddFormState {
                 }
 
                 if let Some(model_id) = current_model_id {
-                    let mut model_obj = match models_obj.get(&model_id) {
-                        Some(Value::Object(map)) => map.clone(),
+                    let mut model_obj = match models_obj.remove(&model_id) {
+                        Some(Value::Object(map)) => map,
                         _ => serde_json::Map::new(),
                     };
                     let model_name = self.opencode_model_name.value.trim().to_string();
@@ -589,37 +582,20 @@ impl ProviderAddFormState {
             && !self.is_claude_official_provider();
         let should_write_codex_api_format =
             matches!(self.app_type, AppType::Codex) && !self.is_codex_official_provider();
-        let should_write_prompt_cache_routing = should_write_codex_api_format
-            && self.codex_is_chat_format()
-            && !matches!(
-                self.codex_prompt_cache_routing,
-                PromptCacheRoutingMode::Auto
-            );
         let should_write_claude_api_key_field = matches!(self.app_type, AppType::Claude)
             && !self.is_claude_official_provider()
             && !self.is_claude_codex_oauth_provider()
             && self.claude_api_key_field == ClaudeApiKeyField::ApiKey;
         let is_codex_oauth = self.is_claude_codex_oauth_provider();
-        let local_proxy_body_override = self
-            .local_proxy_body_override
-            .as_ref()
-            .filter(|value| value.as_object().is_none_or(|object| !object.is_empty()));
-        let should_write_local_proxy_settings = self.supports_local_proxy_settings()
-            && (!self.custom_user_agent.is_blank()
-                || !self.local_proxy_header_overrides.is_empty()
-                || local_proxy_body_override.is_some());
-        let should_write_full_url = self.supports_full_url_mode() && self.is_full_url;
+        let is_claude_desktop = matches!(self.app_type, AppType::ClaudeDesktop);
 
         if !should_write_common_config_meta
             && !should_write_claude_api_format
             && !should_write_codex_api_format
-            && !should_write_prompt_cache_routing
             && !should_write_claude_api_key_field
             && !is_codex_oauth
-            && !should_write_local_proxy_settings
+            && !is_claude_desktop
             && !self.has_usage_script_meta()
-            && !self.usage_query_touched
-            && !should_write_full_url
             && !provider_obj.get("meta").is_some_and(Value::is_object)
         {
             return;
@@ -637,6 +613,41 @@ impl ProviderAddFormState {
         };
 
         meta_obj.remove("applyCommonConfig");
+        if is_claude_desktop {
+            meta_obj.insert("claudeDesktopMode".to_string(), json!("direct"));
+            meta_obj.remove("apiFormat");
+            meta_obj.remove("apiKeyField");
+            if self.claude_model_config_touched {
+                // 构建 claudeDesktopModelRoutes（带 supports1m 标志）
+                const DESKTOP_ROLES: [(&str, usize); 4] = [
+                    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 0),
+                    ("ANTHROPIC_DEFAULT_SONNET_MODEL", 1),
+                    ("ANTHROPIC_DEFAULT_OPUS_MODEL", 2),
+                    ("ANTHROPIC_DEFAULT_FABLE_MODEL", 3),
+                ];
+                let mut routes = serde_json::Map::new();
+                for (env_key, idx) in &DESKTOP_ROLES {
+                    if let Some(input) = self.claude_desktop_model_input(*idx) {
+                        if !input.is_blank() {
+                            let mut route = serde_json::Map::new();
+                            route.insert("model".to_string(), json!(input.value.trim()));
+                            if self.claude_desktop_model_1m(*idx) {
+                                route.insert("supports1m".to_string(), json!(true));
+                            }
+                            routes.insert(env_key.to_string(), Value::Object(route));
+                        }
+                    }
+                }
+                if routes.is_empty() {
+                    meta_obj.remove("claudeDesktopModelRoutes");
+                } else {
+                    meta_obj.insert(
+                        "claudeDesktopModelRoutes".to_string(),
+                        Value::Object(routes),
+                    );
+                }
+            }
+        }
         if should_write_common_config_meta {
             meta_obj.insert(
                 "commonConfigEnabled".to_string(),
@@ -681,11 +692,7 @@ impl ProviderAddFormState {
         if matches!(self.app_type, AppType::Codex) {
             if self.is_codex_official_provider() {
                 meta_obj.remove("apiFormat");
-                meta_obj.remove("apiKeyField");
-                meta_obj.remove("impersonateClaudeCode");
-                meta_obj.remove("maxOutputTokens");
                 meta_obj.remove("codexChatReasoning");
-                meta_obj.remove("promptCacheRouting");
             } else {
                 let api_format = match self.claude_api_format {
                     ClaudeApiFormat::OpenAiChat => "openai_chat",
@@ -693,36 +700,6 @@ impl ProviderAddFormState {
                     _ => "openai_responses",
                 };
                 meta_obj.insert("apiFormat".to_string(), json!(api_format));
-                if matches!(self.claude_api_format, ClaudeApiFormat::Anthropic) {
-                    if self.claude_api_key_field == ClaudeApiKeyField::ApiKey {
-                        meta_obj.insert(
-                            "apiKeyField".to_string(),
-                            json!(self.claude_api_key_field.as_env_key()),
-                        );
-                    } else {
-                        meta_obj.remove("apiKeyField");
-                    }
-                    if self.codex_impersonate_claude_code {
-                        meta_obj.insert("impersonateClaudeCode".to_string(), json!(true));
-                    } else {
-                        meta_obj.remove("impersonateClaudeCode");
-                    }
-                    let max_output_tokens = self
-                        .codex_max_output_tokens
-                        .value
-                        .trim()
-                        .parse::<u64>()
-                        .ok();
-                    if let Some(value) = max_output_tokens.filter(|value| *value > 0) {
-                        meta_obj.insert("maxOutputTokens".to_string(), json!(value));
-                    } else {
-                        meta_obj.remove("maxOutputTokens");
-                    }
-                } else {
-                    meta_obj.remove("apiKeyField");
-                    meta_obj.remove("impersonateClaudeCode");
-                    meta_obj.remove("maxOutputTokens");
-                }
                 // Reasoning capability is persisted only when routing is enabled
                 // AND the upstream format is Chat (reasoning is Chat-only).
                 if self.codex_local_routing_enabled() && self.codex_is_chat_format() {
@@ -736,58 +713,7 @@ impl ProviderAddFormState {
                 } else {
                     meta_obj.remove("codexChatReasoning");
                 }
-
-                if should_write_prompt_cache_routing {
-                    meta_obj.insert(
-                        "promptCacheRouting".to_string(),
-                        json!(self.codex_prompt_cache_routing.as_str()),
-                    );
-                } else {
-                    meta_obj.remove("promptCacheRouting");
-                }
             }
-        }
-
-        if matches!(self.app_type, AppType::Claude | AppType::Codex) {
-            if should_write_full_url {
-                meta_obj.insert("isFullUrl".to_string(), json!(true));
-            } else {
-                meta_obj.remove("isFullUrl");
-            }
-        }
-
-        if self.supports_local_proxy_settings() {
-            let custom_user_agent = self.custom_user_agent.value.trim();
-            if custom_user_agent.is_empty() {
-                meta_obj.remove("customUserAgent");
-            } else {
-                meta_obj.insert("customUserAgent".to_string(), json!(custom_user_agent));
-            }
-
-            let mut overrides = serde_json::Map::new();
-            if !self.local_proxy_header_overrides.is_empty() {
-                let headers = normalize_local_proxy_header_overrides(
-                    self.local_proxy_header_overrides
-                        .iter()
-                        .map(|(name, value)| (name.clone(), value.clone())),
-                )
-                .unwrap_or_else(|_| self.local_proxy_header_overrides.clone());
-                overrides.insert("headers".to_string(), json!(headers));
-            }
-            if let Some(body) = local_proxy_body_override {
-                overrides.insert("body".to_string(), body.clone());
-            }
-            if overrides.is_empty() {
-                meta_obj.remove("localProxyRequestOverrides");
-            } else {
-                meta_obj.insert(
-                    "localProxyRequestOverrides".to_string(),
-                    Value::Object(overrides),
-                );
-            }
-        } else if !self.is_claude_github_copilot_provider() {
-            meta_obj.remove("customUserAgent");
-            meta_obj.remove("localProxyRequestOverrides");
         }
 
         if is_codex_oauth {
@@ -836,17 +762,12 @@ impl ProviderAddFormState {
     }
 
     fn update_usage_script_meta(&self, meta_obj: &mut serde_json::Map<String, Value>) {
-        // Provider edits outside the Usage Query page must not normalize or
-        // rewrite a shared desktop configuration.
-        if !self.usage_query_touched {
+        if !self.has_usage_script_meta() && !self.usage_query_enabled && !self.usage_query_touched {
+            meta_obj.remove("usage_script");
             return;
         }
 
-        let mut script = meta_obj
-            .get("usage_script")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let mut script = serde_json::Map::new();
         script.insert("enabled".to_string(), json!(self.usage_query_enabled));
         script.insert("language".to_string(), json!("javascript"));
         script.insert("code".to_string(), json!(self.usage_query_code.as_str()));
@@ -869,8 +790,6 @@ impl ProviderAddFormState {
             UsageQueryTemplate::General => {
                 set_or_remove_trimmed(&mut script, "apiKey", &self.usage_query_api_key.value);
                 set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
-                script.remove("accessToken");
-                script.remove("userId");
             }
             UsageQueryTemplate::NewApi => {
                 set_or_remove_trimmed(&mut script, "baseUrl", &self.usage_query_base_url.value);
@@ -880,30 +799,17 @@ impl ProviderAddFormState {
                     &self.usage_query_access_token.value,
                 );
                 set_or_remove_trimmed(&mut script, "userId", &self.usage_query_user_id.value);
-                script.remove("apiKey");
             }
             UsageQueryTemplate::TokenPlan => {
-                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
-                    script.remove(key);
-                }
                 set_or_remove_trimmed(
                     &mut script,
                     "codingPlanProvider",
                     &self.usage_query_coding_plan_provider.value,
                 );
             }
-            UsageQueryTemplate::OfficialSubscription => {
-                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
-                    script.remove(key);
-                }
-            }
             UsageQueryTemplate::Custom
             | UsageQueryTemplate::GitHubCopilot
-            | UsageQueryTemplate::Balance => {
-                for key in ["apiKey", "baseUrl", "accessToken", "userId"] {
-                    script.remove(key);
-                }
-            }
+            | UsageQueryTemplate::Balance => {}
         }
 
         meta_obj.insert("usage_script".to_string(), Value::Object(script));
@@ -1096,7 +1002,7 @@ pub(crate) fn strip_common_config_from_settings(
             )
             .map_err(|e| e.to_string())?;
         }
-        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+        AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
         AppType::Codex => {
             *settings_value = ProviderService::remove_common_config_from_settings_for_preview(
                 app_type,

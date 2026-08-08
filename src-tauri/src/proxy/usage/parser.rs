@@ -504,7 +504,7 @@ impl TokenUsage {
         let cached_tokens = openai_cache_read_tokens(usage);
         let cache_write_tokens = openai_cache_write_tokens(usage);
 
-        // OpenAI total input 同时包含 cache read/write 两桶。
+        // 调整 input_tokens: OpenAI total input 同时包含 cache read/write 两桶。
         let adjusted_input = input_tokens
             .saturating_sub(cached_tokens)
             .saturating_sub(cache_write_tokens);

@@ -1,10 +1,6 @@
-use crate::{
-    claude_model_config::{ClaudeModelRole, CLAUDE_DEFAULT_MODEL_ENV_KEY},
-    provider::Provider,
-};
+use crate::claude_desktop_config::ONE_M_CONTEXT_MARKER;
+use crate::provider::Provider;
 use serde_json::Value;
-
-const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
 pub struct ModelMapping {
     pub haiku_model: Option<String>,
@@ -18,21 +14,35 @@ pub struct ModelMapping {
 impl ModelMapping {
     pub fn from_provider(provider: &Provider) -> Self {
         let env = provider.settings_config.get("env");
-        let model_for = |role: ClaudeModelRole| {
-            env.and_then(|value| value.get(role.model_env_key()))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(String::from)
-        };
 
         Self {
-            haiku_model: model_for(ClaudeModelRole::Haiku),
-            sonnet_model: model_for(ClaudeModelRole::Sonnet),
-            opus_model: model_for(ClaudeModelRole::Opus),
-            fable_model: model_for(ClaudeModelRole::Fable),
-            subagent_model: model_for(ClaudeModelRole::Subagent),
+            haiku_model: env
+                .and_then(|value| value.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
+            sonnet_model: env
+                .and_then(|value| value.get("ANTHROPIC_DEFAULT_SONNET_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
+            opus_model: env
+                .and_then(|value| value.get("ANTHROPIC_DEFAULT_OPUS_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
+            fable_model: env
+                .and_then(|value| value.get("ANTHROPIC_DEFAULT_FABLE_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
+            subagent_model: env
+                .and_then(|value| value.get("CLAUDE_CODE_SUBAGENT_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
             default_model: env
-                .and_then(|value| value.get(CLAUDE_DEFAULT_MODEL_ENV_KEY))
+                .and_then(|value| value.get("ANTHROPIC_MODEL"))
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(String::from),
@@ -55,6 +65,7 @@ impl ModelMapping {
             if let Some(model) = &self.fable_model {
                 return model.clone();
             }
+            // Providers without a dedicated Fable tier should retain the closest tier mapping.
             if let Some(model) = &self.opus_model {
                 return model.clone();
             }
@@ -75,9 +86,10 @@ impl ModelMapping {
             }
         }
 
-        if let Some(model) = &self.subagent_model {
-            if strip_one_m_suffix_for_upstream(original_model)
-                == strip_one_m_suffix_for_upstream(model)
+        // subagent 模型保护：若请求的模型（忽略 [1M] 后缀）与 CLAUDE_CODE_SUBAGENT_MODEL
+        // 一致，说明这是子 agent 使用自己的专属模型，不应被 default_model 覆盖，直接保持原样。
+        if let Some(ref m) = self.subagent_model {
+            if strip_one_m_suffix_for_upstream(original_model) == strip_one_m_suffix_for_upstream(m)
             {
                 return original_model.to_string();
             }
@@ -166,11 +178,11 @@ mod tests {
         }
     }
 
-    fn provider_with_env(env: Value) -> Provider {
+    fn provider_without_mapping() -> Provider {
         Provider {
             id: "test".to_string(),
             name: "Test".to_string(),
-            settings_config: json!({ "env": env }),
+            settings_config: json!({}),
             website_url: None,
             category: None,
             created_at: None,
@@ -199,53 +211,39 @@ mod tests {
     }
 
     #[test]
-    fn maps_fable_to_explicit_fable_model() {
-        let provider = provider_with_env(json!({
-            "ANTHROPIC_MODEL": "default-model",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-model",
-            "ANTHROPIC_DEFAULT_FABLE_MODEL": "fable-model"
-        }));
+    fn fable_uses_dedicated_mapping_when_configured() {
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] = json!("fable-mapped");
 
         let (result, _, mapped) =
-            apply_model_mapping(json!({"model": "claude-fable-5[1M]"}), &provider);
+            apply_model_mapping(json!({"model": "claude-fable-5[1m]"}), &provider);
 
-        assert_eq!(result["model"], "fable-model");
-        assert_eq!(mapped, Some("fable-model".to_string()));
+        assert_eq!(result["model"], "fable-mapped");
+        assert_eq!(mapped, Some("fable-mapped".to_string()));
     }
 
     #[test]
-    fn fable_falls_back_to_opus_then_default() {
-        let opus_provider = provider_with_env(json!({
-            "ANTHROPIC_MODEL": "default-model",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus-model"
-        }));
-        let default_provider = provider_with_env(json!({
-            "ANTHROPIC_MODEL": "default-model"
-        }));
+    fn fable_falls_back_to_opus_mapping_when_unset() {
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = json!("opus-mapped");
 
-        let (opus_result, _, _) =
-            apply_model_mapping(json!({"model": "claude-fable-5"}), &opus_provider);
-        let (default_result, _, _) =
-            apply_model_mapping(json!({"model": "claude-fable-5"}), &default_provider);
+        let (result, _, mapped) =
+            apply_model_mapping(json!({"model": "claude-fable-5"}), &provider);
 
-        assert_eq!(opus_result["model"], "opus-model");
-        assert_eq!(default_result["model"], "default-model");
+        assert_eq!(result["model"], "opus-mapped");
+        assert_eq!(mapped, Some("opus-mapped".to_string()));
     }
 
     #[test]
-    fn preserves_subagent_model_before_default_fallback() {
-        let provider = provider_with_env(json!({
-            "ANTHROPIC_MODEL": "default-model",
-            "CLAUDE_CODE_SUBAGENT_MODEL": "gpt-5.4-mini"
-        }));
+    fn fable_falls_back_to_default_mapping_without_opus() {
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-mapped");
 
-        for model in ["gpt-5.4-mini", "gpt-5.4-mini[1M]"] {
-            let (result, original, mapped) =
-                apply_model_mapping(json!({"model": model}), &provider);
-            assert_eq!(result["model"], model);
-            assert_eq!(original.as_deref(), Some(model));
-            assert!(mapped.is_none());
-        }
+        let (result, _, mapped) =
+            apply_model_mapping(json!({"model": "claude-fable-5"}), &provider);
+
+        assert_eq!(result["model"], "default-mapped");
+        assert_eq!(mapped, Some("default-mapped".to_string()));
     }
 
     #[test]
@@ -271,5 +269,46 @@ mod tests {
         let body = json!({"model": "deepseek-v4-pro"});
         let result = strip_one_m_suffix_for_upstream_from_body(body);
         assert_eq!(result["model"], "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn no_mapping_configured_passes_model_through() {
+        let provider = provider_without_mapping();
+        let body = json!({"model": "claude-sonnet-4-5"});
+        let (result, original, mapped) = apply_model_mapping(body, &provider);
+        assert_eq!(result["model"], "claude-sonnet-4-5");
+        assert_eq!(original, Some("claude-sonnet-4-5".to_string()));
+        assert!(mapped.is_none());
+    }
+
+    #[test]
+    fn subagent_model_preserved_before_default_fallback() {
+        // CLAUDE_CODE_SUBAGENT_MODEL 配置的模型不应被 ANTHROPIC_MODEL 覆盖；
+        // 子 agent 使用自己的专属模型发请求时，proxy 应保持原样转发。
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-model");
+        provider.settings_config["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = json!("gpt-5.4-mini");
+
+        let body = json!({"model": "gpt-5.4-mini"});
+        let (result, original, mapped) = apply_model_mapping(body, &provider);
+
+        assert_eq!(result["model"], "gpt-5.4-mini");
+        assert_eq!(original, Some("gpt-5.4-mini".to_string()));
+        assert!(mapped.is_none());
+    }
+
+    #[test]
+    fn subagent_model_preserved_with_one_m_suffix() {
+        // 子 agent 附带 [1M] 后缀发请求时同样应保持原样，[1M] 不影响 subagent 模型识别。
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-model");
+        provider.settings_config["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = json!("gpt-5.4-mini");
+
+        let body = json!({"model": "gpt-5.4-mini[1M]"});
+        let (result, original, mapped) = apply_model_mapping(body, &provider);
+
+        assert_eq!(result["model"], "gpt-5.4-mini[1M]");
+        assert_eq!(original, Some("gpt-5.4-mini[1M]".to_string()));
+        assert!(mapped.is_none());
     }
 }

@@ -22,183 +22,6 @@ pub(super) fn selection_style(theme: &super::theme::Theme) -> Style {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PaginationFooterStatus {
-    Idle,
-    NextBoundary,
-    PreviousBoundary,
-    PreparingNext,
-    NextReady,
-    LoadingPage(usize),
-    LoadError,
-    LoadErrorMoveRetry,
-    End,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PaginationFooter {
-    pub page: usize,
-    pub start: usize,
-    pub end: usize,
-    pub total: usize,
-    pub status: PaginationFooterStatus,
-}
-
-/// Adds pagination state to a list's bottom border without consuming a row.
-/// The action is kept when space is tight; the range label is intentionally
-/// dropped first so narrow terminals still expose the next available input.
-pub(super) fn with_pagination_footer<'a>(
-    mut block: Block<'a>,
-    area_width: u16,
-    footer: PaginationFooter,
-    theme: &super::theme::Theme,
-    tick: u64,
-) -> Block<'a> {
-    let available = area_width.saturating_sub(2) as usize;
-    if available == 0 || footer.total == 0 {
-        return block;
-    }
-
-    let range_full =
-        texts::tui_pagination_range(footer.page.max(1), footer.start, footer.end, footer.total);
-    let range_compact = texts::tui_pagination_range_compact(
-        footer.page.max(1),
-        footer.start,
-        footer.end,
-        footer.total,
-    );
-    let range = fit_owned_label(&[range_full, range_compact], available);
-    let action = pagination_action_spans(footer, available, tick, theme);
-
-    match (range, action) {
-        (Some(range), Some(action))
-            if padded_width(&range)
-                .saturating_add(spans_display_width(&action))
-                .saturating_add(1)
-                <= available =>
-        {
-            block = block
-                .title_bottom(
-                    Line::styled(format!(" {range} "), Style::default().fg(theme.dim))
-                        .alignment(Alignment::Left),
-                )
-                .title_bottom(Line::from(action).alignment(Alignment::Right));
-        }
-        (_, Some(action)) => {
-            block = block.title_bottom(Line::from(action).alignment(Alignment::Right));
-        }
-        (Some(range), None) => {
-            block = block.title_bottom(
-                Line::styled(format!(" {range} "), Style::default().fg(theme.dim))
-                    .alignment(Alignment::Left),
-            );
-        }
-        (None, None) => {}
-    }
-
-    block
-}
-
-/// The right-hand footer action, already padded with its surrounding spaces.
-/// Busy states lead with the shared spinner glyph — the footer already spends
-/// its columns on a label of its own, so it takes the glyph-only size of the
-/// indicator family rather than a second "Refreshing".
-fn pagination_action_spans(
-    footer: PaginationFooter,
-    available: usize,
-    tick: u64,
-    theme: &super::theme::Theme,
-) -> Option<Vec<Span<'static>>> {
-    let (labels, style, spinner): (Vec<String>, Style, bool) = match footer.status {
-        PaginationFooterStatus::Idle => return None,
-        PaginationFooterStatus::NextBoundary => (
-            vec![
-                texts::tui_pagination_next_trigger().to_string(),
-                texts::tui_pagination_next_trigger_compact().to_string(),
-                texts::tui_pagination_next_trigger_minimal().to_string(),
-            ],
-            selection_style(theme),
-            false,
-        ),
-        PaginationFooterStatus::PreviousBoundary => (
-            vec![
-                texts::tui_pagination_previous_trigger().to_string(),
-                texts::tui_pagination_previous_trigger_compact().to_string(),
-                texts::tui_pagination_previous_trigger_minimal().to_string(),
-            ],
-            selection_style(theme),
-            false,
-        ),
-        PaginationFooterStatus::PreparingNext => (
-            vec![texts::tui_pagination_preparing_next().to_string()],
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-            true,
-        ),
-        PaginationFooterStatus::NextReady => (
-            vec![format!("> {}", texts::tui_pagination_next_ready())],
-            Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
-            false,
-        ),
-        PaginationFooterStatus::LoadingPage(page) => (
-            vec![texts::tui_pagination_loading_page(page)],
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-            true,
-        ),
-        PaginationFooterStatus::LoadError => (
-            vec![format!("! {}", texts::tui_pagination_load_failed())],
-            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            false,
-        ),
-        PaginationFooterStatus::LoadErrorMoveRetry => (
-            vec![format!(
-                "! {}",
-                texts::tui_pagination_load_failed_move_retry()
-            )],
-            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            false,
-        ),
-        PaginationFooterStatus::End => (
-            vec![format!("[end] {}", texts::tui_pagination_end(footer.total))],
-            Style::default().fg(theme.dim),
-            false,
-        ),
-    };
-
-    // The glyph and its leading space are part of the action's footprint.
-    let spinner_width = if spinner { 2 } else { 0 };
-    let label = fit_owned_label(&labels, available.saturating_sub(spinner_width))?;
-
-    let mut spans = Vec::new();
-    if spinner {
-        spans.push(Span::raw(" "));
-        spans.push(refresh_spinner_span(tick, theme));
-    }
-    spans.push(Span::styled(format!(" {label} "), style));
-    Some(spans)
-}
-
-fn fit_owned_label(labels: &[String], available: usize) -> Option<String> {
-    labels
-        .iter()
-        .find(|label| padded_width(label) <= available)
-        .cloned()
-}
-
-fn padded_width(label: &str) -> usize {
-    UnicodeWidthStr::width(label).saturating_add(2)
-}
-
-pub(super) fn spans_display_width(spans: &[Span<'_>]) -> usize {
-    spans
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum()
-}
-
 pub(super) fn inactive_chip_style(theme: &super::theme::Theme) -> Style {
     if theme.no_color {
         Style::default()
@@ -262,187 +85,25 @@ pub(super) fn truncate_to_display_width(text: &str, width: u16) -> String {
         return String::new();
     }
 
-    const MAX_CHARS_PER_COLUMN: usize = 4;
-    const EXTRA_ZERO_WIDTH_CHARS: usize = 16;
-    let max_chars = width
-        .saturating_mul(MAX_CHARS_PER_COLUMN)
-        .saturating_add(EXTRA_ZERO_WIDTH_CHARS);
-    let mut out = String::new();
-    let mut used = 0usize;
-    let mut end_byte = 0usize;
-    let mut truncated = false;
-    for (count, (byte, c)) in text.char_indices().enumerate() {
-        if count >= max_chars {
-            truncated = true;
-            break;
-        }
-        let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if used.saturating_add(w) > width {
-            truncated = true;
-            break;
-        }
-        out.push(c);
-        used = used.saturating_add(w);
-        end_byte = byte.saturating_add(c.len_utf8());
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
     }
-    truncated |= end_byte < text.len();
 
-    if !truncated {
-        return out;
-    }
     if width == 1 {
         return "…".to_string();
     }
-    while used > width.saturating_sub(1) {
-        let Some(c) = out.pop() else {
-            break;
-        };
-        used = used.saturating_sub(UnicodeWidthChar::width(c).unwrap_or(0));
-    }
-    out.push('…');
-    out
-}
-
-/// Cut marker for clipped text: `…`, or `~` where unicode is not available.
-pub(super) fn truncation_marker() -> &'static str {
-    if icons::use_emoji() {
-        "…"
-    } else {
-        "~"
-    }
-}
-
-/// Longest prefix of `text` that fits `width` columns, with no cut marker.
-///
-/// Scanning is bounded the same way [`truncate_to_display_width`] bounds it, so
-/// a pathological input (tens of thousands of zero-width characters) cannot
-/// turn a single line into an unbounded walk.
-fn clip_to_display_width(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    const MAX_CHARS_PER_COLUMN: usize = 4;
-    const EXTRA_ZERO_WIDTH_CHARS: usize = 16;
-    let max_chars = width
-        .saturating_mul(MAX_CHARS_PER_COLUMN)
-        .saturating_add(EXTRA_ZERO_WIDTH_CHARS);
 
     let mut out = String::new();
     let mut used = 0usize;
-    for (count, c) in text.chars().enumerate() {
-        if count >= max_chars {
-            break;
-        }
+    for c in text.chars() {
         let w = UnicodeWidthChar::width(c).unwrap_or(0);
-        if used.saturating_add(w) > width {
+        if used.saturating_add(w) > width.saturating_sub(1) {
             break;
         }
         out.push(c);
         used = used.saturating_add(w);
     }
-    out
-}
-
-/// Clip a styled line to `width` display columns, marking a cut with
-/// [`truncation_marker`]. Each span keeps its own style.
-///
-/// Every measurement stays in `usize`: a 70 000-character URL pasted into a
-/// provider config must clip, not wrap a `u16` into a plausible-looking small
-/// number that then drives a layout constraint.
-pub(super) fn truncate_spans_to_width<'a>(spans: Vec<Span<'a>>, width: u16) -> Vec<Span<'a>> {
-    let width = width as usize;
-    if width == 0 {
-        return Vec::new();
-    }
-    if spans_display_width(&spans) <= width {
-        return spans;
-    }
-
-    let marker = truncation_marker();
-    let marker_width = UnicodeWidthStr::width(marker);
-    let budget = width.saturating_sub(marker_width);
-
-    let mut out: Vec<Span<'a>> = Vec::with_capacity(spans.len().min(width).saturating_add(1));
-    let mut used = 0usize;
-    for span in spans {
-        if used >= budget {
-            break;
-        }
-        let span_width = UnicodeWidthStr::width(span.content.as_ref());
-        if used.saturating_add(span_width) <= budget {
-            used = used.saturating_add(span_width);
-            out.push(span);
-            continue;
-        }
-        let style = span.style;
-        let clipped = clip_to_display_width(span.content.as_ref(), budget.saturating_sub(used));
-        if !clipped.is_empty() {
-            out.push(Span::styled(clipped, style));
-        }
-        break;
-    }
-    out.push(Span::raw(marker));
-    out
-}
-
-/// Produce a small, single-line passive summary without measuring or cloning
-/// an arbitrary complete input. Passive rows always show a bounded prefix and
-/// an ellipsis when the source exceeds this fixed safety budget.
-pub(super) fn bounded_trimmed_text_for_display(text: &str) -> String {
-    const MAX_DISPLAY_WIDTH: usize = 512;
-    const MAX_SCANNED_CHARS: usize = 2_048;
-
-    if text.is_empty() {
-        return String::new();
-    }
-
-    let mut out = String::new();
-    let mut used = 0usize;
-    let mut started = false;
-    let mut end_byte = 0usize;
-    let mut truncated = false;
-
-    for (count, (byte, ch)) in text.char_indices().enumerate() {
-        if count >= MAX_SCANNED_CHARS {
-            truncated = true;
-            break;
-        }
-        end_byte = byte.saturating_add(ch.len_utf8());
-        if !started && ch.is_whitespace() {
-            continue;
-        }
-        started = true;
-        let display_char = if (ch.is_whitespace() && ch != ' ') || ch.is_control() {
-            ' '
-        } else {
-            ch
-        };
-        let char_width = UnicodeWidthChar::width(display_char).unwrap_or(0);
-        if used.saturating_add(char_width) > MAX_DISPLAY_WIDTH {
-            truncated = true;
-            break;
-        }
-        out.push(display_char);
-        used = used.saturating_add(char_width);
-    }
-    truncated |= end_byte < text.len();
-
-    while out.chars().next_back().is_some_and(char::is_whitespace) {
-        let Some(ch) = out.pop() else {
-            break;
-        };
-        used = used.saturating_sub(UnicodeWidthChar::width(ch).unwrap_or(0));
-    }
-
-    if truncated {
-        while used > MAX_DISPLAY_WIDTH.saturating_sub(1) {
-            let Some(ch) = out.pop() else {
-                break;
-            };
-            used = used.saturating_sub(UnicodeWidthChar::width(ch).unwrap_or(0));
-        }
-        out.push('…');
-    }
+    out.push('…');
     out
 }
 
@@ -458,32 +119,11 @@ pub(super) fn render_page_frame(
     keys: &[(&str, &str)],
     summary: Option<String>,
 ) -> Rect {
-    render_page_frame_spans(
-        frame,
-        area,
-        theme,
-        app,
-        title,
-        keys,
-        summary.map(|summary| vec![Span::raw(summary)]),
-    )
-}
-
-/// [`render_page_frame`] for pages whose summary carries its own styling.
-pub(super) fn render_page_frame_spans(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    theme: &super::theme::Theme,
-    app: &App,
-    title: &str,
-    keys: &[(&str, &str)],
-    summary: Option<Vec<Span<'static>>>,
-) -> Rect {
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", icons::strip_icon(title)));
+        .title(format!(" {} ", title));
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
@@ -503,7 +143,7 @@ pub(super) fn render_page_frame_spans(
 
     render_page_key_bar(frame, chunks[0], theme, keys, app.focus == Focus::Content);
     if let Some(summary) = summary {
-        render_summary_bar_spans(frame, chunks[1], theme, summary);
+        render_summary_bar(frame, chunks[1], theme, summary);
     }
 
     *chunks.last().expect("page frame always has a body chunk")
@@ -514,7 +154,7 @@ pub(super) fn render_page_frame_spans(
 pub(super) fn breadcrumb_title(segments: &[&str]) -> String {
     // Hand-rolled callers don't pass through `render_page_frame`, so strip the
     // leading emoji here too (no-op in emoji mode / for non-emoji segments).
-    format!(" {} ", icons::strip_icon(&breadcrumb_path(segments)))
+    format!(" {} ", breadcrumb_path(segments))
 }
 
 /// Breadcrumb path without the surrounding padding that `breadcrumb_title`
@@ -523,23 +163,53 @@ pub(super) fn breadcrumb_path(segments: &[&str]) -> String {
     segments.join(" › ")
 }
 
-/// Centered guidance for empty list screens: a bold title and a muted
-/// subtitle. Available actions stay in the page key bar so they are not
-/// duplicated in the body.
+/// Centered guidance for empty list screens: a bold title, a muted
+/// subtitle, and key chips for the actions that create the first entry.
+/// The first action renders as the primary (accent) chip.
 pub(super) fn render_empty_state(
     frame: &mut Frame<'_>,
     area: Rect,
     theme: &super::theme::Theme,
     title: &str,
     subtitle: &str,
+    actions: &[(&str, &str)],
 ) {
     let title_style = Style::default().add_modifier(Modifier::BOLD);
     let subtitle_style = Style::default().fg(theme.comment);
-    let content_lines = vec![
+    let primary_style = if theme.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(theme.on_accent)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    let secondary_style = if theme.no_color {
+        Style::default()
+    } else {
+        Style::default()
+            .fg(theme.dim)
+            .bg(theme.surface)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let mut content_lines = vec![
         Line::styled(title.to_string(), title_style),
         Line::raw(""),
         Line::styled(subtitle.to_string(), subtitle_style),
+        Line::raw(""),
     ];
+    for (idx, (key, label)) in actions.iter().enumerate() {
+        let style = if idx == 0 {
+            primary_style
+        } else {
+            secondary_style
+        };
+        content_lines.push(Line::from(vec![Span::styled(
+            format!("  {key}  {label}  "),
+            style,
+        )]));
+    }
 
     let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
     let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
@@ -828,12 +498,8 @@ fn script_usage_compact_line(
             spans.push(Span::raw("  "));
         }
         if let Some(name) = display_usage_plan_name(item) {
-            let name = match name.trim() {
-                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
-                other => other.to_string(),
-            };
             spans.push(Span::styled(
-                format!("{name} "),
+                format!("{} ", name.trim()),
                 Style::default().fg(theme.comment),
             ));
         }
@@ -1097,26 +763,12 @@ pub(super) fn render_summary_bar(
     theme: &super::theme::Theme,
     summary: String,
 ) {
-    render_summary_bar_spans(frame, area, theme, vec![Span::raw(summary)]);
-}
-
-/// Summary bar for lines that carry their own styling — a live indicator, for
-/// instance. Unstyled spans still inherit the bar's dim ink.
-pub(super) fn render_summary_bar_spans(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    theme: &super::theme::Theme,
-    summary: Vec<Span<'static>>,
-) {
     let summary_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(Style::default().fg(theme.dim));
-    let mut spans = Vec::with_capacity(summary.len() + 1);
-    spans.push(Span::raw("  "));
-    spans.extend(summary);
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
+        Paragraph::new(Line::raw(format!("  {summary}")))
             .style(Style::default().fg(theme.dim))
             .wrap(Wrap { trim: false })
             .block(summary_block),
@@ -1171,26 +823,6 @@ pub(super) fn inset_top(area: Rect, top: u16) -> Rect {
     }
 }
 
-/// Returns a fixed-size slice around the selected row. Renderers use this
-/// before constructing ratatui rows so a large imported collection cannot turn
-/// every periodic redraw into O(total rows) work.
-pub(super) fn visible_selection_window(
-    len: usize,
-    selected: usize,
-    capacity: usize,
-) -> std::ops::Range<usize> {
-    if len == 0 || capacity == 0 {
-        return 0..0;
-    }
-
-    let capacity = capacity.min(len);
-    let selected = selected.min(len - 1);
-    let start = selected
-        .saturating_sub(capacity / 2)
-        .min(len.saturating_sub(capacity));
-    start..start.saturating_add(capacity)
-}
-
 pub(super) fn field_label_column_width<'a, I>(labels: I, left_padding: u16) -> u16
 where
     I: IntoIterator<Item = &'a str>,
@@ -1203,508 +835,56 @@ where
     max.saturating_add(left_padding)
 }
 
-const PREVIEW_NODE_BUDGET: usize = 2_048;
-const PREVIEW_MAX_COLLECTION_ITEMS: usize = 128;
-const PREVIEW_MAX_DEPTH: usize = 16;
-const PREVIEW_KEY_MAX_CHARS: usize = 128;
-pub(super) const TOML_PREVIEW_MAX_INPUT_BYTES: usize = 256 * 1024;
-
-struct PreviewBudget {
-    remaining: usize,
+pub(super) fn redacted_secret_placeholder() -> &'static str {
+    "[redacted]"
 }
 
-impl PreviewBudget {
-    fn new() -> Self {
-        Self::with_limit(PREVIEW_NODE_BUDGET)
-    }
-
-    fn with_limit(limit: usize) -> Self {
-        Self {
-            remaining: limit.min(PREVIEW_NODE_BUDGET),
-        }
-    }
-
-    fn take(&mut self) -> bool {
-        if self.remaining == 0 {
-            return false;
-        }
-        self.remaining -= 1;
-        true
-    }
-}
-
-pub(super) fn bounded_json_preview(value: &Value) -> Value {
-    let mut budget = PreviewBudget::new();
-    bounded_json_preview_with_budget(value, &mut budget, 0)
-}
-
-pub(super) fn bounded_json_preview_with_node_limit(value: &Value, max_nodes: usize) -> Value {
-    let mut budget = PreviewBudget::with_limit(max_nodes);
-    bounded_json_preview_with_budget(value, &mut budget, 0)
-}
-
-/// Builds a bounded object preview directly from borrowed entries. This keeps
-/// callers with `HashMap<String, Value>` storage from cloning the complete map
-/// before the normal preview limits can take effect.
-pub(super) fn bounded_json_object_preview<'a>(
-    entries: impl IntoIterator<Item = (&'a str, &'a Value)>,
-    total: usize,
-) -> Value {
-    let mut budget = PreviewBudget::new();
-    if !budget.take() {
-        return preview_truncated_value();
-    }
-
-    let mut out = serde_json::Map::new();
-    let mut rendered = 0usize;
-    for (key, value) in entries.into_iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
-        if budget.remaining == 0 {
-            break;
-        }
-        let display_key = unique_preview_key(&out, bounded_preview_key(key));
-        out.insert(
-            display_key,
-            bounded_json_preview_with_budget(value, &mut budget, 1),
-        );
-        rendered += 1;
-    }
-    let hidden = total.saturating_sub(rendered);
-    if hidden > 0 {
-        insert_json_truncation(&mut out, hidden);
-    }
-    Value::Object(out)
-}
-
-fn bounded_json_preview_with_budget(
-    value: &Value,
-    budget: &mut PreviewBudget,
-    depth: usize,
-) -> Value {
-    // Consume the global budget even for a depth-limit placeholder. Checking
-    // depth first would let every child at the cutoff allocate a marker without
-    // reducing `remaining`, multiplying a wide/deep tree far beyond the cap.
-    if !budget.take() || depth >= PREVIEW_MAX_DEPTH {
-        return preview_truncated_value();
-    }
-
+pub(super) fn redact_sensitive_json(value: &Value) -> Value {
     match value {
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            let mut rendered = 0usize;
-            for (key, value) in map.iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
-                if budget.remaining == 0 {
-                    break;
-                }
-                let display_key = unique_preview_key(&out, bounded_preview_key(key));
-                out.insert(
-                    display_key,
-                    bounded_json_preview_with_budget(value, budget, depth.saturating_add(1)),
-                );
-                rendered += 1;
-            }
-            let hidden = map.len().saturating_sub(rendered);
-            if hidden > 0 {
-                insert_json_truncation(&mut out, hidden);
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => {
-            let mut out = Vec::new();
-            for item in items.iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
-                if budget.remaining == 0 {
-                    break;
-                }
-                out.push(bounded_json_preview_with_budget(
-                    item,
-                    budget,
-                    depth.saturating_add(1),
-                ));
-            }
-            let hidden = items.len().saturating_sub(out.len());
-            if hidden > 0 {
-                out.push(preview_truncated_count_value(hidden));
-            }
-            Value::Array(out)
-        }
-        Value::String(text) => Value::String(bounded_preview_text(text)),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let next = if is_sensitive_display_key(key) {
+                        redact_value_payload(value)
+                    } else {
+                        redact_sensitive_json(value)
+                    };
+                    (key.clone(), next)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_json).collect()),
         _ => value.clone(),
     }
 }
 
-fn bounded_preview_key(key: &str) -> String {
-    let mut chars = key.chars();
-    let mut out = chars
-        .by_ref()
-        .take(PREVIEW_KEY_MAX_CHARS)
-        .collect::<String>();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-fn unique_preview_key(map: &serde_json::Map<String, Value>, base: String) -> String {
-    if !map.contains_key(&base) {
-        return base;
-    }
-    for suffix in 2usize.. {
-        let candidate = format!("{base} ({suffix})");
-        if !map.contains_key(&candidate) {
-            return candidate;
-        }
-    }
-    unreachable!("an unused preview key suffix must exist")
-}
-
-fn insert_json_truncation(map: &mut serde_json::Map<String, Value>, hidden: usize) {
-    let key = unique_preview_key(map, "…".to_string());
-    map.insert(key, preview_truncated_count_value(hidden));
-}
-
-fn preview_truncated_count_value(hidden: usize) -> Value {
-    Value::String(format!("[preview truncated: {hidden} more entries]"))
-}
-
-fn preview_truncated_value() -> Value {
-    Value::String("[preview truncated]".to_string())
-}
-
-/// Builds a display-only Codex TOML preview while keeping values in plaintext.
-pub(super) fn bounded_toml_preview(text: &str) -> String {
-    if text.len() > TOML_PREVIEW_MAX_INPUT_BYTES {
-        return texts::tui_preview_omitted_too_large().to_string();
-    }
-    if text.trim().is_empty() {
-        return String::new();
-    }
-
-    let Ok(mut value) = toml::from_str::<toml::Value>(text) else {
-        return text.to_string();
-    };
-    let mut budget = PreviewBudget::new();
-    bound_toml_preview_value(&mut value, &mut budget, 0);
-    let rendered = toml::to_string_pretty(&value).unwrap_or_else(|_| text.to_string());
-    if rendered.len() > TOML_PREVIEW_MAX_INPUT_BYTES {
-        texts::tui_preview_omitted_too_large().to_string()
-    } else {
-        rendered
-    }
-}
-
-fn bound_toml_preview_value(value: &mut toml::Value, budget: &mut PreviewBudget, depth: usize) {
-    if !budget.take() || depth >= PREVIEW_MAX_DEPTH {
-        truncate_toml_preview_value(value);
-        return;
-    }
-
+fn redact_value_payload(value: &Value) -> Value {
     match value {
-        toml::Value::Table(table) => {
-            let original_len = table.len();
-            let original = std::mem::take(table);
-            let mut rendered = 0usize;
-            for (key, mut child) in original.into_iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
-                if budget.remaining == 0 {
-                    break;
-                }
-                bound_toml_preview_value(&mut child, budget, depth.saturating_add(1));
-                let display_key = unique_toml_preview_key(table, bounded_preview_key(&key));
-                table.insert(display_key, child);
-                rendered += 1;
-            }
-            insert_toml_truncation(table, original_len.saturating_sub(rendered));
-        }
-        toml::Value::Array(items) => {
-            let original_len = items.len();
-            let original = std::mem::take(items);
-            for mut item in original.into_iter().take(PREVIEW_MAX_COLLECTION_ITEMS) {
-                if budget.remaining == 0 {
-                    break;
-                }
-                bound_toml_preview_value(&mut item, budget, depth.saturating_add(1));
-                items.push(item);
-            }
-            let hidden = original_len.saturating_sub(items.len());
-            if hidden > 0 {
-                items.push(toml_preview_truncation_value(hidden));
-            }
-        }
-        toml::Value::String(text) => *text = bounded_preview_text(text),
-        _ => {}
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_value_payload(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_value_payload).collect()),
+        Value::Null => Value::Null,
+        _ => Value::String(redacted_secret_placeholder().to_string()),
     }
 }
 
-fn truncate_toml_preview_value(value: &mut toml::Value) {
-    *value = toml::Value::String("[preview truncated]".to_string());
-}
+fn is_sensitive_display_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
 
-fn toml_preview_truncation_value(hidden: usize) -> toml::Value {
-    toml::Value::String(format!("[preview truncated: {hidden} more entries]"))
-}
-
-fn unique_toml_preview_key(table: &toml::map::Map<String, toml::Value>, base: String) -> String {
-    if !table.contains_key(&base) {
-        return base;
-    }
-    for suffix in 2usize.. {
-        let candidate = format!("{base} ({suffix})");
-        if !table.contains_key(&candidate) {
-            return candidate;
-        }
-    }
-    unreachable!("an unused TOML preview key suffix must exist")
-}
-
-fn insert_toml_truncation(table: &mut toml::map::Map<String, toml::Value>, hidden: usize) {
-    if hidden == 0 {
-        return;
-    }
-    let key = unique_toml_preview_key(table, "…".to_string());
-    table.insert(key, toml_preview_truncation_value(hidden));
-}
-
-fn bounded_preview_text(text: &str) -> String {
-    const MAX_CHARS: usize = 512;
-
-    let mut chars = text.chars();
-    let mut out = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Refresh indicators (spinner + label)
-// ---------------------------------------------------------------------------
-//
-// One family for every "still working" surface: a spinner glyph on the app's
-// accent, optionally followed by a label and the escalation percentage.
-//
-// * wide slots — a card title rail, a summary bar, an empty body — take the
-//   whole indicator, so the animation is named rather than merely present;
-// * tight slots — a pagination footer, a scope line that already carries its
-//   own status text — take the glyph alone. It is the same glyph on the same
-//   cadence, so the two read as one widget at two sizes.
-//
-// Hard rule: at most one indicator per section. Where two pipelines can be live
-// at once (the Usage page's own refresh and the background session import),
-// callers merge them into a single indicator instead of animating twice on one
-// line — two spinners in phase read as a rendering fault, not as two signals.
-
-/// Spinner frames, one per 200ms tick: a ~0.8s rotation.
-const SPINNER_FRAMES_UNICODE: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-/// ASCII icon mode keeps the cadence and swaps in the classic rotation, the
-/// same four frames the loading overlay has always used.
-const SPINNER_FRAMES_ASCII: [&str; 4] = ["|", "/", "-", "\\"];
-
-/// Ticks one sync round must survive before its indicator earns a number.
-/// 50 ticks × 200ms = 10s: routine incremental syncs finish long before that,
-/// so only first imports and Codex rebuilds ever show a percentage.
-pub(super) const SYNC_ESCALATION_TICKS: u64 = 50;
-
-/// The spinner glyph for a frame counter, in whichever alphabet the terminal
-/// advertised.
-pub(super) fn spinner_frame(tick: u64) -> &'static str {
-    let frames = if icons::use_emoji() {
-        SPINNER_FRAMES_UNICODE
-    } else {
-        SPINNER_FRAMES_ASCII
-    };
-    frames[(tick % frames.len() as u64) as usize]
-}
-
-/// Ink shared by the glyph and its label, so the pair reads as one widget.
-/// NoColor keeps the motion and drops the hue.
-pub(super) fn refresh_indicator_style(theme: &super::theme::Theme) -> Style {
-    if theme.no_color {
-        Style::default()
-    } else {
-        Style::default().fg(theme.accent)
-    }
-}
-
-/// The glyph alone, for slots too tight to spend columns on a label.
-pub(super) fn refresh_spinner_span(tick: u64, theme: &super::theme::Theme) -> Span<'static> {
-    Span::styled(spinner_frame(tick), refresh_indicator_style(theme))
-}
-
-/// The glyph, a caller-supplied label, and the escalation percentage when a
-/// slow round has earned one. An empty label degrades to the glyph alone.
-pub(super) fn labelled_spinner_spans(
-    tick: u64,
-    theme: &super::theme::Theme,
-    label: &str,
-    percent: Option<u8>,
-) -> Vec<Span<'static>> {
-    let mut text = String::from(spinner_frame(tick));
-    if !label.is_empty() {
-        text.push(' ');
-        text.push_str(label);
-    }
-    if let Some(percent) = percent {
-        text.push_str(&format!(" {percent}%"));
-    }
-    vec![Span::styled(text, refresh_indicator_style(theme))]
-}
-
-/// The generic indicator: the glyph plus the shared refresh label.
-pub(super) fn refresh_indicator_spans(
-    tick: u64,
-    theme: &super::theme::Theme,
-    percent: Option<u8>,
-) -> Vec<Span<'static>> {
-    labelled_spinner_spans(tick, theme, texts::tui_refreshing(), percent)
-}
-
-const INLINE_REFRESH_SEPARATOR: &str = " · ";
-
-/// Width consumed when the shared refresh indicator follows inline summary
-/// text, including the separator between them.
-pub(super) fn inline_refresh_indicator_width(
-    tick: u64,
-    theme: &super::theme::Theme,
-    percent: Option<u8>,
-) -> u16 {
-    let width = UnicodeWidthStr::width(INLINE_REFRESH_SEPARATOR).saturating_add(
-        spans_display_width(&refresh_indicator_spans(tick, theme, percent)),
-    );
-    u16::try_from(width).unwrap_or(u16::MAX)
-}
-
-/// Render summary text followed immediately by the shared refresh indicator.
-///
-/// The summary is shortened first when space is tight, so the complete
-/// `spinner + Refreshing` widget stays visible at the end of the actual text
-/// instead of being pushed to a right-aligned slot or clipped off-screen.
-pub(super) fn summary_with_refresh_indicator(
-    summary: String,
-    refreshing: bool,
-    tick: u64,
-    theme: &super::theme::Theme,
-    percent: Option<u8>,
-    available_width: u16,
-) -> Vec<Span<'static>> {
-    if !refreshing {
-        return vec![Span::raw(truncate_to_display_width(
-            &summary,
-            available_width,
-        ))];
-    }
-
-    let indicator = refresh_indicator_spans(tick, theme, percent);
-    let indicator_width = spans_display_width(&indicator);
-    let available = available_width as usize;
-    if available <= indicator_width {
-        return truncate_spans_to_width(indicator, available_width);
-    }
-
-    let separator_width = UnicodeWidthStr::width(INLINE_REFRESH_SEPARATOR);
-    let summary_width = available
-        .saturating_sub(indicator_width)
-        .saturating_sub(separator_width);
-    let summary_width = u16::try_from(summary_width).unwrap_or(u16::MAX);
-    let summary = truncate_to_display_width(&summary, summary_width);
-
-    let mut spans = Vec::with_capacity(indicator.len().saturating_add(2));
-    if !summary.is_empty() {
-        spans.push(Span::raw(summary));
-        spans.push(Span::raw(INLINE_REFRESH_SEPARATOR));
-    }
-    spans.extend(indicator);
-    spans
-}
-
-/// The indicator on its own row, for a body that has nothing else to show yet.
-pub(super) fn loading_indicator_line(
-    tick: u64,
-    theme: &super::theme::Theme,
-    label: &str,
-    percent: Option<u8>,
-) -> Line<'static> {
-    Line::from(labelled_spinner_spans(tick, theme, label, percent))
-}
-
-// Deterministic sync state for render tests. The services-side progress lives
-// in process-global atomics that other tests read concurrently, so the TUI
-// reads through this thread-local seam instead of poking the global.
-#[cfg(test)]
-thread_local! {
-    static SYNC_PROGRESS_OVERRIDE: std::cell::Cell<Option<Option<(u64, u64)>>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) struct SyncProgressOverride;
-
-#[cfg(test)]
-impl SyncProgressOverride {
-    /// `Some((done, total))` fakes a live round, `None` fakes an idle one.
-    pub(super) fn set(progress: Option<(u64, u64)>) -> Self {
-        SYNC_PROGRESS_OVERRIDE.with(|cell| cell.set(Some(progress)));
-        Self
-    }
-}
-
-#[cfg(test)]
-impl Drop for SyncProgressOverride {
-    fn drop(&mut self) {
-        SYNC_PROGRESS_OVERRIDE.with(|cell| cell.set(None));
-    }
-}
-
-fn session_usage_sync_snapshot() -> Option<(u64, u64)> {
-    #[cfg(test)]
-    if let Some(progress) = SYNC_PROGRESS_OVERRIDE.with(std::cell::Cell::get) {
-        return progress;
-    }
-    crate::services::session_usage::sync_progress::snapshot()
-        .map(|(done, total)| (done as u64, total as u64))
-}
-
-/// Whether a background session-log import round is running right now.
-pub(super) fn session_usage_sync_active() -> bool {
-    session_usage_sync_snapshot().is_some()
-}
-
-/// Background session-log import progress, once the round knows its file count.
-pub(super) fn session_usage_sync_progress() -> Option<(u64, u64)> {
-    session_usage_sync_snapshot().filter(|(_, total)| *total > 0)
-}
-
-/// Percentage for a sync round that has outlived [`SYNC_ESCALATION_TICKS`].
-/// Rounds that finish quickly, and rounds that do not know their total yet,
-/// stay numberless: the spinner and its label already say "working".
-pub(super) fn sync_escalation_percent(
-    started_tick: Option<u64>,
-    tick: u64,
-    progress: Option<(u64, u64)>,
-) -> Option<u8> {
-    let started = started_tick?;
-    if tick.saturating_sub(started) < SYNC_ESCALATION_TICKS {
-        return None;
-    }
-    let (done, total) = progress?;
-    if total == 0 {
-        return None;
-    }
-    Some((done.min(total).saturating_mul(100) / total) as u8)
-}
-
-pub(super) fn sync_escalation(app: &App) -> Option<u8> {
-    sync_escalation_percent(
-        app.usage_sync_round_started_tick,
-        app.tick,
-        session_usage_sync_progress(),
-    )
-}
-
-/// The indicator a surface shows while the background session import runs,
-/// with a percentage only for rounds slow enough to owe the user an
-/// explanation. `None` when idle.
-pub(super) fn session_sync_indicator_spans(
-    app: &App,
-    theme: &super::theme::Theme,
-) -> Option<Vec<Span<'static>>> {
-    session_usage_sync_active()
-        .then(|| refresh_indicator_spans(app.tick, theme, sync_escalation(app)))
+    normalized == "authorization"
+        || normalized.ends_with("authorization")
+        || normalized.ends_with("apikey")
+        || normalized.ends_with("token")
+        || normalized.ends_with("password")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("awsaccesskeyid")
+        || normalized.ends_with("awssecretaccesskey")
+        || normalized.ends_with("secretkey")
 }

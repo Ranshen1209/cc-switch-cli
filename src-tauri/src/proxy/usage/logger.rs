@@ -23,14 +23,6 @@ pub enum UsageLogPolicy {
     Transformed,
 }
 
-fn input_token_semantics_for_app(app_type: &AppType) -> i64 {
-    if matches!(app_type.as_str(), "codex" | "gemini") {
-        INPUT_TOKEN_SEMANTICS_TOTAL
-    } else {
-        INPUT_TOKEN_SEMANTICS_FRESH
-    }
-}
-
 impl UsageLogPolicy {
     fn logs_zero_usage_on_parse_failure(self, status_code: u16) -> bool {
         let _ = self;
@@ -209,7 +201,11 @@ async fn insert_request_log(
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
-    let input_token_semantics = input_token_semantics_for_app(&context.app_type);
+    let input_token_semantics = if matches!(context.app_type.as_str(), "codex" | "gemini") {
+        INPUT_TOKEN_SEMANTICS_TOTAL
+    } else {
+        INPUT_TOKEN_SEMANTICS_FRESH
+    };
 
     let conn = match state.db.conn.lock() {
         Ok(conn) => conn,
@@ -288,26 +284,5 @@ fn non_empty_model(parsed: &ParsedUsage, request_model: &str) -> String {
         request_model.to_string()
     } else {
         parsed.model.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proxy_logs_mark_cache_inclusive_apps_as_total() {
-        assert_eq!(
-            input_token_semantics_for_app(&AppType::Codex),
-            INPUT_TOKEN_SEMANTICS_TOTAL
-        );
-        assert_eq!(
-            input_token_semantics_for_app(&AppType::Gemini),
-            INPUT_TOKEN_SEMANTICS_TOTAL
-        );
-        assert_eq!(
-            input_token_semantics_for_app(&AppType::Claude),
-            INPUT_TOKEN_SEMANTICS_FRESH
-        );
     }
 }

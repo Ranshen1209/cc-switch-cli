@@ -229,60 +229,38 @@ pub(super) fn render_main(
         Style::default().fg(theme.surface)
     };
 
-    // The WebDAV card was folded into the connection card: one compact line
-    // carrying the same status glyph plus the last-sync time.
-    let webdav_glyph = if has_error {
-        "!"
-    } else if is_ok {
-        webdav_ok_glyph()
-    } else {
-        webdav_neutral_glyph()
-    };
-    let webdav_spans = vec![
-        Span::styled(format!("{webdav_glyph} "), webdav_status_style),
-        Span::styled(webdav_status_text.clone(), webdav_status_style),
-        Span::styled(
-            home_separator().to_string(),
-            Style::default().fg(theme.comment),
+    let webdav_lines = vec![
+        kv_line(
+            theme,
+            texts::tui_label_webdav_status(),
+            label_width,
+            vec![Span::styled(
+                webdav_status_text.clone(),
+                webdav_status_style,
+            )],
         ),
-        Span::styled(webdav_last_sync_text.clone(), webdav_last_sync_style),
+        kv_line(
+            theme,
+            texts::tui_label_webdav_last_sync(),
+            label_width,
+            vec![Span::styled(
+                webdav_last_sync_text.clone(),
+                webdav_last_sync_style,
+            )],
+        ),
     ];
-
-    // Keep WebDAV on its own connection-card row. Quota text is provider
-    // controlled and can be wider than the terminal; appending WebDAV after it
-    // made sync errors disappear entirely when the row was clipped.
-    connection_lines.push(kv_line(
-        theme,
-        texts::tui_home_section_webdav(),
-        label_width,
-        webdav_spans,
-    ));
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
         .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", icons::strip_icon(texts::welcome_title())));
+        .title(format!(" {} ", texts::welcome_title()));
     frame.render_widget(block.clone(), area);
 
     let inner = block.inner(area);
     let content = inset_left(inner, CONTENT_INSET_LEFT);
-    // The ASCII logo hero is gone: without the proxy dashboard the chart owns
-    // the whole elastic region below the env-check card.
-    let bottom_hero_height = if current_app_routed { 10 } else { 0 };
-    // The card does not wrap. Ratatui word-wraps, so a wrap estimate built from
-    // character counts under-counts on narrow terminals and clips the last line
-    // (the WebDAV one) out of the card. Clipping each line to the card's content
-    // width instead makes the row count exact: one line, one row.
-    let card_text_width = content.width.saturating_sub(2);
-    for line in &mut connection_lines {
-        let spans = std::mem::take(&mut line.spans);
-        line.spans = truncate_spans_to_width(spans, card_text_width);
-    }
-    // usize until the final clamp: an absurdly long provider name or URL must
-    // not wrap the arithmetic into a plausible-looking height.
-    let connection_card_height =
-        u16::try_from(connection_lines.len().saturating_add(2).max(4)).unwrap_or(u16::MAX);
+    let bottom_hero_height = if current_app_routed { 10 } else { 6 };
+    let connection_card_height = (connection_lines.len() as u16 + 2).max(4);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(bottom_hero_height)])
@@ -291,16 +269,18 @@ pub(super) fn render_main(
     let top_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(connection_card_height),
+            Constraint::Length(4),
             Constraint::Length(8),
             Constraint::Min(0),
         ])
         .split(chunks[0]);
 
     let card_border = Style::default().fg(theme.dim);
-    render_connection_card(frame, top_chunks[0], theme, &connection_lines, card_border);
-    render_local_env_check_card(frame, app, top_chunks[1], theme, card_border);
-    render_home_usage_chart(frame, app, data, top_chunks[2], theme, card_border);
+    render_connection_card(frame, top_chunks[1], theme, &connection_lines, card_border);
+    render_webdav_card(frame, top_chunks[2], theme, &webdav_lines, card_border);
+    render_local_env_check_card(frame, app, top_chunks[3], theme, card_border);
 
     if current_app_routed {
         render_proxy_activity_dashboard(
@@ -318,31 +298,8 @@ pub(super) fn render_main(
             data.proxy.estimated_input_tokens_total,
             data.proxy.estimated_output_tokens_total,
         );
-    }
-}
-
-/// Section separator used by the home cards; ASCII mode drops the middle dot.
-fn home_separator() -> &'static str {
-    if icons::use_emoji() {
-        " · "
     } else {
-        " - "
-    }
-}
-
-fn webdav_ok_glyph() -> &'static str {
-    if icons::use_emoji() {
-        "✓"
-    } else {
-        "+"
-    }
-}
-
-fn webdav_neutral_glyph() -> &'static str {
-    if icons::use_emoji() {
-        "•"
-    } else {
-        "*"
+        render_plain_hero(frame, chunks[1], theme);
     }
 }
 
@@ -516,16 +473,29 @@ fn wrapped_display_line_count(text: &str, width: u16) -> u16 {
         return 1;
     }
 
-    // Clamped in `usize`: the cast is the last step, never the first.
-    UnicodeWidthStr::width(text)
-        .max(1)
-        .div_ceil(width as usize)
-        .min(u16::MAX as usize) as u16
+    UnicodeWidthStr::width(text).max(1).div_ceil(width as usize) as u16
 }
 
-/// The connection card draws exactly the lines it is given, one row each — the
-/// caller has already clipped them to the card's content width, and the card's
-/// height was derived from that same count.
+fn render_plain_hero(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    let title = Line::from(Span::styled(
+        "CC-Switch".to_string(),
+        Style::default().fg(theme.surface),
+    ));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    frame.render_widget(
+        Paragraph::new(title).alignment(Alignment::Center),
+        chunks[1],
+    );
+}
+
 fn render_connection_card(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -534,13 +504,36 @@ fn render_connection_card(
     card_border: Style,
 ) {
     frame.render_widget(
-        Paragraph::new(connection_lines.to_vec()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Plain)
-                .border_style(card_border)
-                .title(format!(" {} ", texts::tui_home_section_connection())),
-        ),
+        Paragraph::new(connection_lines.to_vec())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .border_style(card_border)
+                    .title(format!(" {} ", texts::tui_home_section_connection())),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_webdav_card(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    _theme: &super::theme::Theme,
+    webdav_lines: &[Line<'_>],
+    card_border: Style,
+) {
+    frame.render_widget(
+        Paragraph::new(webdav_lines.to_vec())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .border_style(card_border)
+                    .title(format!(" {} ", texts::tui_home_section_webdav())),
+            )
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -606,33 +599,28 @@ fn render_local_env_tool_cell(
 ) {
     use crate::services::local_env_check::ToolCheckStatus;
 
-    let pending = app.is_local_env_pending(tool);
-    let status = app
-        .local_env_results
-        .iter()
-        .find(|result| result.tool == tool)
-        .map(|result| &result.status);
+    let status = if app.local_env_loading {
+        None
+    } else {
+        app.local_env_results
+            .iter()
+            .find(|r| r.tool == tool)
+            .map(|r| &r.status)
+    };
 
-    let (icon, icon_style) = if pending {
-        (
-            spinner_frame(app.tick),
-            if theme.no_color {
-                Style::default()
-            } else {
-                Style::default().fg(theme.cyan)
-            },
-        )
+    let (icon, icon_style) = if app.local_env_loading {
+        ("…", Style::default().fg(theme.surface))
     } else {
         match status {
             Some(ToolCheckStatus::Ok { .. }) => (
-                "✓",
+                "OK",
                 if theme.no_color {
                     Style::default()
                 } else {
                     Style::default().fg(theme.ok)
                 },
             ),
-            Some(ToolCheckStatus::NotInstalledOrNotExecutable) => (
+            Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
                 "!",
                 if theme.no_color {
                     Style::default()
@@ -640,9 +628,14 @@ fn render_local_env_tool_cell(
                     Style::default().fg(theme.warn)
                 },
             ),
-            Some(ToolCheckStatus::VersionUnavailable { .. }) | None => {
-                ("•", Style::default().fg(theme.surface))
-            }
+            Some(ToolCheckStatus::Error { .. }) => (
+                "!",
+                if theme.no_color {
+                    Style::default()
+                } else {
+                    Style::default().fg(theme.warn)
+                },
+            ),
         }
     };
 
@@ -661,23 +654,16 @@ fn render_local_env_tool_cell(
     };
 
     let value_style = Style::default().fg(theme.cyan);
-    let (detail_text, detail_line_style) = if pending {
-        (texts::tui_local_env_checking().to_string(), detail_style)
+    let (detail_text, detail_line_style) = if app.local_env_loading {
+        ("".to_string(), detail_style)
     } else {
         match status {
             Some(ToolCheckStatus::Ok { version }) => (version.clone(), value_style),
-            Some(ToolCheckStatus::NotInstalledOrNotExecutable) => (
+            Some(ToolCheckStatus::NotInstalledOrNotExecutable) | None => (
                 texts::tui_local_env_not_installed().to_string(),
                 detail_style,
             ),
-            Some(ToolCheckStatus::VersionUnavailable { .. }) => (
-                texts::tui_local_env_version_unavailable().to_string(),
-                detail_style,
-            ),
-            None => (
-                texts::tui_local_env_check_unavailable().to_string(),
-                detail_style,
-            ),
+            Some(ToolCheckStatus::Error { message }) => (message.clone(), detail_style),
         }
     };
 

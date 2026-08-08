@@ -184,6 +184,7 @@ fn list_separator() -> &'static str {
 pub fn app_display_name(app: &AppType) -> &'static str {
     match app {
         AppType::Claude => "Claude",
+        AppType::ClaudeDesktop => "Claude Desktop",
         AppType::Codex => "Codex",
         AppType::Gemini => "Gemini",
         AppType::OpenCode => "OpenCode",
@@ -314,6 +315,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = VisibleApps {
             claude: false,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
@@ -356,6 +358,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = VisibleApps {
             claude: true,
+            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: false,
@@ -423,6 +426,7 @@ mod tests {
         let mut settings = crate::settings::get_settings();
         settings.visible_apps = VisibleApps {
             claude: false,
+            claude_desktop: false,
             codex: false,
             gemini: true,
             opencode: true,

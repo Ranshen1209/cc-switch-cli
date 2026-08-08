@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-REPO="SaladDay/cc-switch-cli"
+REPO="Ranshen1209/cc-switch-cli"
 BIN_NAME="cc-switch"
 INSTALL_DIR="${CC_SWITCH_INSTALL_DIR:-$HOME/.local/bin}"
 TARGET="${INSTALL_DIR}/${BIN_NAME}"
@@ -13,6 +13,7 @@ VERSION="${1:-latest}"
 
 TMP_DIR=""
 ASSET_NAME=""
+ASSET_CANDIDATES=()
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -111,7 +112,7 @@ linux_libc_mode() {
   esac
 }
 
-set_linux_asset() {
+set_linux_asset_candidates() {
   local arch="$1"
   local mode
   mode="$(linux_libc_mode)"
@@ -119,21 +120,33 @@ set_linux_asset() {
   case "${arch}" in
     x86_64|amd64)
       case "${mode}" in
-        auto|musl)
-          ASSET_NAME="cc-switch-cli-linux-x64-musl.tar.gz"
+        auto)
+          ASSET_CANDIDATES=(
+            "cc-switch-cli-linux-x64-musl.tar.gz"
+            "cc-switch-cli-linux-x64.tar.gz"
+          )
+          ;;
+        musl)
+          ASSET_CANDIDATES=("cc-switch-cli-linux-x64-musl.tar.gz")
           ;;
         glibc)
-          ASSET_NAME="cc-switch-cli-linux-x64.tar.gz"
+          ASSET_CANDIDATES=("cc-switch-cli-linux-x64.tar.gz")
           ;;
       esac
       ;;
     aarch64|arm64)
       case "${mode}" in
-        auto|musl)
-          ASSET_NAME="cc-switch-cli-linux-arm64-musl.tar.gz"
+        auto)
+          ASSET_CANDIDATES=(
+            "cc-switch-cli-linux-arm64-musl.tar.gz"
+            "cc-switch-cli-linux-arm64.tar.gz"
+          )
+          ;;
+        musl)
+          ASSET_CANDIDATES=("cc-switch-cli-linux-arm64-musl.tar.gz")
           ;;
         glibc)
-          ASSET_NAME="cc-switch-cli-linux-arm64.tar.gz"
+          ASSET_CANDIDATES=("cc-switch-cli-linux-arm64.tar.gz")
           ;;
       esac
       ;;
@@ -146,7 +159,7 @@ set_linux_asset() {
 
   case "${mode}" in
     auto)
-      info "Linux auto mode uses the static musl build and does not fall back to glibc."
+      info "Linux defaults to the static musl build and falls back to glibc if needed."
       ;;
     musl)
       info "Using Linux musl build because CC_SWITCH_LINUX_LIBC=${LINUX_LIBC}."
@@ -163,15 +176,15 @@ detect_asset() {
   local os arch
   os="$(uname -s 2>/dev/null || true)"
   arch="$(uname -m 2>/dev/null || true)"
-  ASSET_NAME=""
+  ASSET_CANDIDATES=()
 
   case "${os}" in
     Darwin)
       # Universal binary works on both Apple Silicon and Intel
-      ASSET_NAME="cc-switch-cli-darwin-universal.tar.gz"
+      ASSET_CANDIDATES=("cc-switch-cli-darwin-universal.tar.gz")
       ;;
     Linux)
-      set_linux_asset "${arch}"
+      set_linux_asset_candidates "${arch}"
       ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
       err "This script does not support Windows."
@@ -185,6 +198,7 @@ detect_asset() {
       ;;
   esac
 
+  ASSET_NAME="${ASSET_CANDIDATES[0]}"
 }
 
 # ── download & extract ───────────────────────────────────────────────
@@ -204,25 +218,28 @@ download_asset() {
 }
 
 download() {
-  local url dest
+  local asset_name url dest
 
-  if [[ "${VERSION}" == "latest" ]]; then
-    url="${RELEASES_URL}/latest/download/${ASSET_NAME}"
-  else
-    url="${RELEASES_URL}/download/${VERSION}/${ASSET_NAME}"
-  fi
-  dest="${TMP_DIR}/${ASSET_NAME}"
+  for asset_name in "${ASSET_CANDIDATES[@]}"; do
+    if [[ "${VERSION}" == "latest" ]]; then
+      url="${RELEASES_URL}/latest/download/${asset_name}"
+    else
+      url="${RELEASES_URL}/download/${VERSION}/${asset_name}"
+    fi
+    dest="${TMP_DIR}/${asset_name}"
 
-  info "Downloading ${ASSET_NAME}"
+    info "Downloading ${asset_name}"
 
-  if download_asset "${url}" "${dest}"; then
-    return 0
-  fi
+    if download_asset "${url}" "${dest}"; then
+      ASSET_NAME="${asset_name}"
+      return 0
+    fi
 
-  rm -f "${dest}"
-  warn "Download failed: ${url}"
-  err "Unable to download the selected release asset."
-  err "No binary was installed or replaced."
+    rm -f "${dest}"
+    warn "Download failed: ${url}"
+  done
+
+  err "Unable to download a compatible release asset."
   err "See available assets: ${RELEASES_URL}"
   exit 1
 }
