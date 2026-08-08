@@ -152,6 +152,11 @@ impl ProviderAddFormState {
             claude_haiku_model: TextInput::new(""),
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
+            claude_fable_model: TextInput::new(""),
+            claude_desktop_haiku_1m: true,
+            claude_desktop_sonnet_1m: true,
+            claude_desktop_opus_1m: true,
+            claude_desktop_fable_1m: true,
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
             claude_teammates: false,
@@ -374,6 +379,8 @@ impl ProviderAddFormState {
                     fields.push(ProviderAddField::ClaudeBaseUrl);
                     fields.push(ProviderAddField::ClaudeApiKey);
                 }
+                fields.push(ProviderAddField::ClaudeAdvancedDivider);
+                fields.push(ProviderAddField::ClaudeDesktopModelConfig);
             }
             AppType::Claude => {
                 if self.is_claude_codex_oauth_provider() {
@@ -566,6 +573,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
             | ProviderAddField::ClaudeDisableAutoUpgrade
+            | ProviderAddField::ClaudeDesktopModelConfig
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
@@ -628,6 +636,7 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeTeammates
             | ProviderAddField::ClaudeToolSearch
             | ProviderAddField::ClaudeDisableAutoUpgrade
+            | ProviderAddField::ClaudeDesktopModelConfig
             | ProviderAddField::GeminiAuthType
             | ProviderAddField::OpenClawApiProtocol
             | ProviderAddField::OpenClawUserAgent
@@ -1472,6 +1481,63 @@ impl ProviderAddFormState {
             3 => Some(&mut self.claude_opus_model),
             _ => None,
         }
+    }
+
+    // Desktop Direct mode uses Haiku/Sonnet/Opus/Fable (no reasoning slot).
+    pub fn claude_desktop_model_input(&self, index: usize) -> Option<&TextInput> {
+        match index {
+            0 => Some(&self.claude_haiku_model),
+            1 => Some(&self.claude_sonnet_model),
+            2 => Some(&self.claude_opus_model),
+            3 => Some(&self.claude_fable_model),
+            _ => None,
+        }
+    }
+
+    pub fn claude_desktop_model_input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
+        match index {
+            0 => Some(&mut self.claude_haiku_model),
+            1 => Some(&mut self.claude_sonnet_model),
+            2 => Some(&mut self.claude_opus_model),
+            3 => Some(&mut self.claude_fable_model),
+            _ => None,
+        }
+    }
+
+    pub fn claude_desktop_model_configured_count(&self) -> usize {
+        [
+            &self.claude_haiku_model,
+            &self.claude_sonnet_model,
+            &self.claude_opus_model,
+            &self.claude_fable_model,
+        ]
+        .into_iter()
+        .filter(|input| !input.is_blank())
+        .count()
+    }
+
+    /// 返回 ClaudeDesktop 第 `index` 路由的 `supports_1m` 标志（0=Haiku, 1=Sonnet, 2=Opus, 3=Fable）。
+    pub fn claude_desktop_model_1m(&self, index: usize) -> bool {
+        match index {
+            0 => self.claude_desktop_haiku_1m,
+            1 => self.claude_desktop_sonnet_1m,
+            2 => self.claude_desktop_opus_1m,
+            3 => self.claude_desktop_fable_1m,
+            _ => false,
+        }
+    }
+
+    /// 切换 ClaudeDesktop 第 `index` 路由的 `supports_1m` 标志，并标记 model config 已修改。
+    pub fn toggle_claude_desktop_model_1m(&mut self, index: usize) {
+        let flag = match index {
+            0 => &mut self.claude_desktop_haiku_1m,
+            1 => &mut self.claude_desktop_sonnet_1m,
+            2 => &mut self.claude_desktop_opus_1m,
+            3 => &mut self.claude_desktop_fable_1m,
+            _ => return,
+        };
+        *flag = !*flag;
+        self.claude_model_config_touched = true;
     }
 
     pub fn claude_model_configured_count(&self) -> usize {

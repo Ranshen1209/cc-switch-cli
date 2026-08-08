@@ -3119,6 +3119,42 @@ pub mod texts {
         }
     }
 
+    pub fn tui_claude_default_fable_model_label() -> &'static str {
+        if is_chinese() {
+            "默认 Fable 模型"
+        } else {
+            "Default Fable Model"
+        }
+    }
+
+    pub fn tui_label_claude_desktop_model_config() -> &'static str {
+        if is_chinese() {
+            "模型映射"
+        } else {
+            "Model Mapping"
+        }
+    }
+
+    pub fn tui_claude_desktop_model_config_open_hint() -> &'static str {
+        if is_chinese() {
+            "按 Enter 配置模型映射"
+        } else {
+            "Press Enter to configure model mapping"
+        }
+    }
+
+    pub fn tui_header_1m_context() -> &'static str {
+        "1M"
+    }
+
+    pub fn tui_key_toggle_1m() -> &'static str {
+        if is_chinese() {
+            "切换1M上下文"
+        } else {
+            "toggle 1M ctx"
+        }
+    }
+
     pub fn tui_claude_model_config_summary(configured_count: usize) -> String {
         if is_chinese() {
             format!("已配置 {configured_count}/4")

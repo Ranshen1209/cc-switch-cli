@@ -89,7 +89,21 @@ fn current_help_target(app: &App) -> HelpTarget {
                 provider_field_overlay_target(app, ProviderAddField::ClaudeApiFormat)
             }
             Overlay::ClaudeModelPicker { .. } => {
-                provider_field_overlay_target(app, ProviderAddField::ClaudeModelConfig)
+                let field = app
+                    .form
+                    .as_ref()
+                    .and_then(|f| match f {
+                        FormState::ProviderAdd(p) => {
+                            if matches!(p.app_type, crate::app_config::AppType::ClaudeDesktop) {
+                                Some(ProviderAddField::ClaudeDesktopModelConfig)
+                            } else {
+                                Some(ProviderAddField::ClaudeModelConfig)
+                            }
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(ProviderAddField::ClaudeModelConfig);
+                provider_field_overlay_target(app, field)
             }
             Overlay::HermesModelsPicker { .. } => {
                 provider_field_overlay_target(app, ProviderAddField::HermesModels)
@@ -369,6 +383,13 @@ fn provider_field_help(app_type: AppType, field: ProviderAddField) -> HelpConten
             help_lines(
                 "配置 Claude 的模型分层。不同角色模型会写入对应的运行配置，供客户端按场景选择。",
                 "Configures Claude model tiers. Role-specific models are written into the live config for the client to select by task.",
+            ),
+        ),
+        ProviderAddField::ClaudeDesktopModelConfig => HelpContent::new(
+            texts::tui_label_claude_desktop_model_config(),
+            help_lines(
+                "配置 Claude Desktop Direct 模式的模型映射。Haiku/Sonnet/Opus/Fable 各角色模型分别对应环境变量，供 Claude Desktop 按任务选择。",
+                "Configures model mappings for Claude Desktop Direct mode. Haiku, Sonnet, Opus, and Fable role models are mapped to environment variables for Claude Desktop to select by task.",
             ),
         ),
         ProviderAddField::ClaudeApiFormat if matches!(app_type, AppType::Codex) => {

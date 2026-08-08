@@ -1368,6 +1368,9 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::ClaudeModelConfig => texts::tui_label_claude_model_config().to_string(),
+        ProviderAddField::ClaudeDesktopModelConfig => {
+            texts::tui_label_claude_desktop_model_config().to_string()
+        }
         ProviderAddField::ClaudeFallbackModel => {
             texts::tui_label_claude_fallback_model().to_string()
         }
@@ -1451,6 +1454,11 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeModelConfig => {
             texts::tui_claude_model_config_summary(provider.claude_model_configured_count())
+        }
+        ProviderAddField::ClaudeDesktopModelConfig => {
+            texts::tui_claude_model_config_summary(
+                provider.claude_desktop_model_configured_count(),
+            )
         }
         ProviderAddField::ClaudeQuickConfig => {
             texts::tui_claude_quick_config_summary(provider.claude_quick_config_enabled_count())
@@ -1603,6 +1611,9 @@ pub(crate) fn provider_field_editor_line(
             ),
             ProviderAddField::ClaudeModelConfig => {
                 texts::tui_claude_model_config_open_hint().to_string()
+            }
+            ProviderAddField::ClaudeDesktopModelConfig => {
+                texts::tui_claude_desktop_model_config_open_hint().to_string()
             }
             ProviderAddField::ClaudeQuickConfig => texts::tui_form_open_page_hint().to_string(),
             ProviderAddField::CodexQuickConfig => texts::tui_form_open_page_hint().to_string(),

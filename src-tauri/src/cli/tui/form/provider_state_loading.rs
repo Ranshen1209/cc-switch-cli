@@ -170,6 +170,40 @@ fn populate_claude_form(form: &mut ProviderAddFormState, provider: &Provider) {
         {
             form.claude_opus_model.set(opus);
         }
+        if let Some(fable) = env
+            .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(|value| value.as_str())
+        {
+            form.claude_fable_model.set(fable);
+        }
+    }
+    // 加载 ClaudeDesktop 路由的 supports_1m 标志
+    if matches!(form.app_type, crate::app_config::AppType::ClaudeDesktop) {
+        if let Some(routes) = provider
+            .meta
+            .as_ref()
+            .map(|m| &m.claude_desktop_model_routes)
+        {
+            const ROLE_KEYS: [(&str, usize); 4] = [
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 0),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", 1),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", 2),
+                ("ANTHROPIC_DEFAULT_FABLE_MODEL", 3),
+            ];
+            for (key, idx) in &ROLE_KEYS {
+                if let Some(route) = routes.get(*key) {
+                    // 未设置时默认 true（与 DEFAULT_PROXY_ROUTES 一致）
+                    let flag = route.supports_1m.unwrap_or(true);
+                    match idx {
+                        0 => form.claude_desktop_haiku_1m = flag,
+                        1 => form.claude_desktop_sonnet_1m = flag,
+                        2 => form.claude_desktop_opus_1m = flag,
+                        3 => form.claude_desktop_fable_1m = flag,
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 }
 

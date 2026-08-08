@@ -95,6 +95,13 @@ impl ProviderAddFormState {
                         "ANTHROPIC_DEFAULT_OPUS_MODEL",
                         &self.claude_opus_model.value,
                     );
+                    if matches!(self.app_type, AppType::ClaudeDesktop) {
+                        set_or_remove_trimmed(
+                            env_obj,
+                            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                            &self.claude_fable_model.value,
+                        );
+                    }
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 if self.claude_teammates_touched {
@@ -610,6 +617,39 @@ impl ProviderAddFormState {
             meta_obj.insert("claudeDesktopMode".to_string(), json!("direct"));
             meta_obj.remove("apiFormat");
             meta_obj.remove("apiKeyField");
+            if self.claude_model_config_touched {
+                // 构建 claudeDesktopModelRoutes（带 supports1m 标志）
+                const DESKTOP_ROLES: [(&str, usize); 4] = [
+                    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 0),
+                    ("ANTHROPIC_DEFAULT_SONNET_MODEL", 1),
+                    ("ANTHROPIC_DEFAULT_OPUS_MODEL", 2),
+                    ("ANTHROPIC_DEFAULT_FABLE_MODEL", 3),
+                ];
+                let mut routes = serde_json::Map::new();
+                for (env_key, idx) in &DESKTOP_ROLES {
+                    if let Some(input) = self.claude_desktop_model_input(*idx) {
+                        if !input.is_blank() {
+                            let mut route = serde_json::Map::new();
+                            route.insert(
+                                "model".to_string(),
+                                json!(input.value.trim()),
+                            );
+                            if self.claude_desktop_model_1m(*idx) {
+                                route.insert("supports1m".to_string(), json!(true));
+                            }
+                            routes.insert(env_key.to_string(), Value::Object(route));
+                        }
+                    }
+                }
+                if routes.is_empty() {
+                    meta_obj.remove("claudeDesktopModelRoutes");
+                } else {
+                    meta_obj.insert(
+                        "claudeDesktopModelRoutes".to_string(),
+                        Value::Object(routes),
+                    );
+                }
+            }
         }
         if should_write_common_config_meta {
             meta_obj.insert(

@@ -506,7 +506,7 @@ impl App {
             self.overlay = Overlay::None;
             return Some(Action::None);
         };
-        if !matches!(provider.app_type, AppType::Claude) {
+        if !matches!(provider.app_type, AppType::Claude | AppType::ClaudeDesktop) {
             self.overlay = Overlay::None;
             return Some(Action::None);
         }
@@ -548,7 +548,12 @@ impl App {
                 Action::None
             }
             _ => {
-                if let Some(input) = provider.claude_model_input_mut(selected) {
+                let model_input = if matches!(provider.app_type, AppType::ClaudeDesktop) {
+                    provider.claude_desktop_model_input_mut(selected)
+                } else {
+                    provider.claude_model_input_mut(selected)
+                };
+                if let Some(input) = model_input {
                     if input.apply_key(key).is_some_and(|edit| edit.changed) {
                         provider.mark_claude_model_config_touched();
                     }
@@ -590,13 +595,18 @@ impl App {
                         .is_claude_codex_oauth_provider()
                         .then(|| provider.codex_oauth_account_id.clone())
                         .flatten();
+                    let field = if matches!(provider.app_type, AppType::ClaudeDesktop) {
+                        ProviderAddField::ClaudeDesktopModelConfig
+                    } else {
+                        ProviderAddField::ClaudeModelConfig
+                    };
                     Action::ProviderModelFetch {
                         base_url: provider.claude_base_url.value.clone(),
                         api_key: (!provider.claude_api_key.value.trim().is_empty())
                             .then(|| provider.claude_api_key.value.clone()),
                         codex_oauth,
                         codex_oauth_account_id,
-                        field: ProviderAddField::ClaudeModelConfig,
+                        field,
                         claude_idx: Some(*selected),
                     }
                 } else {
@@ -609,13 +619,27 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                let selected = *selected;
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    if matches!(provider.app_type, AppType::ClaudeDesktop) {
+                        provider.toggle_claude_desktop_model_1m(selected);
+                    }
+                }
+                Action::None
+            }
             KeyCode::Char('a') => {
-                let source_idx = *selected;
-                let source_empty = self
+                let source_idx = *selected;                let source_empty = self
                     .form
                     .as_ref()
                     .and_then(|f| match f {
-                        FormState::ProviderAdd(p) => p.claude_model_input(source_idx),
+                        FormState::ProviderAdd(p) => {
+                            if matches!(p.app_type, AppType::ClaudeDesktop) {
+                                p.claude_desktop_model_input(source_idx)
+                            } else {
+                                p.claude_model_input(source_idx)
+                            }
+                        }
                         _ => None,
                     })
                     .map(|input| input.value.trim().is_empty())
@@ -665,7 +689,10 @@ impl App {
                 .collect()
         };
 
-        let is_claude_model = *field == ProviderAddField::ClaudeModelConfig;
+        let is_claude_model = matches!(
+            *field,
+            ProviderAddField::ClaudeModelConfig | ProviderAddField::ClaudeDesktopModelConfig
+        );
         let restore_idx = claude_idx.unwrap_or(0);
 
         Some(match key.code {
@@ -718,7 +745,10 @@ impl App {
                 let field = *field;
                 let claude_idx = *claude_idx;
 
-                if field == ProviderAddField::ClaudeModelConfig {
+                if matches!(
+                    field,
+                    ProviderAddField::ClaudeModelConfig | ProviderAddField::ClaudeDesktopModelConfig
+                ) {
                     self.overlay = Overlay::ClaudeModelPicker {
                         selected: claude_idx.unwrap_or(0),
                         editing: false,
@@ -728,7 +758,16 @@ impl App {
                 }
 
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    if field == ProviderAddField::ClaudeModelConfig {
+                    if field == ProviderAddField::ClaudeDesktopModelConfig {
+                        if let Some(idx) = claude_idx {
+                            if let Some(input_field) =
+                                provider.claude_desktop_model_input_mut(idx)
+                            {
+                                input_field.set(selected_model);
+                                provider.mark_claude_model_config_touched();
+                            }
+                        }
+                    } else if field == ProviderAddField::ClaudeModelConfig {
                         if let Some(idx) = claude_idx {
                             if let Some(input_field) = provider.claude_model_input_mut(idx) {
                                 input_field.set(selected_model);

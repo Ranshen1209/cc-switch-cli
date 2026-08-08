@@ -24,10 +24,31 @@ pub(super) fn render_claude_model_picker_overlay(
         height: desired_h,
     };
 
+    // 需要提前获取 is_desktop，以便根据 app 类型定制 key_items
+    let is_desktop = app
+        .form
+        .as_ref()
+        .and_then(|f| match f {
+            FormState::ProviderAdd(p) => {
+                Some(matches!(p.app_type, crate::app_config::AppType::ClaudeDesktop))
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+
     let key_items: Vec<(&str, &str)> = if editing {
         vec![
             ("←→/Home/End", texts::tui_key_move()),
             ("Esc/Enter", texts::tui_key_exit_edit()),
+        ]
+    } else if is_desktop {
+        vec![
+            ("↑↓", texts::tui_key_select()),
+            ("Space", texts::tui_key_edit()),
+            ("m", texts::tui_key_toggle_1m()),
+            ("a", texts::tui_key_fill_all()),
+            ("Enter", texts::tui_key_fetch_model()),
+            ("Esc", texts::tui_key_close()),
         ]
     } else {
         vec![
@@ -57,12 +78,23 @@ pub(super) fn render_claude_model_picker_overlay(
     let hint_area = chunks[1];
 
     if let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() {
-        let labels = [
-            texts::tui_claude_reasoning_model_label(),
-            texts::tui_claude_default_haiku_model_label(),
-            texts::tui_claude_default_sonnet_model_label(),
-            texts::tui_claude_default_opus_model_label(),
-        ];
+        // is_desktop was already computed above for key_items; use provider for accuracy
+        let is_desktop = matches!(provider.app_type, crate::app_config::AppType::ClaudeDesktop);
+        let labels: [&str; 4] = if is_desktop {
+            [
+                texts::tui_claude_default_haiku_model_label(),
+                texts::tui_claude_default_sonnet_model_label(),
+                texts::tui_claude_default_opus_model_label(),
+                texts::tui_claude_default_fable_model_label(),
+            ]
+        } else {
+            [
+                texts::tui_claude_reasoning_model_label(),
+                texts::tui_claude_default_haiku_model_label(),
+                texts::tui_claude_default_sonnet_model_label(),
+                texts::tui_claude_default_opus_model_label(),
+            ]
+        };
 
         let label_col_width = field_label_column_width(
             labels
@@ -72,25 +104,62 @@ pub(super) fn render_claude_model_picker_overlay(
             1,
         );
 
-        let header = Row::new(vec![
-            Cell::from(cell_pad(texts::tui_header_field())),
-            Cell::from(texts::tui_header_value()),
-        ])
-        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+        let header = if is_desktop {
+            Row::new(vec![
+                Cell::from(cell_pad(texts::tui_header_field())),
+                Cell::from(texts::tui_header_value()),
+                Cell::from(texts::tui_header_1m_context()),
+            ])
+            .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD))
+        } else {
+            Row::new(vec![
+                Cell::from(cell_pad(texts::tui_header_field())),
+                Cell::from(texts::tui_header_value()),
+            ])
+            .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD))
+        };
 
         let rows = labels.iter().enumerate().map(|(idx, label)| {
-            let value = provider
-                .claude_model_input(idx)
-                .map(|input| input.value.trim().to_string())
-                .filter(|value| !value.is_empty())
+            let input = if is_desktop {
+                provider.claude_desktop_model_input(idx)
+            } else {
+                provider.claude_model_input(idx)
+            };
+            let value = input
+                .map(|i| i.value.trim().to_string())
+                .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| texts::tui_na().to_string());
-            Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value)])
+            if is_desktop {
+                let one_m = if provider.claude_desktop_model_1m(idx) {
+                    format!("[{}]", texts::tui_marker_active())
+                } else {
+                    "[ ]".to_string()
+                };
+                Row::new(vec![
+                    Cell::from(cell_pad(label)),
+                    Cell::from(value),
+                    Cell::from(one_m),
+                ])
+            } else {
+                Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value)])
+            }
         });
 
-        let table = Table::new(
-            rows,
-            [Constraint::Length(label_col_width), Constraint::Min(10)],
-        )
+        let table = if is_desktop {
+            Table::new(
+                rows,
+                [
+                    Constraint::Length(label_col_width),
+                    Constraint::Min(10),
+                    Constraint::Length(4),
+                ],
+            )
+        } else {
+            Table::new(
+                rows,
+                [Constraint::Length(label_col_width), Constraint::Min(10)],
+            )
+        }
         .header(header)
         .block(
             Block::default()
@@ -123,7 +192,12 @@ pub(super) fn render_claude_model_picker_overlay(
         let hint_inner = hint_block.inner(hint_area);
 
         if editing {
-            if let Some(input) = provider.claude_model_input(selected) {
+            let model_input = if is_desktop {
+                provider.claude_desktop_model_input(selected)
+            } else {
+                provider.claude_model_input(selected)
+            };
+            if let Some(input) = model_input {
                 let (visible, cursor_x) =
                     visible_text_window(&input.value, input.cursor, hint_inner.width as usize);
                 frame.render_widget(

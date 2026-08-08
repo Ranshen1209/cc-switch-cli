@@ -1,13 +1,13 @@
+use crate::claude_desktop_config::ONE_M_CONTEXT_MARKER;
 use crate::provider::Provider;
 use serde_json::Value;
-
-const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
 pub struct ModelMapping {
     pub haiku_model: Option<String>,
     pub sonnet_model: Option<String>,
     pub opus_model: Option<String>,
     pub fable_model: Option<String>,
+    pub subagent_model: Option<String>,
     pub default_model: Option<String>,
 }
 
@@ -36,6 +36,11 @@ impl ModelMapping {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(String::from),
+            subagent_model: env
+                .and_then(|value| value.get("CLAUDE_CODE_SUBAGENT_MODEL"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(String::from),
             default_model: env
                 .and_then(|value| value.get("ANTHROPIC_MODEL"))
                 .and_then(Value::as_str)
@@ -49,6 +54,7 @@ impl ModelMapping {
             || self.sonnet_model.is_some()
             || self.opus_model.is_some()
             || self.fable_model.is_some()
+            || self.subagent_model.is_some()
             || self.default_model.is_some()
     }
 
@@ -77,6 +83,15 @@ impl ModelMapping {
         if model_lower.contains("sonnet") {
             if let Some(model) = &self.sonnet_model {
                 return model.clone();
+            }
+        }
+
+        // subagent 模型保护：若请求的模型（忽略 [1M] 后缀）与 CLAUDE_CODE_SUBAGENT_MODEL
+        // 一致，说明这是子 agent 使用自己的专属模型，不应被 default_model 覆盖，直接保持原样。
+        if let Some(ref m) = self.subagent_model {
+            if strip_one_m_suffix_for_upstream(original_model) == strip_one_m_suffix_for_upstream(m)
+            {
+                return original_model.to_string();
             }
         }
 
@@ -163,6 +178,23 @@ mod tests {
         }
     }
 
+    fn provider_without_mapping() -> Provider {
+        Provider {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            settings_config: json!({}),
+            website_url: None,
+            category: None,
+            created_at: None,
+            sort_index: None,
+            notes: None,
+            meta: None,
+            icon: None,
+            icon_color: None,
+            in_failover_queue: false,
+        }
+    }
+
     #[test]
     fn thinking_does_not_use_legacy_reasoning_model_mapping() {
         let mut provider = provider_with_mapping("sonnet-mapped");
@@ -237,5 +269,46 @@ mod tests {
         let body = json!({"model": "deepseek-v4-pro"});
         let result = strip_one_m_suffix_for_upstream_from_body(body);
         assert_eq!(result["model"], "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn no_mapping_configured_passes_model_through() {
+        let provider = provider_without_mapping();
+        let body = json!({"model": "claude-sonnet-4-5"});
+        let (result, original, mapped) = apply_model_mapping(body, &provider);
+        assert_eq!(result["model"], "claude-sonnet-4-5");
+        assert_eq!(original, Some("claude-sonnet-4-5".to_string()));
+        assert!(mapped.is_none());
+    }
+
+    #[test]
+    fn subagent_model_preserved_before_default_fallback() {
+        // CLAUDE_CODE_SUBAGENT_MODEL 配置的模型不应被 ANTHROPIC_MODEL 覆盖；
+        // 子 agent 使用自己的专属模型发请求时，proxy 应保持原样转发。
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-model");
+        provider.settings_config["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = json!("gpt-5.4-mini");
+
+        let body = json!({"model": "gpt-5.4-mini"});
+        let (result, original, mapped) = apply_model_mapping(body, &provider);
+
+        assert_eq!(result["model"], "gpt-5.4-mini");
+        assert_eq!(original, Some("gpt-5.4-mini".to_string()));
+        assert!(mapped.is_none());
+    }
+
+    #[test]
+    fn subagent_model_preserved_with_one_m_suffix() {
+        // 子 agent 附带 [1M] 后缀发请求时同样应保持原样，[1M] 不影响 subagent 模型识别。
+        let mut provider = provider_with_mapping("sonnet-mapped");
+        provider.settings_config["env"]["ANTHROPIC_MODEL"] = json!("default-model");
+        provider.settings_config["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = json!("gpt-5.4-mini");
+
+        let body = json!({"model": "gpt-5.4-mini[1M]"});
+        let (result, original, mapped) = apply_model_mapping(body, &provider);
+
+        assert_eq!(result["model"], "gpt-5.4-mini[1M]");
+        assert_eq!(original, Some("gpt-5.4-mini[1M]".to_string()));
+        assert!(mapped.is_none());
     }
 }

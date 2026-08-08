@@ -142,6 +142,7 @@ impl ProviderAddFormState {
                 self.claude_haiku_model = defaults.claude_haiku_model;
                 self.claude_sonnet_model = defaults.claude_sonnet_model;
                 self.claude_opus_model = defaults.claude_opus_model;
+                self.claude_fable_model = defaults.claude_fable_model;
                 self.claude_hide_attribution = defaults.claude_hide_attribution;
                 self.claude_teammates = defaults.claude_teammates;
                 self.claude_tool_search = defaults.claude_tool_search;

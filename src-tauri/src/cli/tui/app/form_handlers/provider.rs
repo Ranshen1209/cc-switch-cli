@@ -312,6 +312,13 @@ impl App {
                 };
                 Action::None
             }
+            ProviderAddField::ClaudeDesktopModelConfig => {
+                self.overlay = Overlay::ClaudeModelPicker {
+                    selected: 0,
+                    editing: false,
+                };
+                Action::None
+            }
             ProviderAddField::ClaudeQuickConfig => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
