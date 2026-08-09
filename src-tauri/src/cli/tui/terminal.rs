@@ -162,10 +162,17 @@ impl TuiTerminal {
     {
         match &mut self.terminal {
             TerminalHandle::Stdout(terminal) => {
+                // Ratatui flushes the frame before applying its cursor visibility.
+                // Hide first so a cursor left visible by an input frame cannot flash
+                // over the next non-input frame while that frame is being redrawn.
+                terminal.hide_cursor().map_err(terminal_error)?;
                 terminal.draw(f).map(|_| ()).map_err(terminal_error)
             }
             #[cfg(test)]
-            TerminalHandle::Test(terminal) => terminal.draw(f).map(|_| ()).map_err(|e| match e {}),
+            TerminalHandle::Test(terminal) => {
+                terminal.hide_cursor().unwrap_or_else(|e| match e {});
+                terminal.draw(f).map(|_| ()).map_err(|e| match e {})
+            }
         }
     }
 

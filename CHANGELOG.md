@@ -7,6 +7,13 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.10.5] - 2026-08-09
+
+### Fixed
+
+- **TUI / Cursor Rendering**: Hide the terminal cursor before each frame flush so a cursor left visible by an input view cannot flash over the next non-input view during redraw.
+- **TUI / Provider Loading**: Render the provider loading message in a single centered row instead of padding the page with centered blank lines, removing the block-like artifact during application switching.
+
 ## [5.10.2] - 2026-07-21
 
 ### Added

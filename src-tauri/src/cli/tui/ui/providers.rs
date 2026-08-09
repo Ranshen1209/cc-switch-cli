@@ -129,22 +129,13 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
 /// from the empty state so a freshly switched-to app reads as "loading", never
 /// as "no providers / import config".
 fn render_provider_loading_state(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
-    let content_lines = vec![Line::styled(
+    let line = Line::styled(
         texts::tui_provider_loading(),
         Style::default().fg(theme.comment),
-    )];
-    let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
-    let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
-    for _ in 0..top_padding {
-        lines.push(Line::raw(""));
-    }
-    lines.extend(content_lines);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
-        area,
     );
+    let y = area.y + area.height.saturating_sub(1) / 2;
+    let centered = Rect::new(area.x, y, area.width, 1.min(area.height));
+    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), centered);
 }
 
 pub(super) fn render_providers(
@@ -246,7 +237,7 @@ mod tests {
     use crate::cli::tui::data::ProviderUsageQuota;
     use crate::provider::{Provider, ProviderMeta, UsageData, UsageResult, UsageScript};
     use crate::services::{CredentialStatus, QuotaTier, SubscriptionQuota};
-    use ratatui::buffer::Buffer;
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
     use serde_json::json;
 
     fn all_text(buf: &Buffer) -> String {
@@ -385,6 +376,42 @@ mod tests {
             ..Default::default()
         });
         data
+    }
+
+    #[test]
+    fn provider_loading_state_only_renders_on_center_row() {
+        let _lock = super::super::tests::lock_env();
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let theme = theme_for(&AppType::Claude);
+        let area = Rect::new(3, 2, 30, 9);
+        let mut terminal = Terminal::new(TestBackend::new(40, 15)).expect("terminal created");
+
+        terminal
+            .draw(|frame| {
+                for y in area.y..area.bottom() {
+                    for x in area.x..area.right() {
+                        frame.buffer_mut()[(x, y)].set_symbol(".");
+                    }
+                }
+                render_provider_loading_state(frame, area, &theme);
+            })
+            .expect("loading state rendered");
+
+        let buffer = terminal.backend().buffer();
+        let center_y = area.y + area.height / 2;
+        let center_line = (area.x..area.right())
+            .map(|x| buffer[(x, center_y)].symbol())
+            .collect::<String>();
+
+        assert!(
+            center_line.contains(texts::tui_provider_loading()),
+            "{center_line}"
+        );
+        assert_eq!(buffer[(area.x + area.width / 2, area.y)].symbol(), ".");
+        assert_eq!(
+            buffer[(area.x + area.width / 2, area.bottom() - 1)].symbol(),
+            "."
+        );
     }
 
     fn codex_chat_wire_api_data() -> UiData {
