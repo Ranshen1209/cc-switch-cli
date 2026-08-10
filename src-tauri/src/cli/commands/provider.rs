@@ -1040,7 +1040,7 @@ fn apply_claude_desktop_options(
         return Ok(());
     }
 
-    let routes = match routes_json.map(str::trim).filter(|value| !value.is_empty()) {
+    let mut routes = match routes_json.map(str::trim).filter(|value| !value.is_empty()) {
         Some(raw) => {
             serde_json::from_str::<std::collections::HashMap<String, ClaudeDesktopModelRoute>>(raw)
                 .map_err(|error| {
@@ -1054,8 +1054,15 @@ fn apply_claude_desktop_options(
             .unwrap_or_default(),
     };
 
+    let mode = mode.map(Into::into).unwrap_or(ClaudeDesktopMode::Direct);
+    if matches!(mode, ClaudeDesktopMode::Direct) {
+        for route in routes.values_mut() {
+            route.supports_1m = None;
+        }
+    }
+
     let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
-    meta.claude_desktop_mode = Some(mode.map(Into::into).unwrap_or(ClaudeDesktopMode::Direct));
+    meta.claude_desktop_mode = Some(mode);
     meta.claude_desktop_model_routes = routes;
     Ok(())
 }
@@ -2019,6 +2026,51 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn direct_desktop_routes_drop_independent_one_m_metadata() {
+        let routes = r#"{
+            "claude-sonnet-5": {
+                "model": "claude-sonnet-5",
+                "labelOverride": "Fast Sonnet",
+                "supports1m": true
+            }
+        }"#;
+
+        let mut direct = claude_provider(json!({"env": {}}));
+        apply_claude_desktop_options(
+            &AppType::ClaudeDesktop,
+            &mut direct,
+            Some(ClaudeDesktopModeArg::Direct),
+            Some(routes),
+        )
+        .expect("apply Direct Desktop options");
+        let direct_route = &direct
+            .meta
+            .as_ref()
+            .expect("Direct meta")
+            .claude_desktop_model_routes["claude-sonnet-5"];
+        assert_eq!(direct_route.label_override.as_deref(), Some("Fast Sonnet"));
+        assert_eq!(direct_route.supports_1m, None);
+
+        let mut proxy = claude_provider(json!({"env": {}}));
+        apply_claude_desktop_options(
+            &AppType::ClaudeDesktop,
+            &mut proxy,
+            Some(ClaudeDesktopModeArg::Proxy),
+            Some(routes),
+        )
+        .expect("apply Proxy Desktop options");
+        assert_eq!(
+            proxy
+                .meta
+                .as_ref()
+                .expect("Proxy meta")
+                .claude_desktop_model_routes["claude-sonnet-5"]
+                .supports_1m,
+            Some(true)
+        );
     }
 
     #[test]

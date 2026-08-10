@@ -127,18 +127,7 @@ impl App {
                     ConfirmAction::ClaudeModelFillAll { source_idx } => {
                         let source_idx = *source_idx;
                         if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                            let value = provider
-                                .claude_model_input(source_idx)
-                                .map(|input| input.value.clone())
-                                .unwrap_or_default();
-                            for idx in 0..4 {
-                                if idx != source_idx {
-                                    if let Some(input) = provider.claude_model_input_mut(idx) {
-                                        input.set(value.clone());
-                                    }
-                                }
-                            }
-                            provider.mark_claude_model_config_touched();
+                            provider.fill_claude_models_from(source_idx);
                         }
                         self.overlay = Overlay::ClaudeModelPicker {
                             selected: source_idx,

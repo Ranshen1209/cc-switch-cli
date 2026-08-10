@@ -245,7 +245,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect, theme: &super
         input_inner,
     );
 
-    if app.filter.active {
+    if app.filter.active && !app.overlay.is_active() {
         let cursor_x = input_inner.x + cursor_x.min(input_inner.width.saturating_sub(1));
         let cursor_y = input_inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));

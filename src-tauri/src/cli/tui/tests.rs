@@ -345,7 +345,12 @@ fn initial_load_extra_app_failure_does_not_abort_startup() {
 #[test]
 fn lightweight_preseed_excludes_additive_apps() {
     // Pure in-memory snapshot apps are eager-seeded at startup.
-    for app in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+    for app in [
+        AppType::Claude,
+        AppType::ClaudeDesktop,
+        AppType::Codex,
+        AppType::Gemini,
+    ] {
         assert!(
             is_lightweight_preseed_app(&app),
             "{app:?} should be eagerly pre-seeded"

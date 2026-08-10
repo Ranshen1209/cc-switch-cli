@@ -7,6 +7,19 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.10.6] - 2026-08-10
+
+### Added
+
+- **Claude / Model Mapping**: Add Fable to Claude CLI model configuration, including interactive and non-interactive provider flows, and expose the shared `[1M]` capability toggle for supported Sonnet, Opus, and Fable mappings in Claude CLI and Claude Desktop.
+
+### Fixed
+
+- **Claude Desktop / Direct Providers**: Derive Direct-mode 1M capability from the model `[1M]` suffix, preserve canonical route labels, discard obsolete independent `supports1m` metadata, and tolerate the invalid environment-key route shape written by earlier 5.10.x TUI builds.
+- **Claude Desktop / Model Editing**: Keep CLI and Desktop role ordering distinct during edit and fill-all actions, preventing model values from being assigned to the wrong role.
+- **TUI / Cursor Rendering**: Suppress terminal cursor show commands underneath loading and non-editing surfaces, and stop empty shortcut bars from rendering a cursor-like two-cell block.
+- **TUI / Provider Loading**: Preload Claude Desktop from the startup snapshot so the first application switch no longer waits on a full cold provider-data reload.
+
 ## [5.10.5] - 2026-08-09
 
 ### Fixed

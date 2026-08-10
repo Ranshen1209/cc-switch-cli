@@ -189,6 +189,34 @@ mod tests {
         .is_editing());
     }
 
+    #[test]
+    fn terminal_cursor_follows_topmost_editing_surface() {
+        let mut app = App::new(Some(AppType::Claude));
+        assert!(!app.wants_terminal_cursor());
+
+        app.filter.active = true;
+        assert!(app.wants_terminal_cursor());
+
+        app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: "Confirm".to_string(),
+            message: "Continue?".to_string(),
+            action: ConfirmAction::Quit,
+        });
+        assert!(
+            !app.wants_terminal_cursor(),
+            "a non-editing overlay must suppress the underlying filter cursor"
+        );
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "Title".to_string(),
+            prompt: "Prompt".to_string(),
+            input: TextInput::new(""),
+            submit: TextSubmit::ConfigExport,
+            secret: false,
+        });
+        assert!(app.wants_terminal_cursor());
+    }
+
     fn select_provider_common_snippet_row(app: &mut App) {
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
             form.focus = FormFocus::Fields;
@@ -12184,6 +12212,38 @@ mod tests {
     }
 
     #[test]
+    fn provider_claude_model_overlay_reaches_fable_fifth_row() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.form = Some(FormState::ProviderAdd(
+            super::super::form::ProviderAddFormState::new(AppType::Claude),
+        ));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 3,
+            editing: false,
+        };
+
+        app.on_key(key(KeyCode::Down), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 4,
+                editing: false
+            }
+        ));
+
+        app.on_key(key(KeyCode::Down), &data());
+        assert!(matches!(
+            app.overlay,
+            Overlay::ClaudeModelPicker {
+                selected: 4,
+                editing: false
+            }
+        ));
+    }
+
+    #[test]
     fn provider_claude_model_overlay_jk_inserts_chars_when_editing() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -14287,7 +14347,7 @@ mod tests {
         if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
             form.claude_opus_model.set("claude-opus-4-20250514");
         }
-        // Select the Opus role (now index 3 of the four role rows)
+        // Select the Opus role (index 3 of the five Claude CLI role rows).
         app.overlay = Overlay::ClaudeModelPicker {
             selected: 3,
             editing: false,
@@ -14310,12 +14370,120 @@ mod tests {
             Some(FormState::ProviderAdd(f)) => f,
             _ => panic!("expected ProviderAdd form"),
         };
-        // Fill-all only spans the four role models; the fallback model is separate.
+        // Fill-all spans the five role models; the fallback model is separate.
         assert_eq!(form.claude_reasoning_model.value, "claude-opus-4-20250514");
         assert_eq!(form.claude_haiku_model.value, "claude-opus-4-20250514");
         assert_eq!(form.claude_sonnet_model.value, "claude-opus-4-20250514");
         assert_eq!(form.claude_opus_model.value, "claude-opus-4-20250514");
+        assert_eq!(form.claude_fable_model.value, "claude-opus-4-20250514");
         assert_eq!(form.claude_model.value, "");
+    }
+
+    #[test]
+    fn claude_model_picker_m_toggles_only_supported_cli_roles() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = ProviderAddFormState::new(AppType::Claude);
+        form.claude_haiku_model.set("claude-haiku-4-5");
+        form.claude_sonnet_model.set("claude-sonnet-5");
+        form.claude_fable_model.set("claude-fable-5");
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 2,
+            editing: false,
+        };
+
+        app.on_key(key(KeyCode::Char('m')), &data());
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert!(form.claude_model_one_m_enabled(2));
+
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 1,
+            editing: false,
+        };
+        app.on_key(key(KeyCode::Char('m')), &data());
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert!(!form.claude_model_one_m_enabled(1));
+
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 4,
+            editing: false,
+        };
+        app.on_key(key(KeyCode::Char('m')), &data());
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert!(form.claude_model_one_m_enabled(4));
+    }
+
+    #[test]
+    fn claude_desktop_model_picker_m_toggles_fable() {
+        let mut app = App::new(Some(AppType::ClaudeDesktop));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = ProviderAddFormState::new(AppType::ClaudeDesktop);
+        form.claude_fable_model.set("claude-fable-5");
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 3,
+            editing: false,
+        };
+
+        app.on_key(key(KeyCode::Char('m')), &data());
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert!(form.claude_model_one_m_enabled(3));
+        assert!(!form.claude_model_one_m_enabled(1));
+        assert!(!form.claude_model_one_m_enabled(2));
+    }
+
+    #[test]
+    fn claude_desktop_model_fill_all_uses_desktop_roles_and_suffix_state() {
+        let _lang = use_test_language(Language::English);
+        let mut app = App::new(Some(AppType::ClaudeDesktop));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = ProviderAddFormState::new(AppType::ClaudeDesktop);
+        form.set_claude_model_from_config(1, "claude-sonnet-5[1M]");
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: 1,
+            editing: false,
+        };
+
+        app.on_key(key(KeyCode::Char('a')), &data());
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                message,
+                action: ConfirmAction::ClaudeModelFillAll { source_idx: 1 },
+                ..
+            }) if message.contains("Sonnet")
+        ));
+
+        app.on_key(key(KeyCode::Enter), &data());
+        let form = match app.form.as_ref() {
+            Some(FormState::ProviderAdd(form)) => form,
+            _ => panic!("expected ProviderAdd form"),
+        };
+        assert_eq!(form.claude_haiku_model.value, "claude-sonnet-5");
+        assert_eq!(form.claude_sonnet_model.value, "claude-sonnet-5");
+        assert_eq!(form.claude_opus_model.value, "claude-sonnet-5");
+        assert_eq!(form.claude_fable_model.value, "claude-sonnet-5");
+        assert!(!form.claude_model_one_m_enabled(0));
+        assert!(form.claude_model_one_m_enabled(1));
+        assert!(form.claude_model_one_m_enabled(2));
+        assert!(form.claude_model_one_m_enabled(3));
     }
 
     // ------------------------------------------------------------------
@@ -14344,7 +14512,7 @@ mod tests {
         assert!(matches!(action, Action::None));
 
         // Should restore to ClaudeModelPicker with the correct selected index
-        // (index 1 is the Haiku role in the four-role mapping).
+        // (index 1 is the Haiku role in the five-role Claude CLI mapping).
         assert!(matches!(
             app.overlay,
             Overlay::ClaudeModelPicker {

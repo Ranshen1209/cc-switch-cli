@@ -12,11 +12,20 @@ pub(super) fn render_claude_model_picker_overlay(
     selected: usize,
     editing: bool,
 ) {
-    // Keep the percentage-based width, but cap the height to the four role rows
+    let row_count = app
+        .form
+        .as_ref()
+        .and_then(|form| match form {
+            FormState::ProviderAdd(provider) => Some(provider.claude_model_row_count()),
+            _ => None,
+        })
+        .unwrap_or(4);
+
+    // Keep the percentage-based width, but cap the height to the role rows
     // rather than filling 62% of the screen (which left a large empty table).
-    // Height = outer borders(2) + key bar(1) + top gap(1) + table[border(2)+header(1)+4 rows] + hint(3).
+    // Height = fixed overlay chrome(10) + one line per model row.
     let wide = centered_rect(OVERLAY_MD.0, OVERLAY_MD.1, content_area);
-    let desired_h = 14u16.min(content_area.height);
+    let desired_h = (10 + row_count as u16).min(content_area.height);
     let area = Rect {
         x: wide.x,
         width: wide.width,
@@ -24,37 +33,16 @@ pub(super) fn render_claude_model_picker_overlay(
         height: desired_h,
     };
 
-    // 需要提前获取 is_desktop，以便根据 app 类型定制 key_items
-    let is_desktop = app
-        .form
-        .as_ref()
-        .and_then(|f| match f {
-            FormState::ProviderAdd(p) => Some(matches!(
-                p.app_type,
-                crate::app_config::AppType::ClaudeDesktop
-            )),
-            _ => None,
-        })
-        .unwrap_or(false);
-
     let key_items: Vec<(&str, &str)> = if editing {
         vec![
             ("←→/Home/End", texts::tui_key_move()),
             ("Esc/Enter", texts::tui_key_exit_edit()),
         ]
-    } else if is_desktop {
-        vec![
-            ("↑↓", texts::tui_key_select()),
-            ("Space", texts::tui_key_edit()),
-            ("m", texts::tui_key_toggle_1m()),
-            ("a", texts::tui_key_fill_all()),
-            ("Enter", texts::tui_key_fetch_model()),
-            ("Esc", texts::tui_key_close()),
-        ]
     } else {
         vec![
             ("↑↓", texts::tui_key_select()),
             ("Space", texts::tui_key_edit()),
+            ("m", texts::tui_key_toggle_1m()),
             ("a", texts::tui_key_fill_all()),
             ("Enter", texts::tui_key_fetch_model()),
             ("Esc", texts::tui_key_close()),
@@ -79,21 +67,21 @@ pub(super) fn render_claude_model_picker_overlay(
     let hint_area = chunks[1];
 
     if let Some(FormState::ProviderAdd(provider)) = app.form.as_ref() {
-        // is_desktop was already computed above for key_items; use provider for accuracy
         let is_desktop = matches!(provider.app_type, crate::app_config::AppType::ClaudeDesktop);
-        let labels: [&str; 4] = if is_desktop {
-            [
+        let labels = if is_desktop {
+            vec![
                 texts::tui_claude_default_haiku_model_label(),
                 texts::tui_claude_default_sonnet_model_label(),
                 texts::tui_claude_default_opus_model_label(),
                 texts::tui_claude_default_fable_model_label(),
             ]
         } else {
-            [
+            vec![
                 texts::tui_claude_reasoning_model_label(),
                 texts::tui_claude_default_haiku_model_label(),
                 texts::tui_claude_default_sonnet_model_label(),
                 texts::tui_claude_default_opus_model_label(),
+                texts::tui_claude_default_fable_model_label(),
             ]
         };
 
@@ -105,62 +93,43 @@ pub(super) fn render_claude_model_picker_overlay(
             1,
         );
 
-        let header = if is_desktop {
-            Row::new(vec![
-                Cell::from(cell_pad(texts::tui_header_field())),
-                Cell::from(texts::tui_header_value()),
-                Cell::from(texts::tui_header_1m_context()),
-            ])
-            .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD))
-        } else {
-            Row::new(vec![
-                Cell::from(cell_pad(texts::tui_header_field())),
-                Cell::from(texts::tui_header_value()),
-            ])
-            .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD))
-        };
+        let header = Row::new(vec![
+            Cell::from(cell_pad(texts::tui_header_field())),
+            Cell::from(texts::tui_header_value()),
+            Cell::from(texts::tui_header_1m_context()),
+        ])
+        .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
         let rows = labels.iter().enumerate().map(|(idx, label)| {
-            let input = if is_desktop {
-                provider.claude_desktop_model_input(idx)
-            } else {
-                provider.claude_model_input(idx)
-            };
-            let value = input
+            let value = provider
+                .active_claude_model_input(idx)
                 .map(|i| i.value.trim().to_string())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| texts::tui_na().to_string());
-            if is_desktop {
-                let one_m = if provider.claude_desktop_model_1m(idx) {
+            let one_m = if provider.claude_model_supports_one_m(idx) {
+                if provider.claude_model_one_m_enabled(idx) {
                     format!("[{}]", texts::tui_marker_active())
                 } else {
                     "[ ]".to_string()
-                };
-                Row::new(vec![
-                    Cell::from(cell_pad(label)),
-                    Cell::from(value),
-                    Cell::from(one_m),
-                ])
+                }
             } else {
-                Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value)])
-            }
+                "-".to_string()
+            };
+            Row::new(vec![
+                Cell::from(cell_pad(label)),
+                Cell::from(value),
+                Cell::from(one_m),
+            ])
         });
 
-        let table = if is_desktop {
-            Table::new(
-                rows,
-                [
-                    Constraint::Length(label_col_width),
-                    Constraint::Min(10),
-                    Constraint::Length(4),
-                ],
-            )
-        } else {
-            Table::new(
-                rows,
-                [Constraint::Length(label_col_width), Constraint::Min(10)],
-            )
-        }
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(label_col_width),
+                Constraint::Min(10),
+                Constraint::Length(4),
+            ],
+        )
         .header(header)
         .block(
             Block::default()
@@ -193,12 +162,7 @@ pub(super) fn render_claude_model_picker_overlay(
         let hint_inner = hint_block.inner(hint_area);
 
         if editing {
-            let model_input = if is_desktop {
-                provider.claude_desktop_model_input(selected)
-            } else {
-                provider.claude_model_input(selected)
-            };
-            if let Some(input) = model_input {
+            if let Some(input) = provider.active_claude_model_input(selected) {
                 let (visible, cursor_x) =
                     visible_text_window(&input.value, input.cursor, hint_inner.width as usize);
                 frame.render_widget(

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    backend::TestBackend,
+    backend::{Backend, TestBackend},
     buffer::Buffer,
     style::{Color, Modifier},
     Terminal,
@@ -20,7 +20,7 @@ use crate::{
         app,
         app::{
             Action, App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit,
-            Focus, Overlay, TextInputState, TextSubmit, UsagePane,
+            Focus, LoadingKind, Overlay, TextInputState, TextSubmit, UsagePane,
         },
         data::{
             ConfigSnapshot, McpSnapshot, ModelPricingRow, ModelPricingSnapshot,
@@ -38,6 +38,39 @@ use crate::{
     services::skill::{InstalledSkill, SkillApps, SkillRepo, SyncMethod, UnmanagedSkill},
     test_support::{lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock},
 };
+
+#[test]
+fn loading_overlay_never_shows_underlying_filter_cursor() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.filter.active = true;
+    let data = minimal_data(&app.app_type);
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("terminal created");
+
+    terminal
+        .draw(|frame| super::render(frame, &app, &data))
+        .expect("draw active filter");
+    let visible_backend = terminal.backend().clone();
+    let mut expected_hidden = visible_backend.clone();
+    expected_hidden.hide_cursor().expect("hide test cursor");
+    assert_ne!(visible_backend, expected_hidden);
+
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::Generic,
+        title: "Loading".to_string(),
+        message: "Working...".to_string(),
+    };
+    terminal
+        .draw(|frame| super::render(frame, &app, &data))
+        .expect("draw loading overlay");
+
+    let covered_backend = terminal.backend().clone();
+    let mut expected_hidden = covered_backend.clone();
+    expected_hidden.hide_cursor().expect("hide test cursor");
+    assert_eq!(covered_backend, expected_hidden);
+}
 
 #[test]
 fn provider_form_shows_full_api_key_in_table_value() {
@@ -1075,6 +1108,59 @@ fn provider_field_label_and_value_renders_claude_responses_api_format() {
     );
     assert!(value.contains("OpenAI Responses API"));
     assert!(value.contains("代理") || value.contains("proxy"));
+}
+
+#[test]
+fn claude_model_picker_renders_shared_one_m_controls_for_cli_and_desktop() {
+    let _lang = use_test_language(Language::English);
+
+    for (app_type, sonnet_index) in [(AppType::Claude, 2), (AppType::ClaudeDesktop, 1)] {
+        let mut app = App::new(Some(app_type.clone()));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(app_type);
+        form.set_claude_model_from_config(sonnet_index, "claude-sonnet-5[1M]");
+        app.form = Some(FormState::ProviderAdd(form));
+        app.overlay = Overlay::ClaudeModelPicker {
+            selected: sonnet_index,
+            editing: false,
+        };
+
+        let all = all_text(&render_with_size(
+            &app,
+            &minimal_data(&app.app_type),
+            120,
+            40,
+        ));
+        assert!(all.contains(texts::tui_header_1m_context()), "{all}");
+        assert!(all.contains(texts::tui_key_toggle_1m()), "{all}");
+        assert!(
+            all.contains(texts::tui_claude_default_fable_model_label()),
+            "{all}"
+        );
+        assert!(all.contains("[OK]"), "{all}");
+        assert!(all.contains("[ ]"), "{all}");
+    }
+}
+
+#[test]
+fn claude_model_config_summary_uses_app_specific_row_count() {
+    let _lang = use_test_language(Language::English);
+
+    let mut cli = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+    cli.claude_fable_model.set("claude-fable-5");
+    let (_, cli_summary) = super::provider_field_label_and_value(
+        &cli,
+        crate::cli::tui::form::ProviderAddField::ClaudeModelConfig,
+    );
+    assert_eq!(cli_summary, "Configured 1/5");
+
+    let desktop = crate::cli::tui::form::ProviderAddFormState::new(AppType::ClaudeDesktop);
+    let (_, desktop_summary) = super::provider_field_label_and_value(
+        &desktop,
+        crate::cli::tui::form::ProviderAddField::ClaudeDesktopModelConfig,
+    );
+    assert_eq!(desktop_summary, "Configured 0/4");
 }
 
 #[test]
@@ -4269,6 +4355,37 @@ fn page_key_bar_stays_visible_while_nav_has_focus() {
     assert!(
         all.contains("a=add"),
         "key bar should stay visible (dimmed) with nav focus: {all}"
+    );
+}
+
+#[test]
+fn provider_loading_page_does_not_render_an_empty_key_bar_chip() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::ClaudeDesktop));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows.clear();
+    data.providers.loading = true;
+
+    let buf = render(&app, &data);
+    let all = all_text(&buf);
+    assert!(all.contains(texts::tui_provider_loading()), "{all}");
+
+    // Header occupies rows 0..3; the Providers pane begins at row 3, and
+    // its key bar is the first row inside the border.
+    let key_bar_y = 4;
+    let content_start = content_origin_x(&app, &buf).saturating_add(1);
+    let theme = theme_for(&app.app_type);
+    let surface_cells = (content_start..buf.area.width.saturating_sub(1))
+        .filter(|&x| buf[(x, key_bar_y)].bg == theme.surface)
+        .count();
+    assert_eq!(
+        surface_cells, 0,
+        "an empty loading-state key bar must not leave a cursor-like block"
     );
 }
 

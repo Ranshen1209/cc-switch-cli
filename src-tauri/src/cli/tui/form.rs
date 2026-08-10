@@ -454,15 +454,12 @@ pub struct ProviderAddFormState {
     pub claude_haiku_model: TextInput,
     pub claude_sonnet_model: TextInput,
     pub claude_opus_model: TextInput,
-    /// Desktop Direct 模式专用：`ANTHROPIC_DEFAULT_FABLE_MODEL` 映射目标。
-    /// 对 Claude 应用无效（Claude 模型配置子页不含 Fable 行）。
+    /// Claude CLI 与 Desktop Direct 共用的 `ANTHROPIC_DEFAULT_FABLE_MODEL` 映射目标。
     pub claude_fable_model: TextInput,
-    /// Desktop Direct 模式专用：4路由的 `supports1m` 标志。
-    /// 默认 `true`（与 `DEFAULT_PROXY_ROUTES` 一致）；对 Claude 应用无效。
-    pub claude_desktop_haiku_1m: bool,
-    pub claude_desktop_sonnet_1m: bool,
-    pub claude_desktop_opus_1m: bool,
-    pub claude_desktop_fable_1m: bool,
+    /// Claude 和 Claude Desktop 共用的 `[1M]` 模型后缀状态。
+    claude_sonnet_one_m: bool,
+    claude_opus_one_m: bool,
+    claude_fable_one_m: bool,
     pub claude_hide_attribution: bool,
     claude_hide_attribution_touched: bool,
     pub claude_teammates: bool,

@@ -31,6 +31,28 @@ fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
     }
 }
 
+fn split_claude_one_m_marker(value: &str) -> (String, bool) {
+    const MARKER: &str = "[1M]";
+
+    let trimmed_end = value.trim_end();
+    let marker_start = trimmed_end.len().saturating_sub(MARKER.len());
+    let has_marker = trimmed_end
+        .get(marker_start..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(MARKER));
+    if !has_marker {
+        return (value.to_string(), false);
+    }
+
+    (
+        trimmed_end
+            .get(..marker_start)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string(),
+        true,
+    )
+}
+
 impl ProviderAddFormState {
     pub const USAGE_QUERY_GENERAL_PRESET: &'static str = r#"({
   request: {
@@ -153,10 +175,9 @@ impl ProviderAddFormState {
             claude_sonnet_model: TextInput::new(""),
             claude_opus_model: TextInput::new(""),
             claude_fable_model: TextInput::new(""),
-            claude_desktop_haiku_1m: true,
-            claude_desktop_sonnet_1m: true,
-            claude_desktop_opus_1m: true,
-            claude_desktop_fable_1m: true,
+            claude_sonnet_one_m: false,
+            claude_opus_one_m: false,
+            claude_fable_one_m: false,
             claude_hide_attribution: false,
             claude_hide_attribution_touched: false,
             claude_teammates: false,
@@ -1461,7 +1482,7 @@ impl ProviderAddFormState {
         None
     }
 
-    // The model-mapping sub-page exposes only the four role models; the main
+    // The Claude model-mapping sub-page exposes five role models; the main
     // model (ANTHROPIC_MODEL) is edited via the top-level ClaudeFallbackModel row.
     pub fn claude_model_input(&self, index: usize) -> Option<&TextInput> {
         match index {
@@ -1469,6 +1490,7 @@ impl ProviderAddFormState {
             1 => Some(&self.claude_haiku_model),
             2 => Some(&self.claude_sonnet_model),
             3 => Some(&self.claude_opus_model),
+            4 => Some(&self.claude_fable_model),
             _ => None,
         }
     }
@@ -1479,6 +1501,7 @@ impl ProviderAddFormState {
             1 => Some(&mut self.claude_haiku_model),
             2 => Some(&mut self.claude_sonnet_model),
             3 => Some(&mut self.claude_opus_model),
+            4 => Some(&mut self.claude_fable_model),
             _ => None,
         }
     }
@@ -1504,6 +1527,30 @@ impl ProviderAddFormState {
         }
     }
 
+    pub fn active_claude_model_input(&self, index: usize) -> Option<&TextInput> {
+        if matches!(self.app_type, AppType::ClaudeDesktop) {
+            self.claude_desktop_model_input(index)
+        } else {
+            self.claude_model_input(index)
+        }
+    }
+
+    pub fn active_claude_model_input_mut(&mut self, index: usize) -> Option<&mut TextInput> {
+        if matches!(self.app_type, AppType::ClaudeDesktop) {
+            self.claude_desktop_model_input_mut(index)
+        } else {
+            self.claude_model_input_mut(index)
+        }
+    }
+
+    pub fn claude_model_row_count(&self) -> usize {
+        if matches!(self.app_type, AppType::ClaudeDesktop) {
+            4
+        } else {
+            5
+        }
+    }
+
     pub fn claude_desktop_model_configured_count(&self) -> usize {
         [
             &self.claude_haiku_model,
@@ -1516,28 +1563,150 @@ impl ProviderAddFormState {
         .count()
     }
 
-    /// 返回 ClaudeDesktop 第 `index` 路由的 `supports_1m` 标志（0=Haiku, 1=Sonnet, 2=Opus, 3=Fable）。
-    pub fn claude_desktop_model_1m(&self, index: usize) -> bool {
-        match index {
-            0 => self.claude_desktop_haiku_1m,
-            1 => self.claude_desktop_sonnet_1m,
-            2 => self.claude_desktop_opus_1m,
-            3 => self.claude_desktop_fable_1m,
+    pub fn claude_model_supports_one_m(&self, index: usize) -> bool {
+        match self.app_type {
+            AppType::Claude => matches!(index, 2..=4),
+            AppType::ClaudeDesktop => matches!(index, 1..=3),
             _ => false,
         }
     }
 
-    /// 切换 ClaudeDesktop 第 `index` 路由的 `supports_1m` 标志，并标记 model config 已修改。
-    pub fn toggle_claude_desktop_model_1m(&mut self, index: usize) {
-        let flag = match index {
-            0 => &mut self.claude_desktop_haiku_1m,
-            1 => &mut self.claude_desktop_sonnet_1m,
-            2 => &mut self.claude_desktop_opus_1m,
-            3 => &mut self.claude_desktop_fable_1m,
-            _ => return,
+    pub fn claude_model_one_m_enabled(&self, index: usize) -> bool {
+        match (&self.app_type, index) {
+            (AppType::Claude, 2) | (AppType::ClaudeDesktop, 1) => self.claude_sonnet_one_m,
+            (AppType::Claude, 3) | (AppType::ClaudeDesktop, 2) => self.claude_opus_one_m,
+            (AppType::Claude, 4) | (AppType::ClaudeDesktop, 3) => self.claude_fable_one_m,
+            _ => false,
+        }
+    }
+
+    fn set_claude_model_one_m_enabled(&mut self, index: usize, enabled: bool) {
+        match (&self.app_type, index) {
+            (AppType::Claude, 2) | (AppType::ClaudeDesktop, 1) => {
+                self.claude_sonnet_one_m = enabled;
+            }
+            (AppType::Claude, 3) | (AppType::ClaudeDesktop, 2) => {
+                self.claude_opus_one_m = enabled;
+            }
+            (AppType::Claude, 4) | (AppType::ClaudeDesktop, 3) => {
+                self.claude_fable_one_m = enabled;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn reset_claude_model_one_m(&mut self) {
+        self.claude_sonnet_one_m = false;
+        self.claude_opus_one_m = false;
+        self.claude_fable_one_m = false;
+    }
+
+    pub fn set_claude_model_from_config(&mut self, index: usize, value: &str) {
+        let (model, one_m) = split_claude_one_m_marker(value);
+        if let Some(input) = self.active_claude_model_input_mut(index) {
+            input.set(model);
+        }
+        if self.claude_model_supports_one_m(index) {
+            self.set_claude_model_one_m_enabled(index, one_m);
+        }
+    }
+
+    pub fn set_claude_model_from_picker(&mut self, index: usize, value: &str) {
+        let preserve_one_m = self.claude_model_one_m_enabled(index);
+        let (model, explicit_one_m) = split_claude_one_m_marker(value);
+        let supports_one_m = self.claude_model_supports_one_m(index);
+        if let Some(input) = self.active_claude_model_input_mut(index) {
+            input.set(model);
+        }
+        if supports_one_m {
+            self.set_claude_model_one_m_enabled(index, explicit_one_m || preserve_one_m);
+        }
+        self.mark_claude_model_config_touched();
+    }
+
+    pub fn normalize_claude_model_input(&mut self, index: usize) -> bool {
+        let Some(raw) = self
+            .active_claude_model_input(index)
+            .map(|input| input.value.clone())
+        else {
+            return false;
         };
-        *flag = !*flag;
-        self.claude_model_config_touched = true;
+        let (model, explicit_one_m) = split_claude_one_m_marker(&raw);
+        let supports_one_m = self.claude_model_supports_one_m(index);
+        let enabled = if !supports_one_m || model.trim().is_empty() {
+            false
+        } else {
+            explicit_one_m || self.claude_model_one_m_enabled(index)
+        };
+        let changed =
+            model != raw || (supports_one_m && enabled != self.claude_model_one_m_enabled(index));
+        if changed {
+            if let Some(input) = self.active_claude_model_input_mut(index) {
+                input.set(model);
+            }
+            if supports_one_m {
+                self.set_claude_model_one_m_enabled(index, enabled);
+            }
+        }
+        changed
+    }
+
+    pub fn toggle_claude_model_one_m(&mut self, index: usize) -> bool {
+        if !self.claude_model_supports_one_m(index) {
+            return false;
+        }
+
+        let currently_enabled = self.claude_model_one_m_enabled(index);
+        let model_is_blank = self
+            .active_claude_model_input(index)
+            .is_none_or(|input| input.value.trim().is_empty());
+        if model_is_blank && !currently_enabled {
+            return false;
+        }
+
+        self.set_claude_model_one_m_enabled(index, !currently_enabled);
+        self.mark_claude_model_config_touched();
+        true
+    }
+
+    pub fn claude_model_value_for_config(&self, index: usize) -> String {
+        let Some(input) = self.active_claude_model_input(index) else {
+            return String::new();
+        };
+        let (model, explicit_one_m) = split_claude_one_m_marker(&input.value);
+        let model = model.trim();
+        if model.is_empty() {
+            return String::new();
+        }
+        if self.claude_model_supports_one_m(index)
+            && (self.claude_model_one_m_enabled(index) || explicit_one_m)
+        {
+            format!("{model}[1M]")
+        } else {
+            model.to_string()
+        }
+    }
+
+    pub fn fill_claude_models_from(&mut self, source_index: usize) -> bool {
+        let Some(source) = self.active_claude_model_input(source_index) else {
+            return false;
+        };
+        if source.value.trim().is_empty() {
+            return false;
+        }
+
+        let (model, explicit_one_m) = split_claude_one_m_marker(&source.value);
+        let one_m = self.claude_model_supports_one_m(source_index)
+            && (explicit_one_m || self.claude_model_one_m_enabled(source_index));
+        for index in 0..self.claude_model_row_count() {
+            if let Some(input) = self.active_claude_model_input_mut(index) {
+                input.set(model.clone());
+            }
+            let enabled = self.claude_model_supports_one_m(index) && one_m;
+            self.set_claude_model_one_m_enabled(index, enabled);
+        }
+        self.mark_claude_model_config_touched();
+        true
     }
 
     pub fn claude_model_configured_count(&self) -> usize {
@@ -1546,6 +1715,7 @@ impl ProviderAddFormState {
             &self.claude_haiku_model,
             &self.claude_sonnet_model,
             &self.claude_opus_model,
+            &self.claude_fable_model,
         ]
         .into_iter()
         .filter(|input| !input.is_blank())

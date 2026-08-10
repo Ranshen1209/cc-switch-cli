@@ -123,14 +123,14 @@ pub(crate) fn render_prompt_meta_form(
             Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
             editor_inner,
         );
-        if editor_active {
+        if editor_active && !app.overlay.is_active() {
             let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
             let y = editor_inner.y;
             frame.set_cursor_position((x, y));
         }
     }
 
-    render_prompt_content_editor(frame, prompt, body[1], theme);
+    render_prompt_content_editor(frame, prompt, body[1], theme, !app.overlay.is_active());
 }
 
 fn render_prompt_content_editor(
@@ -138,6 +138,7 @@ fn render_prompt_content_editor(
     prompt: &super::form::PromptMetaFormState,
     area: Rect,
     theme: &super::theme::Theme,
+    cursor_allowed: bool,
 ) {
     let active = matches!(prompt.focus, FormFocus::Content);
     let content_block = Block::default()
@@ -170,7 +171,7 @@ fn render_prompt_content_editor(
 
     frame.render_widget(Paragraph::new(shown), content_inner);
 
-    if active {
+    if active && cursor_allowed {
         let (row_in_view, col_in_view) = prompt.content.cursor_visual_offset_from_scroll(width);
         if row_in_view < height {
             let x = content_inner.x + col_in_view.min(content_inner.width.saturating_sub(1));

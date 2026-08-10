@@ -72,7 +72,7 @@ pub(super) fn render_editor(
     frame.render_widget(Paragraph::new(shown), field_inner);
 
     let (row_in_view, col_in_view) = editor.cursor_visual_offset_from_scroll(width);
-    if row_in_view < height {
+    if row_in_view < height && !app.overlay.is_active() {
         let x = field_inner.x + col_in_view.min(field_inner.width.saturating_sub(1));
         let y = field_inner.y + row_in_view as u16;
         frame.set_cursor_position((x, y));

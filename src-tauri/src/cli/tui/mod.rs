@@ -1470,90 +1470,107 @@ fn handle_tui_action(
     usage_pricing_req_tx: Option<&mpsc::Sender<UsagePricingReq>>,
     action: Action,
 ) -> Result<(), AppError> {
+    // on_key mutates overlay/editing state before dispatch. Hide the cursor
+    // before any synchronous action can block or return an error.
+    if !app.wants_terminal_cursor() {
+        terminal.hide_cursor_immediately()?;
+    }
+
     let should_queue_sessions_refresh = matches!(
         &action,
         Action::SwitchRoute(route::Route::Sessions) | Action::SetAppType(_)
     );
-    let result = match action {
-        Action::None => Ok(()),
-        Action::ProviderQuotaRefresh { id } => {
-            queue_provider_quota_refresh(app, data, quota_req_tx, &id);
-            Ok(())
-        }
-        Action::SetAppType(next) => {
-            data_cache.switch_to(app, data, app_data_req_tx, next)?;
-            let current_app_type = app.app_type.clone();
-            data_cache.queue_usage_pricing_load(
-                app,
-                usage_pricing_req_tx,
-                &current_app_type,
-                data::UsageRangePreset::SevenDays,
-            );
-            if matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
+    let result = (|| -> Result<(), AppError> {
+        match action {
+            Action::None => Ok(()),
+            Action::ProviderQuotaRefresh { id } => {
+                queue_provider_quota_refresh(app, data, quota_req_tx, &id);
+                Ok(())
+            }
+            Action::SetAppType(next) => {
+                data_cache.switch_to(app, data, app_data_req_tx, next)?;
+                let current_app_type = app.app_type.clone();
                 data_cache.queue_usage_pricing_load(
                     app,
                     usage_pricing_req_tx,
                     &current_app_type,
-                    app.usage.range,
+                    data::UsageRangePreset::SevenDays,
                 );
+                if matches!(app.usage.range, data::UsageRangePreset::Custom(_)) {
+                    data_cache.queue_usage_pricing_load(
+                        app,
+                        usage_pricing_req_tx,
+                        &current_app_type,
+                        app.usage.range,
+                    );
+                }
+                queue_current_quota_refresh_if_due(app, data, quota_req_tx);
+                Ok(())
             }
-            queue_current_quota_refresh_if_due(app, data, quota_req_tx);
-            Ok(())
-        }
-        Action::UsageCustomRange { range } => {
-            app.usage.range = data::UsageRangePreset::Custom(range);
-            data.usage.begin_custom_range(range);
-            app.clamp_selections(data);
-            let current_app_type = app.app_type.clone();
-            data_cache.queue_usage_pricing_load(
-                app,
-                usage_pricing_req_tx,
-                &current_app_type,
-                data::UsageRangePreset::Custom(range),
-            );
-            data_cache.remember_current(&app.app_type, data);
-            Ok(())
-        }
-        other => {
-            let candidate = cache_invalidation_for_action(&other);
-            if matches!(candidate, CacheInvalidation::AppStateRecreated) {
-                drop_cached_worker_state(app_data_req_tx, usage_pricing_req_tx)?;
+            Action::UsageCustomRange { range } => {
+                app.usage.range = data::UsageRangePreset::Custom(range);
+                data.usage.begin_custom_range(range);
+                app.clamp_selections(data);
+                let current_app_type = app.app_type.clone();
+                data_cache.queue_usage_pricing_load(
+                    app,
+                    usage_pricing_req_tx,
+                    &current_app_type,
+                    data::UsageRangePreset::Custom(range),
+                );
+                data_cache.remember_current(&app.app_type, data);
+                Ok(())
             }
-            let before_token = data.reload_token;
-            handle_action(
-                terminal,
-                app,
-                data,
-                speedtest_req_tx,
-                stream_check_req_tx,
-                skills_req_tx,
-                proxy_req_tx,
-                proxy_loading,
-                local_env_req_tx,
-                session_req_tx,
-                webdav_req_tx,
-                webdav_loading,
-                update_req_tx,
-                update_check,
-                model_fetch_req_tx,
-                managed_auth_req_tx,
-                other,
-            )?;
-            let invalidation = effective_cache_invalidation(candidate, before_token, data);
-            apply_cache_invalidation(
-                app,
-                data,
-                data_cache,
-                quota_req_tx,
-                app_data_req_tx,
-                usage_pricing_req_tx,
-                invalidation,
-            )
+            other => {
+                let candidate = cache_invalidation_for_action(&other);
+                if matches!(candidate, CacheInvalidation::AppStateRecreated) {
+                    drop_cached_worker_state(app_data_req_tx, usage_pricing_req_tx)?;
+                }
+                let before_token = data.reload_token;
+                handle_action(
+                    terminal,
+                    app,
+                    data,
+                    speedtest_req_tx,
+                    stream_check_req_tx,
+                    skills_req_tx,
+                    proxy_req_tx,
+                    proxy_loading,
+                    local_env_req_tx,
+                    session_req_tx,
+                    webdav_req_tx,
+                    webdav_loading,
+                    update_req_tx,
+                    update_check,
+                    model_fetch_req_tx,
+                    managed_auth_req_tx,
+                    other,
+                )?;
+                let invalidation = effective_cache_invalidation(candidate, before_token, data);
+                apply_cache_invalidation(
+                    app,
+                    data,
+                    data_cache,
+                    quota_req_tx,
+                    app_data_req_tx,
+                    usage_pricing_req_tx,
+                    invalidation,
+                )
+            }
         }
-    };
+    })();
 
     if result.is_ok() && should_queue_sessions_refresh {
         queue_sessions_refresh_if_needed(app, session_req_tx);
+    }
+
+    if !app.wants_terminal_cursor() {
+        let hide_result = terminal.hide_cursor_immediately();
+        if result.is_ok() {
+            hide_result?;
+        } else if let Err(err) = hide_result {
+            log::debug!("failed to hide cursor after failed TUI action: {err}");
+        }
     }
 
     result
@@ -1696,7 +1713,10 @@ fn should_exit_after_initial_loading(
 /// startup. Additive apps (OpenCode/Hermes/OpenClaw) read live config files even
 /// in SnapshotOnly mode, so they are excluded and lazy-load on first switch.
 fn is_lightweight_preseed_app(app_type: &AppType) -> bool {
-    matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini)
+    matches!(
+        app_type,
+        AppType::Claude | AppType::ClaudeDesktop | AppType::Codex | AppType::Gemini
+    )
 }
 
 pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
@@ -1922,7 +1942,8 @@ pub fn run(app_override: Option<AppType>) -> Result<(), AppError> {
         }
         let frame_dt = last_frame.elapsed();
         last_frame = Instant::now();
-        terminal.draw(|f| {
+        let wants_terminal_cursor = !initial_data_loading && app.wants_terminal_cursor();
+        terminal.draw_with_cursor_policy(wants_terminal_cursor, |f| {
             let area = f.area();
             if !initial_data_loading {
                 proxy_open_flash.sync(&app, area);

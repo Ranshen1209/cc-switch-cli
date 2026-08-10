@@ -524,9 +524,19 @@ impl App {
     }
 
     fn handle_claude_model_picker_edit_key(&mut self, key: KeyEvent) -> Action {
+        let max_index = self
+            .form
+            .as_ref()
+            .and_then(|form| match form {
+                FormState::ProviderAdd(provider) => {
+                    Some(provider.claude_model_row_count().saturating_sub(1))
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
         let selected = match &mut self.overlay {
             Overlay::ClaudeModelPicker { selected, editing } => {
-                *selected = (*selected).min(3);
+                *selected = (*selected).min(max_index);
                 if !*editing {
                     return Action::None;
                 }
@@ -542,18 +552,16 @@ impl App {
 
         match key.code {
             KeyCode::Esc | KeyCode::Enter => {
+                if provider.normalize_claude_model_input(selected) {
+                    provider.mark_claude_model_config_touched();
+                }
                 if let Overlay::ClaudeModelPicker { editing, .. } = &mut self.overlay {
                     *editing = false;
                 }
                 Action::None
             }
             _ => {
-                let model_input = if matches!(provider.app_type, AppType::ClaudeDesktop) {
-                    provider.claude_desktop_model_input_mut(selected)
-                } else {
-                    provider.claude_model_input_mut(selected)
-                };
-                if let Some(input) = model_input {
+                if let Some(input) = provider.active_claude_model_input_mut(selected) {
                     if input.apply_key(key).is_some_and(|edit| edit.changed) {
                         provider.mark_claude_model_config_touched();
                     }
@@ -564,9 +572,19 @@ impl App {
     }
 
     fn handle_claude_model_picker_select_key(&mut self, key: KeyEvent) -> Action {
+        let max_index = self
+            .form
+            .as_ref()
+            .and_then(|form| match form {
+                FormState::ProviderAdd(provider) => {
+                    Some(provider.claude_model_row_count().saturating_sub(1))
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
         let selected = match &mut self.overlay {
             Overlay::ClaudeModelPicker { selected, editing } => {
-                *selected = (*selected).min(3);
+                *selected = (*selected).min(max_index);
                 if *editing {
                     return Action::None;
                 }
@@ -585,7 +603,7 @@ impl App {
                 Action::None
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(3);
+                *selected = (*selected + 1).min(max_index);
                 Action::None
             }
             KeyCode::Enter => {
@@ -622,9 +640,7 @@ impl App {
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 let selected = *selected;
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    if matches!(provider.app_type, AppType::ClaudeDesktop) {
-                        provider.toggle_claude_desktop_model_1m(selected);
-                    }
+                    provider.toggle_claude_model_one_m(selected);
                 }
                 Action::None
             }
@@ -634,13 +650,7 @@ impl App {
                     .form
                     .as_ref()
                     .and_then(|f| match f {
-                        FormState::ProviderAdd(p) => {
-                            if matches!(p.app_type, AppType::ClaudeDesktop) {
-                                p.claude_desktop_model_input(source_idx)
-                            } else {
-                                p.claude_model_input(source_idx)
-                            }
-                        }
+                        FormState::ProviderAdd(p) => p.active_claude_model_input(source_idx),
                         _ => None,
                     })
                     .map(|input| input.value.trim().is_empty())
@@ -652,8 +662,21 @@ impl App {
                         ToastKind::Warning,
                     );
                 } else {
-                    let source_label =
-                        texts::tui_claude_model_label_for_index(source_idx).to_string();
+                    let source_label = self
+                        .form
+                        .as_ref()
+                        .and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(if matches!(provider.app_type, AppType::ClaudeDesktop) {
+                                    texts::tui_claude_desktop_model_label_for_index(source_idx)
+                                } else {
+                                    texts::tui_claude_model_label_for_index(source_idx)
+                                })
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default()
+                        .to_string();
                     self.overlay = Overlay::Confirm(ConfirmOverlay {
                         title: texts::tui_claude_model_fill_all_title().to_string(),
                         message: texts::tui_claude_model_fill_all_message(&source_label),
@@ -760,20 +783,13 @@ impl App {
                 }
 
                 if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
-                    if field == ProviderAddField::ClaudeDesktopModelConfig {
+                    if matches!(
+                        field,
+                        ProviderAddField::ClaudeModelConfig
+                            | ProviderAddField::ClaudeDesktopModelConfig
+                    ) {
                         if let Some(idx) = claude_idx {
-                            if let Some(input_field) = provider.claude_desktop_model_input_mut(idx)
-                            {
-                                input_field.set(selected_model);
-                                provider.mark_claude_model_config_touched();
-                            }
-                        }
-                    } else if field == ProviderAddField::ClaudeModelConfig {
-                        if let Some(idx) = claude_idx {
-                            if let Some(input_field) = provider.claude_model_input_mut(idx) {
-                                input_field.set(selected_model);
-                                provider.mark_claude_model_config_touched();
-                            }
+                            provider.set_claude_model_from_picker(idx, &selected_model);
                         }
                     } else if field == ProviderAddField::HermesModels {
                         provider.set_selected_hermes_model_id_from_picker(&selected_model);

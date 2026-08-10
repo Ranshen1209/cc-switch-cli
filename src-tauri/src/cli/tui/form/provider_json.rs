@@ -74,34 +74,32 @@ impl ProviderAddFormState {
                     );
                 }
                 if self.claude_model_config_touched {
+                    let (haiku_model, sonnet_model, opus_model, fable_model) =
+                        if matches!(self.app_type, AppType::ClaudeDesktop) {
+                            (
+                                self.claude_model_value_for_config(0),
+                                self.claude_model_value_for_config(1),
+                                self.claude_model_value_for_config(2),
+                                self.claude_model_value_for_config(3),
+                            )
+                        } else {
+                            (
+                                self.claude_model_value_for_config(1),
+                                self.claude_model_value_for_config(2),
+                                self.claude_model_value_for_config(3),
+                                self.claude_model_value_for_config(4),
+                            )
+                        };
                     set_or_remove_trimmed(env_obj, "ANTHROPIC_MODEL", &self.claude_model.value);
                     set_or_remove_trimmed(
                         env_obj,
                         "ANTHROPIC_REASONING_MODEL",
                         &self.claude_reasoning_model.value,
                     );
-                    set_or_remove_trimmed(
-                        env_obj,
-                        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                        &self.claude_haiku_model.value,
-                    );
-                    set_or_remove_trimmed(
-                        env_obj,
-                        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                        &self.claude_sonnet_model.value,
-                    );
-                    set_or_remove_trimmed(
-                        env_obj,
-                        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                        &self.claude_opus_model.value,
-                    );
-                    if matches!(self.app_type, AppType::ClaudeDesktop) {
-                        set_or_remove_trimmed(
-                            env_obj,
-                            "ANTHROPIC_DEFAULT_FABLE_MODEL",
-                            &self.claude_fable_model.value,
-                        );
-                    }
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &haiku_model);
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_SONNET_MODEL", &sonnet_model);
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_OPUS_MODEL", &opus_model);
+                    set_or_remove_trimmed(env_obj, "ANTHROPIC_DEFAULT_FABLE_MODEL", &fable_model);
                     env_obj.remove("ANTHROPIC_SMALL_FAST_MODEL");
                 }
                 if self.claude_teammates_touched {
@@ -617,35 +615,29 @@ impl ProviderAddFormState {
             meta_obj.insert("claudeDesktopMode".to_string(), json!("direct"));
             meta_obj.remove("apiFormat");
             meta_obj.remove("apiKeyField");
-            if self.claude_model_config_touched {
-                // 构建 claudeDesktopModelRoutes（带 supports1m 标志）
-                const DESKTOP_ROLES: [(&str, usize); 4] = [
-                    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", 0),
-                    ("ANTHROPIC_DEFAULT_SONNET_MODEL", 1),
-                    ("ANTHROPIC_DEFAULT_OPUS_MODEL", 2),
-                    ("ANTHROPIC_DEFAULT_FABLE_MODEL", 3),
-                ];
-                let mut routes = serde_json::Map::new();
-                for (env_key, idx) in &DESKTOP_ROLES {
-                    if let Some(input) = self.claude_desktop_model_input(*idx) {
-                        if !input.is_blank() {
-                            let mut route = serde_json::Map::new();
-                            route.insert("model".to_string(), json!(input.value.trim()));
-                            if self.claude_desktop_model_1m(*idx) {
-                                route.insert("supports1m".to_string(), json!(true));
-                            }
-                            routes.insert(env_key.to_string(), Value::Object(route));
-                        }
+
+            const LEGACY_DIRECT_ROUTE_KEYS: [&str; 4] = [
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            ];
+            let remove_routes = match meta_obj.get_mut("claudeDesktopModelRoutes") {
+                Some(Value::Object(routes)) => {
+                    for key in LEGACY_DIRECT_ROUTE_KEYS {
+                        routes.remove(key);
                     }
+                    for route in routes.values_mut().filter_map(Value::as_object_mut) {
+                        // Direct mode now shares Claude CLI's `[1M]` suffix state.
+                        route.remove("supports1m");
+                    }
+                    routes.is_empty()
                 }
-                if routes.is_empty() {
-                    meta_obj.remove("claudeDesktopModelRoutes");
-                } else {
-                    meta_obj.insert(
-                        "claudeDesktopModelRoutes".to_string(),
-                        Value::Object(routes),
-                    );
-                }
+                Some(_) => true,
+                None => false,
+            };
+            if remove_routes {
+                meta_obj.remove("claudeDesktopModelRoutes");
             }
         }
         if should_write_common_config_meta {

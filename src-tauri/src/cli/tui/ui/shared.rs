@@ -620,6 +620,10 @@ pub(super) const TOAST_MAX_WIDTH: u16 = 72;
 pub(super) const TOAST_MIN_HEIGHT: u16 = 5;
 
 pub(super) fn key_bar_line(theme: &super::theme::Theme, items: &[(&str, &str)]) -> Line<'static> {
+    if items.is_empty() {
+        return Line::default();
+    }
+
     if theme.no_color {
         let mut parts = Vec::new();
         for (k, v) in items {
@@ -688,6 +692,10 @@ fn key_bar_items_for_width<'a>(
 }
 
 fn key_bar_line_dimmed(theme: &super::theme::Theme, items: &[(&str, &str)]) -> Line<'static> {
+    if items.is_empty() {
+        return Line::default();
+    }
+
     if theme.no_color {
         return key_bar_line(theme, items);
     }

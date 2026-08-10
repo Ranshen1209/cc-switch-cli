@@ -151,7 +151,7 @@ pub(crate) fn render_mcp_add_form(
                 Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
                 editor_inner,
             );
-            if editor_active {
+            if editor_active && !app.overlay.is_active() {
                 let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
                 let y = editor_inner.y;
                 frame.set_cursor_position((x, y));

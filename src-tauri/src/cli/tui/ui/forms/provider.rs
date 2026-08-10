@@ -398,7 +398,7 @@ pub(crate) fn render_provider_add_form(
                     editor_inner,
                 );
 
-                if editor_active {
+                if editor_active && !app.overlay.is_active() {
                     let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
                     let y = editor_inner.y;
                     frame.set_cursor_position((x, y));
@@ -1053,7 +1053,14 @@ fn render_usage_query_form(
     frame.render_stateful_widget(table, fields_inner, &mut state);
 
     render_usage_query_side_panel(frame, provider, body[1], theme);
-    render_usage_query_input(frame, provider, selected_field, chunks[2], theme);
+    render_usage_query_input(
+        frame,
+        provider,
+        selected_field,
+        chunks[2],
+        theme,
+        !app.overlay.is_active(),
+    );
 }
 
 fn render_usage_query_side_panel(
@@ -1201,6 +1208,7 @@ fn render_usage_query_input(
     selected: Option<super::form::UsageQueryField>,
     area: Rect,
     theme: &super::theme::Theme,
+    cursor_allowed: bool,
 ) {
     let editor_active = provider.usage_query_editing;
     let block = Block::default()
@@ -1223,7 +1231,7 @@ fn render_usage_query_input(
                 Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
                 inner,
             );
-            if editor_active {
+            if editor_active && cursor_allowed {
                 let x = inner.x + cursor_x.min(inner.width.saturating_sub(1));
                 frame.set_cursor_position((x, inner.y));
             }
@@ -1452,12 +1460,14 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
-        ProviderAddField::ClaudeModelConfig => {
-            texts::tui_claude_model_config_summary(provider.claude_model_configured_count())
-        }
-        ProviderAddField::ClaudeDesktopModelConfig => {
-            texts::tui_claude_model_config_summary(provider.claude_desktop_model_configured_count())
-        }
+        ProviderAddField::ClaudeModelConfig => texts::tui_claude_model_config_summary(
+            provider.claude_model_configured_count(),
+            provider.claude_model_row_count(),
+        ),
+        ProviderAddField::ClaudeDesktopModelConfig => texts::tui_claude_model_config_summary(
+            provider.claude_desktop_model_configured_count(),
+            provider.claude_model_row_count(),
+        ),
         ProviderAddField::ClaudeQuickConfig => {
             texts::tui_claude_quick_config_summary(provider.claude_quick_config_enabled_count())
         }

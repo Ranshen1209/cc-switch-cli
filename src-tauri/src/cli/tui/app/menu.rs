@@ -513,6 +513,13 @@ impl App {
             || self.form_text_input_is_active()
     }
 
+    pub(crate) fn wants_terminal_cursor(&self) -> bool {
+        if self.overlay.is_active() {
+            return self.overlay_text_input_is_active();
+        }
+        self.editor.is_some() || self.filter.active || self.form_text_input_is_active()
+    }
+
     fn normalize_vim_navigation_key(&self, key: KeyEvent) -> KeyEvent {
         if self.text_input_is_active() {
             return key;

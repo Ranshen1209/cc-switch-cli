@@ -378,6 +378,7 @@ fn build_provider_template_settings_config(
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gpt-5.4-mini",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5.4",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "gpt-5.4",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "gpt-5.4",
             },
             "attribution": {
                 "commit": "",
@@ -727,6 +728,10 @@ requires_openai_auth = true
             provider.settings_config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
             "gpt-5.4-mini"
         );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "gpt-5.4"
+        );
         assert!(
             provider.settings_config["env"]
                 .get("ANTHROPIC_AUTH_TOKEN")
@@ -839,6 +844,7 @@ requires_openai_auth = true
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
             ],
             "CLI model prompts should cover the same Claude model env keys as the TUI model config"
         );
@@ -869,6 +875,10 @@ requires_openai_auth = true
                     "ANTHROPIC_DEFAULT_OPUS_MODEL",
                     Some("model-opus".to_string()),
                 ),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                    Some("model-fable[1M]".to_string()),
+                ),
             ],
             false,
         );
@@ -878,6 +888,10 @@ requires_openai_auth = true
         assert_eq!(cfg["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "model-haiku");
         assert_eq!(cfg["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "model-sonnet");
         assert_eq!(cfg["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "model-opus");
+        assert_eq!(
+            cfg["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+            "model-fable[1M]"
+        );
     }
 
     #[test]
@@ -2851,7 +2865,7 @@ struct ClaudeModelPromptField {
     placeholder: &'static str,
 }
 
-fn claude_model_prompt_fields() -> [ClaudeModelPromptField; 5] {
+fn claude_model_prompt_fields() -> [ClaudeModelPromptField; 6] {
     [
         ClaudeModelPromptField {
             label: texts::model_default_label(),
@@ -2877,6 +2891,11 @@ fn claude_model_prompt_fields() -> [ClaudeModelPromptField; 5] {
             label: texts::model_opus_label(),
             env_key: "ANTHROPIC_DEFAULT_OPUS_MODEL",
             placeholder: texts::model_opus_placeholder(),
+        },
+        ClaudeModelPromptField {
+            label: texts::model_fable_label(),
+            env_key: "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            placeholder: texts::model_fable_placeholder(),
         },
     ]
 }

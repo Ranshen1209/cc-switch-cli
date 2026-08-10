@@ -120,6 +120,7 @@ fn provider_add_form_codex_oauth_template_matches_upstream_contract() {
     );
     assert_eq!(form.claude_model.value, "gpt-5.4");
     assert_eq!(form.claude_haiku_model.value, "gpt-5.4-mini");
+    assert_eq!(form.claude_fable_model.value, "gpt-5.4");
     assert!(!form.codex_fast_mode);
     assert!(form.claude_hide_attribution);
 
@@ -940,6 +941,140 @@ fn provider_add_form_claude_from_provider_backfills_models_with_legacy_fallback(
 }
 
 #[test]
+fn provider_add_form_claude_one_m_uses_model_suffix_for_sonnet_opus_and_fable() {
+    let provider = Provider::with_id(
+        "p1".to_string(),
+        "Provider One".to_string(),
+        json!({
+            "env": {
+                "ANTHROPIC_REASONING_MODEL": "model-reasoning [1m]",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "model-haiku[1M]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "model-sonnet [1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "model-opus[1M]",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "model-fable [1m]",
+            }
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::Claude, &provider);
+    assert_eq!(form.claude_reasoning_model.value, "model-reasoning");
+    assert_eq!(form.claude_haiku_model.value, "model-haiku");
+    assert_eq!(form.claude_sonnet_model.value, "model-sonnet");
+    assert_eq!(form.claude_opus_model.value, "model-opus");
+    assert_eq!(form.claude_fable_model.value, "model-fable");
+    assert_eq!(form.claude_model_row_count(), 5);
+    assert!(!form.claude_model_supports_one_m(0));
+    assert!(!form.claude_model_supports_one_m(1));
+    assert!(form.claude_model_one_m_enabled(2));
+    assert!(form.claude_model_one_m_enabled(3));
+    assert!(form.claude_model_one_m_enabled(4));
+
+    form.mark_claude_model_config_touched();
+    let saved = form.to_provider_json_value();
+    let env = saved["settingsConfig"]["env"]
+        .as_object()
+        .expect("settingsConfig.env should be object");
+    assert_eq!(env["ANTHROPIC_REASONING_MODEL"], "model-reasoning");
+    assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "model-haiku");
+    assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "model-sonnet[1M]");
+    assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "model-opus[1M]");
+    assert_eq!(env["ANTHROPIC_DEFAULT_FABLE_MODEL"], "model-fable[1M]");
+}
+
+#[test]
+fn provider_add_form_claude_desktop_one_m_matches_claude_suffix_state() {
+    let mut form = ProviderAddFormState::new(AppType::ClaudeDesktop);
+    form.id.set("desktop");
+    form.name.set("Desktop Provider");
+    form.claude_base_url.set("https://gateway.example.com");
+    form.claude_api_key.set("test-token");
+    form.set_claude_model_from_config(0, "claude-haiku-4-5-20251001[1M]");
+    form.set_claude_model_from_config(1, "claude-sonnet-5 [1m]");
+    form.set_claude_model_from_config(2, "claude-opus-4-8");
+    form.set_claude_model_from_config(3, "claude-fable-5[1M]");
+
+    assert_eq!(form.claude_haiku_model.value, "claude-haiku-4-5-20251001");
+    assert_eq!(form.claude_fable_model.value, "claude-fable-5");
+    assert!(!form.claude_model_one_m_enabled(0));
+    assert!(form.claude_model_one_m_enabled(1));
+    assert!(!form.claude_model_one_m_enabled(2));
+    assert!(form.claude_model_one_m_enabled(3));
+    assert!(form.toggle_claude_model_one_m(2));
+    assert!(!form.toggle_claude_model_one_m(0));
+
+    form.mark_claude_model_config_touched();
+    let saved = form.to_provider_json_value();
+    let env = saved["settingsConfig"]["env"]
+        .as_object()
+        .expect("settingsConfig.env should be object");
+    assert_eq!(
+        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        "claude-haiku-4-5-20251001"
+    );
+    assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5[1M]");
+    assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-4-8[1M]");
+    assert_eq!(env["ANTHROPIC_DEFAULT_FABLE_MODEL"], "claude-fable-5[1M]");
+    assert!(saved["meta"].get("claudeDesktopModelRoutes").is_none());
+
+    let provider: Provider =
+        serde_json::from_value(saved).expect("serialized form should be a provider");
+    crate::claude_desktop_config::validate_provider(&provider)
+        .expect("Desktop form output should pass direct validation");
+}
+
+#[test]
+fn provider_add_form_claude_desktop_preserves_routes_but_drops_legacy_one_m_metadata() {
+    let provider: Provider = serde_json::from_value(json!({
+        "id": "desktop",
+        "name": "Desktop Provider",
+        "settingsConfig": {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://gateway.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "test-token",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5"
+            }
+        },
+        "meta": {
+            "claudeDesktopMode": "direct",
+            "claudeDesktopModelRoutes": {
+                "claude-sonnet-5": {
+                    "model": "claude-sonnet-5",
+                    "labelOverride": "Fast Sonnet",
+                    "supports1m": true
+                },
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": {
+                    "model": "claude-sonnet-5",
+                    "supports1m": true
+                }
+            }
+        }
+    }))
+    .expect("provider should deserialize");
+
+    let form = ProviderAddFormState::from_provider(AppType::ClaudeDesktop, &provider);
+    assert!(!form.claude_model_one_m_enabled(1));
+    let saved = form.to_provider_json_value();
+    assert_eq!(
+        saved["settingsConfig"]["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"],
+        "claude-sonnet-5"
+    );
+    let routes = saved["meta"]["claudeDesktopModelRoutes"]
+        .as_object()
+        .expect("canonical Desktop routes should be preserved");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes["claude-sonnet-5"]["model"], "claude-sonnet-5");
+    assert_eq!(routes["claude-sonnet-5"]["labelOverride"], "Fast Sonnet");
+    assert!(routes["claude-sonnet-5"].get("supports1m").is_none());
+    assert!(!routes.contains_key("ANTHROPIC_DEFAULT_SONNET_MODEL"));
+
+    let saved_provider: Provider =
+        serde_json::from_value(saved).expect("saved form should remain a valid provider");
+    crate::claude_desktop_config::validate_provider(&saved_provider)
+        .expect("cleaned Desktop form should pass direct validation");
+}
+
+#[test]
 fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
     let mut form = ProviderAddFormState::new(AppType::Claude);
     form.id.set("p1");
@@ -957,6 +1092,7 @@ fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
     form.claude_haiku_model.set("model-haiku");
     form.claude_sonnet_model.set("model-sonnet");
     form.claude_opus_model.set("model-opus");
+    form.claude_fable_model.set("model-fable");
     form.mark_claude_model_config_touched();
 
     let provider = form.to_provider_json_value();
@@ -987,6 +1123,11 @@ fn provider_add_form_claude_writes_new_model_keys_and_removes_small_fast() {
             .and_then(|value| value.as_str()),
         Some("model-opus")
     );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(|value| value.as_str()),
+        Some("model-fable")
+    );
     assert!(env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none());
     assert_eq!(env.get("FOO").and_then(|value| value.as_str()), Some("bar"));
 }
@@ -1004,6 +1145,7 @@ fn provider_add_form_claude_empty_model_fields_remove_env_keys() {
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": "old-haiku",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "old-sonnet",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "old-opus",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "old-fable",
                 "ANTHROPIC_SMALL_FAST_MODEL": "old-small-fast",
             }
         }
@@ -1019,6 +1161,7 @@ fn provider_add_form_claude_empty_model_fields_remove_env_keys() {
     assert!(env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
     assert!(env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none());
     assert!(env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none());
+    assert!(env.get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none());
     assert!(env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none());
 }
 
@@ -1033,6 +1176,7 @@ fn provider_add_form_claude_untouched_model_popup_keeps_model_keys() {
                 "ANTHROPIC_BASE_URL": "https://claude.example",
                 "ANTHROPIC_MODEL": "model-main",
                 "ANTHROPIC_SMALL_FAST_MODEL": "model-small-fast",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL": "model-fable[1M]",
             }
         }),
         None,
@@ -1068,6 +1212,11 @@ fn provider_add_form_claude_untouched_model_popup_keeps_model_keys() {
         env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
             .and_then(|value| value.as_str()),
         None
+    );
+    assert_eq!(
+        env.get("ANTHROPIC_DEFAULT_FABLE_MODEL")
+            .and_then(|value| value.as_str()),
+        Some("model-fable[1M]")
     );
 }
 

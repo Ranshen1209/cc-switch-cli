@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,12 @@ pub const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
 const CURRENT_OPUS_ROUTE_ID: &str = "claude-opus-4-8";
 const LEGACY_OPUS_ROUTE_ID: &str = "claude-opus-4-7";
+const DIRECT_MODEL_ENV_KEYS: [(&str, bool); 4] = [
+    ("ANTHROPIC_DEFAULT_HAIKU_MODEL", false),
+    ("ANTHROPIC_DEFAULT_SONNET_MODEL", true),
+    ("ANTHROPIC_DEFAULT_OPUS_MODEL", true),
+    ("ANTHROPIC_DEFAULT_FABLE_MODEL", true),
+];
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -507,65 +514,109 @@ pub fn validate_provider(provider: &Provider) -> Result<(), AppError> {
 }
 
 fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceModelSpec>, AppError> {
-    let Some(routes) = provider
+    let mut result = Vec::new();
+    if let Some(routes) = provider
         .meta
         .as_ref()
         .map(|meta| &meta.claude_desktop_model_routes)
-    else {
-        return Ok(Vec::new());
-    };
-
-    let mut result = Vec::new();
-    for (route_id, route) in routes {
-        let supports_1m = route.supports_1m.unwrap_or(false);
-        let route_id = route_id.trim();
-        if route_id.is_empty() {
-            continue;
+    {
+        for (route_id, route) in routes {
+            let route_id = route_id.trim();
+            if route_id.is_empty() {
+                continue;
+            }
+            // v5.10.3/5.10.4 briefly wrote role env keys as route IDs. They do
+            // not carry model capability state anymore; the env value below is
+            // the single source of truth for Direct mode.
+            if DIRECT_MODEL_ENV_KEYS
+                .iter()
+                .any(|(env_key, _)| route_id == *env_key)
+            {
+                continue;
+            }
+            validate_direct_model_id(route_id)?;
+            let upstream_model = route.model.trim();
+            if !upstream_model.is_empty() && upstream_model != route_id {
+                return Err(AppError::localized(
+                    "claude_desktop.provider.direct_mapping_unsupported",
+                    format!(
+                        "Claude Desktop 直连模式不能映射模型: {route_id} -> {upstream_model}；非 Claude 官方模型请使用本地路由模式"
+                    ),
+                    format!(
+                        "Claude Desktop direct mode cannot map models: {route_id} -> {upstream_model}; use proxy mode for non-Claude official models"
+                    ),
+                ));
+            }
+            result.push(InferenceModelSpec {
+                name: route_id.to_string(),
+                label_override: route
+                    .label_override
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                // Direct mode shares Claude CLI's `[1M]` marker state, so the
+                // legacy Direct route flag is deliberately ignored here.
+                supports_1m: false,
+            });
         }
-        if !is_claude_safe_model_id(route_id) {
-            return Err(AppError::localized(
-                "claude_desktop.provider.route_invalid",
-                format!(
-                    "Claude Desktop 直连模型必须使用 claude-* 或 anthropic/claude-* 名称: {route_id}"
-                ),
-                format!(
-                    "Claude Desktop direct model must use a claude-* or anthropic/claude-* name: {route_id}"
-                ),
-            ));
-        }
-        let upstream_model = route.model.trim();
-        if !upstream_model.is_empty() && upstream_model != route_id {
-            return Err(AppError::localized(
-                "claude_desktop.provider.direct_mapping_unsupported",
-                format!(
-                    "Claude Desktop 直连模式不能映射模型: {route_id} -> {upstream_model}；非 Claude 官方模型请使用本地路由模式"
-                ),
-                format!(
-                    "Claude Desktop direct mode cannot map models: {route_id} -> {upstream_model}; use proxy mode for non-Claude official models"
-                ),
-            ));
-        }
-        result.push(InferenceModelSpec {
-            name: route_id.to_string(),
-            label_override: route
-                .label_override
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            supports_1m,
-        });
     }
 
-    // Sort supports_1m=true first within each name so the subsequent dedup_by
-    // (which keeps the first occurrence) preserves the 1M-capable variant.
-    result.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| b.supports_1m.cmp(&a.supports_1m))
-    });
-    result.dedup_by(|a, b| a.name == b.name);
-    Ok(result)
+    if let Some(env) = provider
+        .settings_config
+        .get("env")
+        .and_then(Value::as_object)
+    {
+        for (env_key, supports_one_m_marker) in DIRECT_MODEL_ENV_KEYS {
+            let Some(raw_model) = env.get(env_key).and_then(Value::as_str).map(str::trim) else {
+                continue;
+            };
+            if raw_model.is_empty() {
+                continue;
+            }
+            let model = if supports_one_m_marker {
+                strip_one_m_suffix_for_route_lookup(raw_model)
+            } else {
+                raw_model
+            };
+            let supports_1m = supports_one_m_marker && model != raw_model;
+            validate_direct_model_id(model)?;
+            result.push(InferenceModelSpec {
+                name: model.to_string(),
+                label_override: None,
+                supports_1m,
+            });
+        }
+    }
+
+    let mut merged = BTreeMap::<String, InferenceModelSpec>::new();
+    for spec in result {
+        let entry = merged
+            .entry(spec.name.clone())
+            .or_insert_with(|| InferenceModelSpec {
+                name: spec.name,
+                label_override: None,
+                supports_1m: false,
+            });
+        entry.supports_1m |= spec.supports_1m;
+        if entry.label_override.is_none() {
+            entry.label_override = spec.label_override;
+        }
+    }
+    Ok(merged.into_values().collect())
+}
+
+fn validate_direct_model_id(model: &str) -> Result<(), AppError> {
+    if is_claude_safe_model_id(model) {
+        return Ok(());
+    }
+    Err(AppError::localized(
+        "claude_desktop.provider.route_invalid",
+        format!("Claude Desktop 直连模型必须使用 claude-* 或 anthropic/claude-* 名称: {model}"),
+        format!(
+            "Claude Desktop direct model must use a claude-* or anthropic/claude-* name: {model}"
+        ),
+    ))
 }
 
 pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>, AppError> {
@@ -1531,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_desktop_direct_can_write_optional_safe_model_ids() {
+    fn claude_desktop_direct_ignores_route_one_m_metadata() {
         let temp = TempDir::new().expect("tempdir");
         let paths = test_paths(temp.path());
         let provider = direct_provider_with_models("direct-models");
@@ -1544,9 +1595,121 @@ mod tests {
             profile["inferenceGatewayBaseUrl"],
             json!("https://gateway.example.com")
         );
+        assert_eq!(profile["inferenceModels"], json!(["claude-sonnet-4-6"]));
+    }
+
+    #[test]
+    fn claude_desktop_direct_skips_legacy_env_key_routes() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider("direct-legacy-env-route");
+        provider
+            .settings_config
+            .get_mut("env")
+            .and_then(Value::as_object_mut)
+            .expect("provider env")
+            .insert(
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                json!("claude-sonnet-5"),
+            );
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Direct),
+            claude_desktop_model_routes: std::collections::HashMap::from([(
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                ClaudeDesktopModelRoute {
+                    model: "claude-sonnet-5".to_string(),
+                    label_override: None,
+                    supports_1m: Some(true),
+                },
+            )]),
+            ..Default::default()
+        });
+        let db = test_db();
+
+        validate_provider(&provider).expect("known legacy route key should be ignored");
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(profile["inferenceModels"], json!(["claude-sonnet-5"]));
+    }
+
+    #[test]
+    fn claude_desktop_direct_merges_route_label_with_suffix_one_m_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider_with_models("direct-labeled-suffix-model");
+        let route = provider
+            .meta
+            .as_mut()
+            .expect("provider meta")
+            .claude_desktop_model_routes
+            .get_mut("claude-sonnet-4-6")
+            .expect("Sonnet route");
+        route.label_override = Some("Fast Sonnet".to_string());
+        route.supports_1m = Some(false);
+        provider
+            .settings_config
+            .get_mut("env")
+            .and_then(Value::as_object_mut)
+            .expect("provider env")
+            .insert(
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                json!("claude-sonnet-4-6[1M]"),
+            );
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
         assert_eq!(
             profile["inferenceModels"],
-            json!([{ "name": "claude-sonnet-4-6", "supports1m": true }])
+            json!([{
+                "name": "claude-sonnet-4-6",
+                "labelOverride": "Fast Sonnet",
+                "supports1m": true
+            }])
+        );
+    }
+
+    #[test]
+    fn claude_desktop_direct_reads_one_m_from_model_suffix() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = test_paths(temp.path());
+        let mut provider = direct_provider("direct-suffix-models");
+        let env = provider
+            .settings_config
+            .get_mut("env")
+            .and_then(Value::as_object_mut)
+            .expect("provider env");
+        env.insert(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            json!("claude-haiku-4-5-20251001"),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+            json!("claude-sonnet-5 [1m]"),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(),
+            json!("claude-opus-4-8[1M]"),
+        );
+        env.insert(
+            "ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(),
+            json!("claude-fable-5[1M]"),
+        );
+        let db = test_db();
+
+        apply_provider_to_paths(&db, &provider, &paths).expect("apply provider");
+
+        let profile: Value = read_json_file(&paths.profile_path).expect("read profile");
+        assert_eq!(
+            profile["inferenceModels"],
+            json!([
+                { "name": "claude-fable-5", "supports1m": true },
+                "claude-haiku-4-5-20251001",
+                { "name": "claude-opus-4-8", "supports1m": true },
+                { "name": "claude-sonnet-5", "supports1m": true }
+            ])
         );
     }
 
