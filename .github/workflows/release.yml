@@ -261,6 +261,10 @@ jobs:
           mkdir -p release-assets
           VERSION="${RELEASE_VERSION}"
 
+          # actions/upload-artifact/download-artifact does not preserve Unix mode
+          # bits. Restore executability before archiving the downloaded binaries.
+          find artifacts -type f -name cc-switch -exec chmod 0755 {} +
+
           # macOS Universal
           if [ -f "artifacts/cc-switch-cli-darwin-universal/cc-switch" ]; then
             tar -czf release-assets/cc-switch-cli-${VERSION}-darwin-universal.tar.gz \
