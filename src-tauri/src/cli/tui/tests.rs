@@ -2054,6 +2054,44 @@ fn proxy_snapshot_result_updates_proxy_without_cache_invalidation() {
 }
 
 #[test]
+fn managed_proxy_result_updates_only_proxy_without_cache_invalidation() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    data.providers.current_id = "keep-me".to_string();
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+
+    let invalidation = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ManagedSessionFinished {
+            request_id: 1,
+            app_type: AppType::Claude,
+            enabled: true,
+            result: Ok(Box::new(data::ProxySnapshot {
+                running: true,
+                estimated_input_tokens_total: 12,
+                estimated_output_tokens_total: 34,
+                ..data::ProxySnapshot::default()
+            })),
+        },
+    )
+    .expect("managed proxy result should be handled");
+
+    assert_eq!(invalidation, CacheInvalidation::None);
+    assert!(data.proxy.running);
+    assert_eq!(data.providers.current_id, "keep-me");
+    assert_eq!(app.proxy_activity_last_input_tokens, Some(12));
+    assert_eq!(app.proxy_activity_last_output_tokens, Some(34));
+    assert_eq!(proxy_loading.active, None);
+}
+
+#[test]
 fn proxy_snapshot_result_ignores_stale_or_wrong_app() {
     let mut app = App::new(Some(AppType::Claude));
     let mut data = UiData::default();

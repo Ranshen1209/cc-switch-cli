@@ -792,7 +792,6 @@ pub(crate) fn handle_proxy_msg(
     proxy_snapshot_refresh: &mut RequestTracker,
     msg: ProxyMsg,
 ) -> Result<CacheInvalidation, AppError> {
-    let mut invalidation = CacheInvalidation::None;
     match msg {
         ProxyMsg::ManagedSessionFinished {
             request_id,
@@ -815,14 +814,15 @@ pub(crate) fn handle_proxy_msg(
             }
 
             match result {
-                Ok(()) => {
-                    *data = UiData::load(&app.app_type)?;
+                Ok(proxy) => {
                     proxy_snapshot_refresh.cancel();
-                    invalidation = CacheInvalidation::DataReloaded;
-                    app.reset_proxy_activity(
-                        data.proxy.estimated_input_tokens_total,
-                        data.proxy.estimated_output_tokens_total,
-                    );
+                    if app.app_type == app_type {
+                        data.proxy = *proxy;
+                        app.reset_proxy_activity(
+                            data.proxy.estimated_input_tokens_total,
+                            data.proxy.estimated_output_tokens_total,
+                        );
+                    }
                     app.push_toast(
                         texts::tui_toast_proxy_managed_current_app_updated(
                             app_display_name(&app_type),
@@ -863,7 +863,7 @@ pub(crate) fn handle_proxy_msg(
         }
     }
 
-    Ok(invalidation)
+    Ok(CacheInvalidation::None)
 }
 
 #[allow(dead_code)]

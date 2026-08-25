@@ -91,11 +91,16 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
                 enabled,
             } => {
                 let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
-                    rt.block_on(
+                    rt.block_on(async {
                         state
                             .proxy_service
-                            .set_managed_session_for_app(app_type.as_str(), enabled),
-                    )
+                            .set_managed_session_for_app(app_type.as_str(), enabled)
+                            .await?;
+                        load_proxy_snapshot_from_state_async(&state, &app_type)
+                            .await
+                            .map(Box::new)
+                            .map_err(|error| error.to_string())
+                    })
                 });
 
                 let _ = tx.send(ProxyMsg::ManagedSessionFinished {

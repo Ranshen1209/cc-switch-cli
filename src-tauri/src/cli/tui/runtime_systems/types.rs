@@ -416,7 +416,7 @@ pub(crate) enum ProxyMsg {
         request_id: u64,
         app_type: AppType,
         enabled: bool,
-        result: Result<(), String>,
+        result: Result<Box<ProxySnapshot>, String>,
     },
     SnapshotRefreshed {
         request_id: u64,
