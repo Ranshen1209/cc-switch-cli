@@ -1912,6 +1912,63 @@ fn managed_proxy_action_enqueues_background_request_and_shows_loading_overlay() 
 }
 
 #[test]
+fn provider_switch_result_replaces_targeted_snapshots_and_finishes_loading() {
+    let mut app = App::new(Some(AppType::Claude));
+    app.overlay = Overlay::Loading {
+        kind: LoadingKind::ProviderSwitch,
+        title: "Switching provider".to_string(),
+        message: "Loading".to_string(),
+    };
+    let mut data = UiData::default();
+    data.config.common_snippet = "preserve-me".to_string();
+    let mut proxy_loading = RequestTracker {
+        seq: 1,
+        active: Some(1),
+    };
+    let mut proxy_snapshot_refresh = RequestTracker::default();
+    let provider = crate::provider::Provider::with_id(
+        "p2".to_string(),
+        "Provider 2".to_string(),
+        json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com"}}),
+        None,
+    );
+
+    let invalidation = handle_proxy_msg(
+        &mut app,
+        &mut data,
+        &mut proxy_loading,
+        &mut proxy_snapshot_refresh,
+        ProxyMsg::ProviderSwitched {
+            request_id: 1,
+            app_type: AppType::Claude,
+            provider: Box::new(provider),
+            result: Ok(Box::new(runtime_systems::ProviderSwitchResult {
+                providers: data::ProvidersSnapshot {
+                    current_id: "p2".to_string(),
+                    ..data::ProvidersSnapshot::default()
+                },
+                proxy: Box::new(data::ProxySnapshot {
+                    running: true,
+                    ..data::ProxySnapshot::default()
+                }),
+                plugin_sync_error: None,
+            })),
+        },
+    )
+    .expect("switch result should be handled");
+
+    assert_eq!(invalidation, CacheInvalidation::CurrentAppDataChanged);
+    assert_eq!(proxy_loading.active, None);
+    assert_eq!(data.providers.current_id, "p2");
+    assert!(data.proxy.running);
+    assert_eq!(
+        data.config.common_snippet, "preserve-me",
+        "unrelated page data should be preserved"
+    );
+    assert!(matches!(app.overlay, Overlay::None));
+}
+
+#[test]
 fn proxy_snapshot_refresh_enqueues_single_background_request() {
     let mut tracker = RequestTracker::default();
     let (tx, rx) = mpsc::channel();

@@ -15,13 +15,23 @@ pub struct AppState {
 impl AppState {
     /// 创建新的应用状态
     pub fn try_new() -> Result<Self, AppError> {
+        Self::try_new_with_database_initializer(Database::init)
+    }
+
+    pub(crate) fn try_new_for_runtime() -> Result<Self, AppError> {
+        Self::try_new_with_database_initializer(Database::init_for_runtime)
+    }
+
+    fn try_new_with_database_initializer(
+        init_database: fn() -> Result<Database, AppError>,
+    ) -> Result<Self, AppError> {
         let app_config_dir = crate::config::get_app_config_dir();
         let db_path = app_config_dir.join("cc-switch.db");
         let config_path = app_config_dir.join("config.json");
         let skills_path = app_config_dir.join("skills.json");
 
         if db_path.exists() {
-            let db = Arc::new(Database::init()?);
+            let db = Arc::new(init_database()?);
             let mut config = export_db_to_multi_app_config(&db)?;
             migrate_legacy_codex_configs(&db, &mut config);
             crate::services::provider::ProviderService::migrate_common_config_upstream_semantics_if_needed(
@@ -45,7 +55,7 @@ impl AppState {
         };
 
         // Now create the database and migrate.
-        let db = Arc::new(Database::init()?);
+        let db = Arc::new(init_database()?);
 
         if let Some(config) = legacy_config {
             db.migrate_from_json(&config)?;

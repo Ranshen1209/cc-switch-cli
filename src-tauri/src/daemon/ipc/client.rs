@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use super::protocol::{encode_request, Request, Response};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const READ_TIMEOUT: Duration = Duration::from_secs(15);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const READ_TIMEOUT: Duration = Duration::from_secs(40);
 
 #[derive(Debug)]
 pub enum ClientError {

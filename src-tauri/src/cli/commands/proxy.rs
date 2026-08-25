@@ -70,6 +70,10 @@ pub fn execute(cmd: ProxyCommand, app: Option<AppType>) -> Result<(), AppError> 
 }
 
 fn get_state() -> Result<AppState, AppError> {
+    #[cfg(unix)]
+    if std::env::var_os(DAEMON_SOCKET_ENV).is_some() {
+        return AppState::try_new_for_runtime();
+    }
     AppState::try_new()
 }
 

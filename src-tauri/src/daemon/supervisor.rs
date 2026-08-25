@@ -37,7 +37,7 @@ pub const RESTORE_GUARD_BYPASS_ENV: &str = "CC_SWITCH_RESTORE_GUARD_BYPASS";
 pub const RUNTIME_KIND_ENV: &str = "CC_SWITCH_PROXY_RUNTIME_KIND";
 pub const RUNTIME_KIND_MANAGED_EXTERNAL: &str = "managed_external";
 
-const WORKER_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKER_HELLO_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct WorkerInfo {
@@ -95,8 +95,8 @@ pub struct Supervisor {
     /// Serializes worker spawn so concurrent EnsureWorker IPCs share the same
     /// pending hello rather than racing — a second caller used to overwrite
     /// `pending_hello` and `pending_token`, leaving the first caller waiting
-    /// the full 10 s `WORKER_HELLO_TIMEOUT` and then surfacing as
-    /// "Resource temporarily unavailable (os error 35)" once the client's 15 s
+    /// the full `WORKER_HELLO_TIMEOUT` and then surfacing as
+    /// "Resource temporarily unavailable (os error 35)" once the client's
     /// IPC read timeout expired.
     spawn_lock: Arc<Mutex<()>>,
     socket_path: PathBuf,

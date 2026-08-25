@@ -671,7 +671,7 @@ fn schema_create_tables_include_usage_daily_rollups() {
 
 #[test]
 #[serial_test::serial]
-fn init_runs_startup_usage_rollup() {
+fn init_defers_usage_rollup_until_explicit_maintenance() {
     let _lock = crate::test_support::lock_test_home_and_settings();
     let temp = tempfile::tempdir().expect("create temp dir");
     let _guard = ConfigDirEnvGuard::set(temp.path());
@@ -735,7 +735,24 @@ fn init_runs_startup_usage_rollup() {
         .expect("seed old zero-cost usage log");
     }
 
-    let db = Database::init().expect("reinit db");
+    let db = Database::init().expect("reinit db without synchronous maintenance");
+    {
+        let conn = db.conn.lock().expect("lock db before maintenance");
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = 'startup-rollup-old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count old request log before maintenance");
+        assert_eq!(
+            remaining, 1,
+            "opening the database must not run usage maintenance synchronously"
+        );
+    }
+    drop(db);
+
+    let db = Database::init_with_usage_maintenance().expect("run explicit usage maintenance");
     let conn = db.conn.lock().expect("lock db");
     let remaining: i64 = conn
         .query_row(
@@ -746,7 +763,7 @@ fn init_runs_startup_usage_rollup() {
         .expect("count old request log");
     assert_eq!(
         remaining, 0,
-        "startup maintenance should prune rolled-up detail logs"
+        "explicit maintenance should prune rolled-up detail logs"
     );
 
     let rollup: (i64, i64, i64, i64, i64, i64, String, i64) = conn
@@ -783,7 +800,7 @@ fn init_runs_startup_usage_rollup() {
         .expect("count old zero-cost request log");
     assert_eq!(
         zero_cost_remaining, 0,
-        "startup maintenance should prune old zero-cost details only after backfill"
+        "explicit maintenance should prune old zero-cost details only after backfill"
     );
 
     let (zero_cost_requests, zero_cost_total): (i64, f64) = conn
@@ -800,7 +817,7 @@ fn init_runs_startup_usage_rollup() {
     assert_eq!(zero_cost_requests, 1);
     assert_eq!(
         zero_cost_total, 5.0,
-        "startup maintenance should backfill costs before rolling up old details"
+        "explicit maintenance should backfill costs before rolling up old details"
     );
 }
 

@@ -98,32 +98,48 @@ fn refresh_provider_data_after_write_with_config(
 }
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    // Upstream parity: provider switch is a clean write; no live-conflict
-    // preview/overlay is surfaced.
-    let state = load_state()?;
-    do_switch(ctx, state, id)
-}
+    #[cfg(test)]
+    if ctx.proxy_req_tx.is_none() {
+        return do_switch_for_test(ctx, load_state()?, id);
+    }
 
-pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    let state = load_state()?;
-    let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
+    let provider = ctx
+        .data
+        .providers
+        .rows
+        .iter()
+        .find(|row| row.id == id)
+        .map(|row| row.provider.clone())
+        .ok_or_else(|| AppError::InvalidInput(format!("Provider not found: {id}")))?;
+    let Some(tx) = ctx.proxy_req_tx else {
+        return Err(AppError::Message(
+            "provider switch worker is unavailable".to_string(),
+        ));
+    };
 
-    refresh_provider_data_after_write(ctx, &state)?;
-    ctx.app.pending_overlay = None;
-    if imported {
-        let toast_message = match ctx.app.app_type {
-            crate::app_config::AppType::Codex => texts::tui_toast_codex_live_config_imported(),
-            _ => texts::tui_toast_provider_live_config_imported(),
-        };
-        ctx.app.push_toast(toast_message, ToastKind::Success);
-    } else {
-        ctx.app
-            .push_toast(texts::tui_toast_no_live_config_imported(), ToastKind::Info);
+    let request_id = ctx.proxy_loading.start();
+    ctx.app.overlay = Overlay::Loading {
+        kind: super::super::app::LoadingKind::ProviderSwitch,
+        title: crate::t!("Switching provider", "切换供应商").to_string(),
+        message: texts::tui_loading().to_string(),
+    };
+    if let Err(error) = tx.send(super::super::runtime_systems::ProxyReq::SwitchProvider {
+        request_id,
+        app_type: ctx.app.app_type.clone(),
+        provider_id: id,
+        provider: Box::new(provider),
+    }) {
+        ctx.proxy_loading.cancel();
+        ctx.app.overlay = Overlay::None;
+        return Err(AppError::Message(format!(
+            "failed to queue provider switch: {error}"
+        )));
     }
     Ok(())
 }
 
-fn do_switch(
+#[cfg(test)]
+fn do_switch_for_test(
     ctx: &mut RuntimeActionContext<'_>,
     state: crate::store::AppState,
     id: String,
@@ -154,10 +170,12 @@ fn do_switch(
         .proxy
         .routes_current_app_through_proxy(&ctx.app.app_type)
         .unwrap_or(false);
-    let proxy_overlay = switched_provider.as_ref().and_then(|provider| {
-        provider_switch_proxy_notice_overlay(&ctx.app.app_type, provider, proxy_ready)
-    });
-    ctx.app.overlay = proxy_overlay.unwrap_or(Overlay::None);
+    ctx.app.overlay = switched_provider
+        .as_ref()
+        .and_then(|provider| {
+            provider_switch_proxy_notice_overlay(&ctx.app.app_type, provider, proxy_ready)
+        })
+        .unwrap_or(Overlay::None);
 
     if ctx.app.app_type.is_additive_mode() {
         ctx.app.push_toast(
@@ -165,11 +183,29 @@ fn do_switch(
             ToastKind::Success,
         );
     }
-
     Ok(())
 }
 
-fn provider_switch_proxy_notice_overlay(
+pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
+    let state = load_state()?;
+    let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
+
+    refresh_provider_data_after_write(ctx, &state)?;
+    ctx.app.pending_overlay = None;
+    if imported {
+        let toast_message = match ctx.app.app_type {
+            crate::app_config::AppType::Codex => texts::tui_toast_codex_live_config_imported(),
+            _ => texts::tui_toast_provider_live_config_imported(),
+        };
+        ctx.app.push_toast(toast_message, ToastKind::Success);
+    } else {
+        ctx.app
+            .push_toast(texts::tui_toast_no_live_config_imported(), ToastKind::Info);
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_switch_proxy_notice_overlay(
     app_type: &crate::app_config::AppType,
     provider: &crate::provider::Provider,
     proxy_ready: bool,
@@ -867,6 +903,74 @@ mod tests {
             app,
             data,
         })
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn provider_switch_queues_worker_without_writing_on_tui_thread() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        claude_test_config("old-provider", "anthropic")
+            .save()
+            .expect("save providers");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::Claude));
+        let mut data = UiData::load(&AppType::Claude).expect("load ui data");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: Some(&tx),
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            session_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+            managed_auth_req_tx: None,
+        };
+
+        switch(&mut ctx, "proxy-provider".to_string()).expect("queue switch");
+
+        assert!(matches!(
+            rx.recv().expect("worker request"),
+            crate::cli::tui::runtime_systems::ProxyReq::SwitchProvider {
+                request_id: 1,
+                app_type: AppType::Claude,
+                provider_id,
+                ..
+            } if provider_id == "proxy-provider"
+        ));
+        assert_eq!(ctx.proxy_loading.active, Some(1));
+        assert!(matches!(
+            ctx.app.overlay,
+            Overlay::Loading {
+                kind: crate::cli::tui::app::LoadingKind::ProviderSwitch,
+                ..
+            }
+        ));
+        assert_eq!(
+            load_state()
+                .expect("reload state")
+                .config
+                .read()
+                .expect("read config")
+                .get_manager(&AppType::Claude)
+                .expect("claude manager")
+                .current,
+            "old-provider",
+            "TUI thread must not perform the switch before the worker runs"
+        );
     }
 
     fn claude_queue_provider(id: &str) -> Provider {

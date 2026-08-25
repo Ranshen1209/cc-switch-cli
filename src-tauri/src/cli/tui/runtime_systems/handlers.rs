@@ -8,7 +8,7 @@ use crate::settings::{
 
 use super::super::app::{App, ConfirmAction, ConfirmOverlay, LoadingKind, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
-use super::super::runtime_actions::app_display_name;
+use super::super::runtime_actions::{app_display_name, provider_switch_proxy_notice_overlay};
 use super::super::CacheInvalidation;
 use super::types::{
     build_stream_check_result_lines, LocalEnvMsg, ManagedAuthMsg, ModelFetchMsg, ProxyMsg,
@@ -793,6 +793,59 @@ pub(crate) fn handle_proxy_msg(
     msg: ProxyMsg,
 ) -> Result<CacheInvalidation, AppError> {
     match msg {
+        ProxyMsg::ProviderSwitched {
+            request_id,
+            app_type,
+            provider,
+            result,
+        } => {
+            if !proxy_loading.finish_if_active(request_id) {
+                return Ok(CacheInvalidation::None);
+            }
+            if matches!(
+                app.overlay,
+                Overlay::Loading {
+                    kind: LoadingKind::ProviderSwitch,
+                    ..
+                }
+            ) {
+                app.overlay = Overlay::None;
+            }
+            if app.app_type != app_type {
+                return Ok(CacheInvalidation::None);
+            }
+
+            match result {
+                Ok(switched) => {
+                    data.providers = switched.providers;
+                    data.proxy = *switched.proxy;
+                    data.mark_current_app_data_changed();
+                    app.clamp_selections(data);
+                    app.pending_overlay = None;
+                    let proxy_ready = data
+                        .proxy
+                        .routes_current_app_through_proxy(&app_type)
+                        .unwrap_or(false);
+                    app.overlay =
+                        provider_switch_proxy_notice_overlay(&app_type, &provider, proxy_ready)
+                            .unwrap_or(Overlay::None);
+                    if let Some(error) = switched.plugin_sync_error {
+                        app.push_toast(
+                            texts::tui_toast_claude_plugin_sync_failed(&error),
+                            ToastKind::Warning,
+                        );
+                    }
+                    if app_type.is_additive_mode() {
+                        app.push_toast(
+                            texts::tui_toast_provider_added_to_app_config(app_type.as_str()),
+                            ToastKind::Success,
+                        );
+                    }
+                }
+                Err(error) => app.push_toast(error, ToastKind::Error),
+            }
+            return Ok(CacheInvalidation::CurrentAppDataChanged);
+        }
         ProxyMsg::ManagedSessionFinished {
             request_id,
             app_type,

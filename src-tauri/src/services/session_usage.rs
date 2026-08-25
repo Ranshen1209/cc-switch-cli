@@ -267,7 +267,18 @@ pub(crate) fn spawn_periodic_session_usage_sync(
     db: Arc<Database>,
     context: &'static str,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_periodic_session_usage_sync_after(db, context, Duration::ZERO)
+}
+
+pub(crate) fn spawn_periodic_session_usage_sync_after(
+    db: Arc<Database>,
+    context: &'static str,
+    initial_delay: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        if !initial_delay.is_zero() {
+            tokio::time::sleep(initial_delay).await;
+        }
         run_session_usage_sync_cycle_on_blocking_thread(db.clone(), format!("{context}-initial"))
             .await;
 

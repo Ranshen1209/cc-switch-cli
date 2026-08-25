@@ -400,6 +400,12 @@ pub(crate) struct SessionUsageSyncSystem {
 
 #[derive(Debug, Clone)]
 pub(crate) enum ProxyReq {
+    SwitchProvider {
+        request_id: u64,
+        app_type: AppType,
+        provider_id: String,
+        provider: Box<Provider>,
+    },
     SetManagedSessionForCurrentApp {
         request_id: u64,
         app_type: AppType,
@@ -412,6 +418,12 @@ pub(crate) enum ProxyReq {
 }
 
 pub(crate) enum ProxyMsg {
+    ProviderSwitched {
+        request_id: u64,
+        app_type: AppType,
+        provider: Box<Provider>,
+        result: Result<Box<ProviderSwitchResult>, String>,
+    },
     ManagedSessionFinished {
         request_id: u64,
         app_type: AppType,
@@ -423,6 +435,12 @@ pub(crate) enum ProxyMsg {
         app_type: AppType,
         result: Result<Box<ProxySnapshot>, String>,
     },
+}
+
+pub(crate) struct ProviderSwitchResult {
+    pub(crate) providers: crate::cli::tui::data::ProvidersSnapshot,
+    pub(crate) proxy: Box<ProxySnapshot>,
+    pub(crate) plugin_sync_error: Option<String>,
 }
 
 pub(crate) struct ProxySystem {

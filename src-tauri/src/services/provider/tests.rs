@@ -22,6 +22,70 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
 }
 
 #[test]
+#[serial]
+fn claude_desktop_switch_ignores_stale_proxy_takeover_backup() {
+    let temp_home = TempDir::new().expect("create temp home");
+    let _env = TestEnvGuard::isolated(temp_home.path());
+
+    let mut config = MultiAppConfig::default();
+    config.ensure_app(&AppType::ClaudeDesktop);
+    let manager = config
+        .get_manager_mut(&AppType::ClaudeDesktop)
+        .expect("claude desktop manager");
+    manager.current = "desktop-custom".to_string();
+    manager.providers.insert(
+        "desktop-custom".to_string(),
+        Provider::with_id(
+            "desktop-custom".to_string(),
+            "Desktop Custom".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://gateway.example.com",
+                    "ANTHROPIC_AUTH_TOKEN": "test-token"
+                }
+            }),
+            None,
+        ),
+    );
+    let mut official = Provider::with_id(
+        crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID.to_string(),
+        "Claude Desktop Official".to_string(),
+        json!({"env": {}}),
+        None,
+    );
+    official.category = Some("official".to_string());
+    manager.providers.insert(official.id.clone(), official);
+
+    let state = state_from_config(config);
+    futures::executor::block_on(
+        state
+            .db
+            .save_live_backup(AppType::ClaudeDesktop.as_str(), "{}"),
+    )
+    .expect("seed stale desktop backup");
+
+    ProviderService::switch(
+        &state,
+        AppType::ClaudeDesktop,
+        crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
+    )
+    .expect("desktop switch should not enter proxy hot-switch flow");
+
+    let current = state
+        .config
+        .read()
+        .expect("read config")
+        .get_manager(&AppType::ClaudeDesktop)
+        .expect("claude desktop manager")
+        .current
+        .clone();
+    assert_eq!(
+        current,
+        crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID
+    );
+}
+
+#[test]
 fn extract_codex_common_config_excludes_profile_model_selection() {
     let extracted = ProviderService::extract_codex_common_config_from_config_toml(
         r#"model_provider = "aihubmix"

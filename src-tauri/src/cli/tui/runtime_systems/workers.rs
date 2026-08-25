@@ -18,12 +18,13 @@ use super::super::data::{
 use super::types::{
     fetch_provider_models_for_tui, model_fetch_strategy_for_field, AppDataLoadKind, AppDataMsg,
     AppDataReq, AppDataSystem, LocalEnvMsg, LocalEnvReq, LocalEnvSystem, ManagedAuthMsg,
-    ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem, ProxyMsg,
-    ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem, SessionMsg, SessionReq, SessionSystem,
-    SessionUsageSyncMsg, SessionUsageSyncReq, SessionUsageSyncSystem, SkillsMsg, SkillsReq,
-    SkillsSystem, SpeedtestMsg, SpeedtestSystem, StreamCheckMsg, StreamCheckReq, StreamCheckSystem,
-    UpdateMsg, UpdateReq, UpdateSystem, UsagePricingMsg, UsagePricingReq, UsagePricingSystem,
-    WebDavDone, WebDavErr, WebDavMsg, WebDavReq, WebDavReqKind, WebDavSystem,
+    ManagedAuthReq, ManagedAuthSystem, ModelFetchMsg, ModelFetchReq, ModelFetchSystem,
+    ProviderSwitchResult, ProxyMsg, ProxyReq, ProxySystem, QuotaMsg, QuotaReq, QuotaSystem,
+    SessionMsg, SessionReq, SessionSystem, SessionUsageSyncMsg, SessionUsageSyncReq,
+    SessionUsageSyncSystem, SkillsMsg, SkillsReq, SkillsSystem, SpeedtestMsg, SpeedtestSystem,
+    StreamCheckMsg, StreamCheckReq, StreamCheckSystem, UpdateMsg, UpdateReq, UpdateSystem,
+    UsagePricingMsg, UsagePricingReq, UsagePricingSystem, WebDavDone, WebDavErr, WebDavMsg,
+    WebDavReq, WebDavReqKind, WebDavSystem,
 };
 
 pub(crate) fn start_proxy_system() -> Result<ProxySystem, AppError> {
@@ -55,6 +56,19 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
             let err = e.to_string();
             while let Ok(req) = rx.recv() {
                 match req {
+                    ProxyReq::SwitchProvider {
+                        request_id,
+                        app_type,
+                        provider,
+                        ..
+                    } => {
+                        let _ = tx.send(ProxyMsg::ProviderSwitched {
+                            request_id,
+                            app_type,
+                            provider,
+                            result: Err(err.clone()),
+                        });
+                    }
                     ProxyReq::SetManagedSessionForCurrentApp {
                         request_id,
                         app_type,
@@ -85,6 +99,49 @@ fn proxy_worker_loop(rx: mpsc::Receiver<ProxyReq>, tx: mpsc::Sender<ProxyMsg>) {
 
     while let Ok(req) = rx.recv() {
         match req {
+            ProxyReq::SwitchProvider {
+                request_id,
+                app_type,
+                provider_id,
+                provider,
+            } => {
+                let result = load_state().map_err(|e| e.to_string()).and_then(|state| {
+                    crate::services::ProviderService::switch(
+                        &state,
+                        app_type.clone(),
+                        &provider_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                    let plugin_sync_error =
+                        crate::claude_plugin::sync_claude_plugin_on_provider_switch(
+                            &app_type,
+                            provider.as_ref(),
+                        )
+                        .err()
+                        .map(|error| error.to_string());
+
+                    state
+                        .reload_config_snapshot_from_db()
+                        .map_err(|e| e.to_string())?;
+                    let mut refreshed = UiData::default();
+                    refreshed
+                        .refresh_current_app_provider_data(&state, &app_type)
+                        .map_err(|e| e.to_string())?;
+                    Ok(Box::new(ProviderSwitchResult {
+                        providers: refreshed.providers,
+                        proxy: Box::new(refreshed.proxy),
+                        plugin_sync_error,
+                    }))
+                });
+
+                let _ = tx.send(ProxyMsg::ProviderSwitched {
+                    request_id,
+                    app_type,
+                    provider,
+                    result,
+                });
+            }
             ProxyReq::SetManagedSessionForCurrentApp {
                 request_id,
                 app_type,

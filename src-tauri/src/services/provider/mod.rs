@@ -1764,7 +1764,7 @@ impl ProviderService {
             } else {
                 false
             };
-        let takeover_active = if app_type.is_additive_mode() {
+        let takeover_active = if !app_type.supports_failover() {
             false
         } else {
             let is_running = state
@@ -2781,19 +2781,23 @@ impl ProviderService {
                 )
             })?;
 
-            let is_app_taken_over =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let running_takeover_active = state
-                .proxy_service
-                .is_app_takeover_active_blocking(&app_type)
-                .map_err(AppError::Message)?;
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            let should_hot_switch = is_app_taken_over || live_taken_over || running_takeover_active;
+            let should_hot_switch = if app_type.supports_failover() {
+                let is_app_taken_over =
+                    futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                        .ok()
+                        .flatten()
+                        .is_some();
+                let running_takeover_active = state
+                    .proxy_service
+                    .is_app_takeover_active_blocking(&app_type)
+                    .map_err(AppError::Message)?;
+                let live_taken_over = state
+                    .proxy_service
+                    .detect_takeover_in_live_config_for_app(&app_type);
+                is_app_taken_over || live_taken_over || running_takeover_active
+            } else {
+                false
+            };
 
             if should_hot_switch {
                 futures::executor::block_on(

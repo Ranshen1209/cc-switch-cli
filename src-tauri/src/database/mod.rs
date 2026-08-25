@@ -448,10 +448,26 @@ impl Database {
         Ok(rebuilt)
     }
 
-    /// 初始化数据库连接并创建表
+    /// 初始化数据库连接并创建表。
     ///
-    /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
+    /// 数据库文件位于 `~/.cc-switch/cc-switch.db`。打开连接必须保持轻量；用量
+    /// 回填、汇总和清理由 daemon/proxy 的周期后台任务负责，不能阻塞 CLI/TUI
+    /// 启动或供应商切换等交互路径。
     pub fn init() -> Result<Self, AppError> {
+        Self::init_with_startup_maintenance(false)
+    }
+
+    /// 兼容已有 runtime 调用点；所有数据库连接现在都不会隐式执行用量维护。
+    pub(crate) fn init_for_runtime() -> Result<Self, AppError> {
+        Self::init()
+    }
+
+    #[cfg(test)]
+    fn init_with_usage_maintenance() -> Result<Self, AppError> {
+        Self::init_with_startup_maintenance(true)
+    }
+
+    fn init_with_startup_maintenance(run_startup_maintenance: bool) -> Result<Self, AppError> {
         if let Err(err) = crate::config::validate_config_dir() {
             log::warn!("拒绝初始化数据库：配置目录校验失败: {err}");
             return Err(err);
@@ -561,7 +577,9 @@ impl Database {
             log::warn!("Failed to ensure incremental auto-vacuum: {err}");
         }
         db.ensure_model_pricing_seeded()?;
-        db.run_usage_maintenance("startup");
+        if run_startup_maintenance {
+            db.run_usage_maintenance("startup");
+        }
 
         Ok(db)
     }

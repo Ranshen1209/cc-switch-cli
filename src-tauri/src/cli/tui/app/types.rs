@@ -716,6 +716,7 @@ pub struct ManagedAuthLoginState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadingKind {
     Generic,
+    ProviderSwitch,
     Proxy,
     WebDav,
     UpdateCheck,

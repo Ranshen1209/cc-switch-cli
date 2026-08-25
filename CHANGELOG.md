@@ -7,6 +7,15 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.10.8] - 2026-08-26
+
+### Fixed
+
+- **TUI / Provider Switching**: Run provider changes and their targeted snapshot refresh on the background worker, so pressing Space no longer blocks the terminal while live configuration is updated.
+- **Startup / Large Databases**: Stop running usage backfill, rollup, and vacuum synchronously whenever SQLite is opened. Maintenance remains scheduled by the daemon and foreground proxy, reducing startup on a representative 304 MB database from 19.40 seconds to 0.63 seconds.
+- **Proxy / Daemon Startup**: Defer the daemon's initial session-history import, avoid repeating startup maintenance in managed workers, and allow enough time for worker registration and IPC responses on large installations.
+- **Claude Desktop / Switching**: Skip proxy takeover checks and snapshot refresh work that Claude Desktop does not support, preventing direct provider switches from waiting on unrelated proxy state.
+
 ## [5.10.7] - 2026-08-25
 
 ### Fixed

@@ -10,6 +10,8 @@ pub(crate) use handlers::{
     handle_stream_check_msg, handle_update_msg, handle_webdav_msg,
 };
 #[cfg(test)]
+pub(crate) use types::ProviderSwitchResult;
+#[cfg(test)]
 pub(crate) use types::{
     build_model_fetch_candidate_urls, model_fetch_strategy_for_field,
     parse_model_ids_from_response, ManagedAuthMsg, ProxyMsg, UpdateMsg,

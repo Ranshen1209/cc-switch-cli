@@ -93,10 +93,16 @@ pub async fn run(binary_path: PathBuf) -> Result<(), String> {
         log_path.display()
     );
 
-    let db =
-        Arc::new(Database::init().map_err(|err| format!("daemon: open database failed: {err}"))?);
+    let db = Arc::new(
+        Database::init_for_runtime()
+            .map_err(|err| format!("daemon: open database failed: {err}"))?,
+    );
     log::info!("[daemon] database={}", db.runtime_key());
-    crate::services::session_usage::spawn_periodic_session_usage_sync(db.clone(), "daemon");
+    crate::services::session_usage::spawn_periodic_session_usage_sync_after(
+        db.clone(),
+        "daemon",
+        std::time::Duration::from_secs(30),
+    );
     Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);
 

@@ -851,7 +851,7 @@ pub struct UiData {
 }
 
 pub(crate) fn load_state() -> Result<AppState, AppError> {
-    AppState::try_new()
+    AppState::try_new_for_runtime()
 }
 
 pub(crate) fn load_snapshot_state() -> Result<AppState, AppError> {

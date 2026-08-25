@@ -1215,6 +1215,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigShowFull
         | Action::ConfigValidate
         | Action::ConfigOpenProxyHelp
+        | Action::ProviderSwitch { .. }
         | Action::ConfirmCommonConfigNotice
         | Action::ConfirmUsageQueryNotice
         | Action::ConfigWebDavCheckConnection
@@ -1241,8 +1242,7 @@ fn cache_invalidation_for_action(action: &Action) -> CacheInvalidation {
         | Action::ConfigWebDavDownload
         | Action::ConfigWebDavMigrateV1ToV2 => CacheInvalidation::AppStateRecreated,
 
-        Action::ProviderSwitch { .. }
-        | Action::ProviderRemoveFromConfig { .. }
+        Action::ProviderRemoveFromConfig { .. }
         | Action::ProviderSetDefaultModel { .. }
         | Action::ProviderImportLiveConfig
         | Action::ProviderDelete { .. }

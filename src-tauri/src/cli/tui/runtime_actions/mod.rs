@@ -31,6 +31,7 @@ pub(crate) use helpers::{
     import_mcp_from_supported_apps_with, open_proxy_help_overlay_with,
     run_external_editor_for_current_editor, run_external_editor_for_prompt_form_content,
 };
+pub(crate) use providers::provider_switch_proxy_notice_overlay;
 
 fn normalize_route_for_app(app_type: &AppType, route: &super::route::Route) -> super::route::Route {
     match app_type {
