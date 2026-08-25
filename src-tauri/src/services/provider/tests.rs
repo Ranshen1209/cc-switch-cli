@@ -23,6 +23,7 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
 
 #[test]
 #[serial]
+#[cfg(any(target_os = "macos", windows))]
 fn claude_desktop_switch_ignores_stale_proxy_takeover_backup() {
     let temp_home = TempDir::new().expect("create temp home");
     let _env = TestEnvGuard::isolated(temp_home.path());
@@ -83,6 +84,11 @@ fn claude_desktop_switch_ignores_stale_proxy_takeover_backup() {
         current,
         crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID
     );
+}
+
+#[test]
+fn claude_desktop_does_not_support_proxy_failover() {
+    assert!(!AppType::ClaudeDesktop.supports_failover());
 }
 
 #[test]
