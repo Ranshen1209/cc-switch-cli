@@ -43,7 +43,7 @@ pub enum CommonConfigCommand {
     },
     /// Set common config snippet for the selected app
     #[command(
-        after_long_help = "Compatibility:\n --json <SNIPPET> Legacy alias for --snippet <SNIPPET>."
+        after_long_help = "Compatibility:\n  --json <SNIPPET>  Legacy alias for --snippet <SNIPPET>."
     )]
     Set {
         /// Inline snippet text (Claude/Gemini/OpenCode: JSON object; Codex: TOML)
@@ -173,6 +173,15 @@ fn read_required_text(
     }
 }
 
+fn ensure_common_config_mutation_supported(app_type: &AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Pi) {
+        return Err(AppError::InvalidInput(
+            "Pi does not support common config snippets".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<String>, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -180,14 +189,13 @@ fn canonical_common_snippet(app_type: AppType, raw: &str) -> Result<Option<Strin
     }
 
     match app_type {
-        AppType::ClaudeDesktop => Err(AppError::InvalidInput(
-            "Claude Desktop does not support common configuration snippets".to_string(),
-        )),
         AppType::Claude
         | AppType::Gemini
         | AppType::OpenCode
         | AppType::Hermes
-        | AppType::OpenClaw => {
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => {
             let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
                 AppError::InvalidInput(texts::tui_toast_invalid_json(&e.to_string()))
             })?;
@@ -232,6 +240,7 @@ fn set(
     file: Option<&Path>,
     _apply: bool,
 ) -> Result<(), AppError> {
+    ensure_common_config_mutation_supported(&app_type)?;
     let raw = read_required_text(
         snippet_text,
         file,
@@ -270,6 +279,9 @@ fn extract(
     file: Option<&Path>,
     save: bool,
 ) -> Result<(), AppError> {
+    if save {
+        ensure_common_config_mutation_supported(&app_type)?;
+    }
     let state = get_state()?;
     let extracted = if settings_config_text.is_some() || file.is_some() {
         let raw = read_required_text(
@@ -319,13 +331,14 @@ fn extract(
 }
 
 fn clear(app_type: AppType, _apply: bool) -> Result<(), AppError> {
+    ensure_common_config_mutation_supported(&app_type)?;
     let state = get_state()?;
     ProviderService::set_common_config_snippet(&state, app_type.clone(), None)?;
 
     println!(
         "{}",
         success(&format!(
-            "OK Common config snippet cleared for app '{}'",
+            "✓ Common config snippet cleared for app '{}'",
             app_type.as_str()
         ))
     );
@@ -356,7 +369,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::codex_config::{get_codex_config_dir, get_codex_config_path};
-    use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
+    use crate::config::{get_claude_settings_path, write_json_file};
     use crate::provider::{Provider, ProviderMeta};
     use crate::services::ProviderService;
     use crate::test_support::TestEnvGuard;
@@ -436,78 +449,19 @@ mod tests {
 
     #[test]
     #[serial]
-    fn set_stores_claude_snippet_without_enabling_provider_live_config() {
-        let (_temp_home, _env) = seed_current_claude_provider();
-
-        set(
+    fn claude_common_mutations_direct_users_to_the_editor_without_writing() {
+        let (_home, _env) = seed_current_claude_provider();
+        let before = std::fs::read(get_claude_settings_path()).unwrap();
+        assert!(set(
             AppType::Claude,
-            Some(r#"{"alwaysThinkingEnabled":false}"#),
+            Some(r#"{"language":"chinese"}"#),
             None,
-            false,
+            true
         )
-        .expect("set should succeed");
-
-        let state = AppState::try_new().expect("reload state");
-        let stored = state
-            .config
-            .read()
-            .expect("read config")
-            .common_config_snippets
-            .claude
-            .clone()
-            .expect("stored claude snippet");
-        let stored_json: serde_json::Value =
-            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
-        assert_eq!(stored_json["alwaysThinkingEnabled"], false);
-
-        let live: serde_json::Value =
-            read_json_file(&get_claude_settings_path()).expect("read live settings");
-        assert!(
-            live.get("alwaysThinkingEnabled").is_none(),
-            "setting a new common snippet must not opt the current provider into common config"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn set_updates_live_config_for_common_config_enabled_claude_provider() {
-        let (_temp_home, _env) =
-            seed_current_claude_provider_with_meta(Some(common_config_meta(true)));
-
-        set(
-            AppType::Claude,
-            Some(r#"{"alwaysThinkingEnabled":false}"#),
-            None,
-            false,
-        )
-        .expect("set should succeed");
-
-        let live: serde_json::Value =
-            read_json_file(&get_claude_settings_path()).expect("read live settings");
-        assert_eq!(live["alwaysThinkingEnabled"], false);
-    }
-
-    #[test]
-    #[serial]
-    fn clear_updates_live_config_even_without_apply_flag() {
-        let (_temp_home, _env) = seed_current_claude_provider();
-        let state = AppState::try_new().expect("reload state");
-
-        ProviderService::set_common_config_snippet(
-            &state,
-            AppType::Claude,
-            Some(r#"{"alwaysThinkingEnabled":false}"#.to_string()),
-        )
-        .expect("seed common snippet");
-
-        clear(AppType::Claude, false).expect("clear should succeed");
-
-        let live: serde_json::Value =
-            read_json_file(&get_claude_settings_path()).expect("read live settings");
-        assert!(
-            live.get("alwaysThinkingEnabled").is_none(),
-            "clearing the common snippet should also clear it from live settings"
-        );
+        .is_err());
+        assert!(clear(AppType::Claude, true).is_err());
+        assert_eq!(std::fs::read(get_claude_settings_path()).unwrap(), before);
+        assert!(show(AppType::Claude).is_ok());
     }
 
     #[test]
@@ -594,65 +548,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn extract_from_settings_config_saves_common_snippet() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = TestEnvGuard::isolated(temp_home.path());
-
-        extract(
-            AppType::Claude,
-            None,
-            Some(
-                r#"{
- "env": {
- "ANTHROPIC_BASE_URL": "https://provider.example",
- "ANTHROPIC_AUTH_TOKEN": "sk-test",
- "CC_SWITCH_SHARED": "1"
- }
- }"#,
-            ),
-            None,
-            true,
-        )
-        .expect("extract should succeed");
-
-        let state = AppState::try_new().expect("reload state");
-        let stored = state
-            .config
-            .read()
-            .expect("read config")
-            .common_config_snippets
-            .claude
-            .clone()
-            .expect("stored claude snippet");
-        let stored_json: serde_json::Value =
-            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
-        assert_eq!(stored_json["env"]["CC_SWITCH_SHARED"], "1");
-        assert!(stored_json["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn extract_from_named_provider_saves_common_snippet() {
-        let (_temp_home, _env) = seed_current_claude_provider();
-
-        extract(AppType::Claude, Some("p1"), None, None, true).expect("extract should succeed");
-
-        let state = AppState::try_new().expect("reload state");
-        let stored = state
-            .config
-            .read()
-            .expect("read config")
-            .common_config_snippets
-            .claude
-            .clone()
-            .expect("stored claude snippet");
-        let stored_json: serde_json::Value =
-            serde_json::from_str(&stored).expect("stored snippet should be valid JSON");
-        assert_eq!(stored_json, json!({}));
-    }
-
-    #[test]
     fn set_rejects_non_object_opencode_common_snippet() {
         let err = set(AppType::OpenCode, Some("[]"), None, false)
             .expect_err("OpenCode common snippet should require a JSON object");
@@ -683,5 +578,20 @@ mod tests {
     #[test]
     fn follow_up_message_is_omitted_for_additive_apps() {
         assert!(follow_up_message(AppType::OpenCode, CommonConfigSnippetAction::Set, "").is_none());
+    }
+
+    #[test]
+    fn pi_common_config_mutations_are_rejected_before_state_access() {
+        for result in [
+            set(AppType::Pi, Some("{}"), None, false),
+            extract(AppType::Pi, None, Some("{}"), None, true),
+            clear(AppType::Pi, false),
+        ] {
+            assert!(matches!(
+                result,
+                Err(AppError::InvalidInput(message))
+                    if message == "Pi does not support common config snippets"
+            ));
+        }
     }
 }

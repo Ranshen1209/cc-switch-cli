@@ -1,0 +1,437 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SponsorProviderPreset {
+    pub(crate) id: &'static str,
+    pub(crate) provider_name: &'static str,
+    pub(crate) chip_label: &'static str,
+    pub(crate) website_url: &'static str,
+    pub(crate) register_url: &'static str,
+    pub(crate) promo_code: &'static str,
+    pub(crate) partner_promotion_key: &'static str,
+    pub(crate) claude_api_key_field: ClaudeApiKeyField,
+    pub(crate) claude_base_url: &'static str,
+    pub(crate) codex_base_url: &'static str,
+    pub(crate) gemini_base_url: &'static str,
+    pub(crate) opencode_base_url: &'static str,
+    pub(crate) openclaw_base_url: &'static str,
+    pub(crate) hermes_base_url: &'static str,
+}
+
+pub(crate) const API88: SponsorProviderPreset = SponsorProviderPreset {
+    id: "88api",
+    provider_name: "88API",
+    chip_label: "* 88API",
+    website_url: "https://88api.ai",
+    register_url: "https://88api.ai/sign-up?aff=TeNl",
+    promo_code: "",
+    partner_promotion_key: "88api",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://api.88api.ai",
+    codex_base_url: "https://api.88api.ai/v1",
+    gemini_base_url: "https://api.88api.ai",
+    opencode_base_url: "https://api.88api.ai/v1",
+    openclaw_base_url: "https://api.88api.ai",
+    hermes_base_url: "https://api.88api.ai",
+};
+
+// Protocol endpoints: https://docs.apimart.ai/cn
+pub(crate) const APIMART: SponsorProviderPreset = SponsorProviderPreset {
+    id: "apimart",
+    provider_name: "APIMart",
+    chip_label: "* APIMart",
+    website_url: "https://apimart.ai",
+    register_url: "https://go.apimart.ai/gh-cc-switch-cli",
+    promo_code: "",
+    partner_promotion_key: "apimart",
+    claude_api_key_field: ClaudeApiKeyField::ApiKey,
+    claude_base_url: "https://api.apimart.ai",
+    codex_base_url: "https://api.apimart.ai/v1",
+    gemini_base_url: "https://api.apimart.ai",
+    opencode_base_url: "https://api.apimart.ai/v1",
+    openclaw_base_url: "https://api.apimart.ai/v1",
+    hermes_base_url: "https://api.apimart.ai/v1",
+};
+
+pub(crate) const CLAUDE_API: SponsorProviderPreset = SponsorProviderPreset {
+    id: "claudeapi",
+    provider_name: "ClaudeAPI",
+    chip_label: "* ClaudeAPI",
+    website_url: "https://www.apito.ai",
+    register_url: "https://console.apito.ai/agent/register/Bsi9NDlWGpkPoAii",
+    promo_code: "",
+    partner_promotion_key: "claudeapi",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://gw.apito.ai",
+    codex_base_url: "",
+    gemini_base_url: "",
+    opencode_base_url: "",
+    openclaw_base_url: "",
+    hermes_base_url: "",
+};
+
+pub(crate) const PACKY_CODE: SponsorProviderPreset = SponsorProviderPreset {
+    id: "packycode",
+    provider_name: "PackyCode",
+    chip_label: "* PackyCode",
+    website_url: "https://www.packyapi.com",
+    register_url: "https://www.packyapi.com/register?aff=cc-switch-cli",
+    promo_code: "cc-switch-cli",
+    partner_promotion_key: "packycode",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://www.packyapi.ai",
+    codex_base_url: "https://www.packyapi.ai/v1",
+    gemini_base_url: "https://www.packyapi.ai",
+    opencode_base_url: "https://www.packyapi.ai/v1",
+    openclaw_base_url: "https://www.packyapi.ai",
+    hermes_base_url: "https://www.packyapi.ai",
+};
+
+pub(crate) const CUBENCE: SponsorProviderPreset = SponsorProviderPreset {
+    id: "cubence",
+    provider_name: "Cubence",
+    chip_label: "* Cubence",
+    website_url: "https://cubence.com",
+    register_url: "https://cubence.com/signup?code=SC3M1CAH&source=ccscli",
+    promo_code: "CCSCLI",
+    partner_promotion_key: "cubence",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://api.cubence.com",
+    codex_base_url: "https://api.cubence.com/v1",
+    gemini_base_url: "https://api.cubence.com",
+    opencode_base_url: "https://api.cubence.com/v1",
+    openclaw_base_url: "https://api.cubence.com",
+    hermes_base_url: "https://api.cubence.com",
+};
+
+pub(crate) const OPENMODEL: SponsorProviderPreset = SponsorProviderPreset {
+    id: "openmodel",
+    provider_name: "OpenModel",
+    chip_label: "* OpenModel",
+    website_url: "https://www.openmodel.ai/?ref=JGDNqZl8",
+    register_url: "https://www.openmodel.ai/?ref=JGDNqZl8",
+    promo_code: "",
+    partner_promotion_key: "openmodel",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://api.openmodel.ai",
+    codex_base_url: "https://api.openmodel.ai/v1",
+    gemini_base_url: "https://api.openmodel.ai",
+    opencode_base_url: "https://api.openmodel.ai/v1",
+    openclaw_base_url: "https://api.openmodel.ai",
+    hermes_base_url: "https://api.openmodel.ai",
+};
+
+pub(crate) const RUN_API: SponsorProviderPreset = SponsorProviderPreset {
+    id: "runapi",
+    provider_name: "RunAPI",
+    chip_label: "* RunAPI",
+    website_url: "https://runapi.co",
+    register_url: "https://runapi.co/register?aff=kTlB",
+    promo_code: "",
+    partner_promotion_key: "runapi",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://runapi.co",
+    codex_base_url: "https://runapi.co/v1",
+    gemini_base_url: "",
+    opencode_base_url: "https://runapi.co",
+    openclaw_base_url: "https://runapi.co",
+    hermes_base_url: "https://runapi.co",
+};
+
+pub(crate) const AI_CODE_MIRROR: SponsorProviderPreset = SponsorProviderPreset {
+    id: "aicodemirror",
+    provider_name: "AICodeMirror",
+    chip_label: "* AICodeMirror",
+    website_url: "https://www.aicodemirror.ai",
+    register_url: "https://www.aicodemirror.ai/register?invitecode=77V9EA",
+    promo_code: "",
+    partner_promotion_key: "aicodemirror",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://api.aicodemirror.ai/api/claudecode",
+    codex_base_url: "https://api.aicodemirror.ai/api/codex/backend-api/codex",
+    gemini_base_url: "https://api.aicodemirror.ai/api/gemini",
+    opencode_base_url: "https://api.aicodemirror.ai/api/claudecode",
+    openclaw_base_url: "https://api.aicodemirror.ai/api/claudecode",
+    hermes_base_url: "https://api.aicodemirror.ai/api/claudecode",
+};
+
+pub(crate) const PATEWAY_AI: SponsorProviderPreset = SponsorProviderPreset {
+    id: "patewayai",
+    provider_name: "PatewayAI",
+    chip_label: "* PatewayAI",
+    website_url: "https://pateway.ai",
+    register_url: "https://pateway.ai/?ch=18fxbjo",
+    promo_code: "",
+    partner_promotion_key: "patewayai",
+    claude_api_key_field: ClaudeApiKeyField::ApiKey,
+    claude_base_url: "https://api.pateway.ai",
+    codex_base_url: "https://api.pateway.ai/v1",
+    gemini_base_url: "",
+    opencode_base_url: "",
+    openclaw_base_url: "",
+    hermes_base_url: "",
+};
+
+pub(crate) const DDS: SponsorProviderPreset = SponsorProviderPreset {
+    id: "dds",
+    provider_name: "DDS",
+    chip_label: "* DDS",
+    website_url: "https://www.ddshub.cc",
+    register_url: "https://ddshub.short.gy/ccscli",
+    promo_code: "",
+    partner_promotion_key: "dds",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://www.ddshub.cc",
+    codex_base_url: "https://www.ddshub.cc",
+    gemini_base_url: "",
+    opencode_base_url: "",
+    openclaw_base_url: "",
+    hermes_base_url: "",
+};
+
+pub(crate) const QINIU: SponsorProviderPreset = SponsorProviderPreset {
+    id: "qiniu",
+    provider_name: "Qiniu",
+    chip_label: "* Qiniu",
+    website_url: "https://s.qiniu.com/FVfiEb",
+    register_url: "https://s.qiniu.com/FVfiEb",
+    promo_code: "",
+    partner_promotion_key: "qiniu",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://api.qnaigc.com",
+    codex_base_url: "https://api.qnaigc.com/bypass/openai/v1",
+    gemini_base_url: "https://api.qnaigc.com/bypass/vertex",
+    opencode_base_url: "https://api.qnaigc.com/v1",
+    openclaw_base_url: "https://api.qnaigc.com/v1",
+    hermes_base_url: "https://api.qnaigc.com/v1",
+};
+
+pub(crate) const FENNO: SponsorProviderPreset = SponsorProviderPreset {
+    id: "fenno",
+    provider_name: "FennoAI",
+    chip_label: "* FennoAI",
+    website_url: "https://api.fenno.ai",
+    register_url:
+        "https://api.fenno.ai/register?redirect=/purchase?tab=subscription%26group=16&aff=Z6XB52KCVP6Y",
+    promo_code: "",
+    partner_promotion_key: "fenno",
+    claude_api_key_field: ClaudeApiKeyField::AuthToken,
+    claude_base_url: "https://api.fenno.ai",
+    codex_base_url: "https://api.fenno.ai",
+    gemini_base_url: "",
+    opencode_base_url: "https://api.fenno.ai/v1",
+    openclaw_base_url: "https://api.fenno.ai/v1",
+    hermes_base_url: "https://api.fenno.ai/v1",
+};
+
+pub(crate) const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 12] = [
+    API88,
+    APIMART,
+    CUBENCE,
+    OPENMODEL,
+    PACKY_CODE,
+    DDS,
+    RUN_API,
+    AI_CODE_MIRROR,
+    CLAUDE_API,
+    QINIU,
+    PATEWAY_AI,
+    FENNO,
+];
+
+const CLAUDE_SPONSOR_PRESETS: [SponsorProviderPreset; 12] = [
+    API88,
+    APIMART,
+    CUBENCE,
+    OPENMODEL,
+    PACKY_CODE,
+    DDS,
+    RUN_API,
+    AI_CODE_MIRROR,
+    CLAUDE_API,
+    QINIU,
+    PATEWAY_AI,
+    FENNO,
+];
+const CODEX_SPONSOR_PRESETS: [SponsorProviderPreset; 11] = [
+    API88,
+    APIMART,
+    CUBENCE,
+    OPENMODEL,
+    PACKY_CODE,
+    DDS,
+    RUN_API,
+    AI_CODE_MIRROR,
+    QINIU,
+    PATEWAY_AI,
+    FENNO,
+];
+const GEMINI_SPONSOR_PRESETS: [SponsorProviderPreset; 7] = [
+    API88,
+    APIMART,
+    CUBENCE,
+    OPENMODEL,
+    PACKY_CODE,
+    AI_CODE_MIRROR,
+    QINIU,
+];
+const ADDITIVE_SPONSOR_PRESETS: [SponsorProviderPreset; 9] = [
+    API88,
+    APIMART,
+    CUBENCE,
+    OPENMODEL,
+    PACKY_CODE,
+    RUN_API,
+    AI_CODE_MIRROR,
+    QINIU,
+    FENNO,
+];
+
+pub(crate) fn sponsor_provider_preset(id: &str) -> Option<SponsorProviderPreset> {
+    SPONSOR_PROVIDER_PRESETS
+        .iter()
+        .copied()
+        .find(|preset| preset.id == id)
+}
+
+pub(crate) fn sponsor_provider_presets_for_app(
+    app_type: &AppType,
+) -> &'static [SponsorProviderPreset] {
+    match app_type {
+        AppType::Claude => &CLAUDE_SPONSOR_PRESETS,
+        AppType::Codex => &CODEX_SPONSOR_PRESETS,
+        AppType::Gemini => &GEMINI_SPONSOR_PRESETS,
+        AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => &ADDITIVE_SPONSOR_PRESETS,
+        AppType::ClaudeDesktop | AppType::Pi => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packycode_keeps_cli_promotion_url_but_uses_upstream_api_hosts() {
+        assert_eq!(PACKY_CODE.website_url, "https://www.packyapi.com");
+        assert_eq!(
+            PACKY_CODE.register_url,
+            "https://www.packyapi.com/register?aff=cc-switch-cli"
+        );
+        assert_eq!(PACKY_CODE.claude_base_url, "https://www.packyapi.ai");
+        assert_eq!(PACKY_CODE.codex_base_url, "https://www.packyapi.ai/v1");
+        assert_eq!(PACKY_CODE.gemini_base_url, "https://www.packyapi.ai");
+        assert_eq!(PACKY_CODE.opencode_base_url, "https://www.packyapi.ai/v1");
+        assert_eq!(PACKY_CODE.hermes_base_url, "https://www.packyapi.ai");
+        assert_eq!(PACKY_CODE.openclaw_base_url, "https://www.packyapi.ai");
+    }
+
+    #[test]
+    fn aicodemirror_uses_cli_affiliate_and_upstream_api_hosts() {
+        assert_eq!(AI_CODE_MIRROR.website_url, "https://www.aicodemirror.ai");
+        assert_eq!(
+            AI_CODE_MIRROR.register_url,
+            "https://www.aicodemirror.ai/register?invitecode=77V9EA"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.claude_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.codex_base_url,
+            "https://api.aicodemirror.ai/api/codex/backend-api/codex"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.gemini_base_url,
+            "https://api.aicodemirror.ai/api/gemini"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.opencode_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.hermes_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+        assert_eq!(
+            AI_CODE_MIRROR.openclaw_base_url,
+            "https://api.aicodemirror.ai/api/claudecode"
+        );
+    }
+
+    #[test]
+    fn openmodel_uses_affiliate_url_and_protocol_specific_api_hosts() {
+        assert_eq!(
+            OPENMODEL.website_url,
+            "https://www.openmodel.ai/?ref=JGDNqZl8"
+        );
+        assert_eq!(OPENMODEL.register_url, OPENMODEL.website_url);
+        assert_eq!(OPENMODEL.claude_base_url, "https://api.openmodel.ai");
+        assert_eq!(OPENMODEL.codex_base_url, "https://api.openmodel.ai/v1");
+        assert_eq!(OPENMODEL.gemini_base_url, "https://api.openmodel.ai");
+        assert_eq!(OPENMODEL.opencode_base_url, "https://api.openmodel.ai/v1");
+        assert_eq!(OPENMODEL.hermes_base_url, "https://api.openmodel.ai");
+        assert_eq!(OPENMODEL.openclaw_base_url, "https://api.openmodel.ai");
+    }
+
+    #[test]
+    fn patewayai_uses_cli_promotion_url_and_upstream_provider_settings() {
+        assert_eq!(PATEWAY_AI.website_url, "https://pateway.ai");
+        assert_eq!(PATEWAY_AI.register_url, "https://pateway.ai/?ch=18fxbjo");
+        assert_eq!(PATEWAY_AI.claude_api_key_field, ClaudeApiKeyField::ApiKey);
+        assert_eq!(PATEWAY_AI.claude_base_url, "https://api.pateway.ai");
+        assert_eq!(PATEWAY_AI.codex_base_url, "https://api.pateway.ai/v1");
+        assert!(PATEWAY_AI.gemini_base_url.is_empty());
+        assert!(PATEWAY_AI.opencode_base_url.is_empty());
+        assert!(PATEWAY_AI.hermes_base_url.is_empty());
+        assert!(PATEWAY_AI.openclaw_base_url.is_empty());
+    }
+
+    #[test]
+    fn additive_apps_share_one_sponsor_support_matrix() {
+        let expected = [
+            "88api",
+            "apimart",
+            "cubence",
+            "openmodel",
+            "packycode",
+            "runapi",
+            "aicodemirror",
+            "qiniu",
+            "fenno",
+        ];
+        for app_type in [AppType::OpenCode, AppType::Hermes, AppType::OpenClaw] {
+            let ids = sponsor_provider_presets_for_app(&app_type)
+                .iter()
+                .map(|preset| preset.id)
+                .collect::<Vec<_>>();
+            assert_eq!(ids, expected);
+        }
+    }
+
+    #[test]
+    fn api88_is_the_first_sponsor_for_every_supported_app() {
+        for app_type in [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+            AppType::Hermes,
+            AppType::OpenClaw,
+        ] {
+            assert_eq!(
+                sponsor_provider_presets_for_app(&app_type)
+                    .first()
+                    .map(|preset| preset.id),
+                Some("88api"),
+                "88API should be the first sponsor preset for {app_type:?}"
+            );
+        }
+    }
+}
+use crate::app_config::AppType;
+use crate::provider::ClaudeApiKeyField;
+
+/// Native 88API settings from cc-switch; CLI credentials are populated by the existing form.
+pub(crate) fn api88_settings(app: &AppType) -> serde_json::Value {
+    let presets: serde_json::Value = serde_json::from_str(include_str!("presets/88api.json"))
+        .expect("bundled 88API presets must be valid JSON");
+    presets[app.as_str()].clone()
+}

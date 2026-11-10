@@ -1,0 +1,225 @@
+{
+  "claude": {
+    "env": {
+      "ANTHROPIC_BASE_URL": "https://api.88api.ai",
+      "ANTHROPIC_AUTH_TOKEN": ""
+    }
+  },
+  "gemini": {
+    "env": {
+      "GOOGLE_GEMINI_BASE_URL": "https://api.88api.ai",
+      "GEMINI_API_KEY": "",
+      "GEMINI_MODEL": "gemini-3.8-flash"
+    }
+  },
+  "opencode": {
+    "npm": "@ai-sdk/anthropic",
+    "name": "88API",
+    "options": {
+      "baseURL": "https://api.88api.ai/v1",
+      "apiKey": "",
+      "setCacheKey": true
+    },
+    "models": {
+      "claude-opus-5-5": {
+        "name": "Claude Opus 5.5",
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        }
+      },
+      "claude-sonnet-5-5": {
+        "name": "Claude Sonnet 5.5",
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        }
+      },
+      "claude-haiku-5-5": {
+        "name": "Claude Haiku 5.5",
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        }
+      },
+      "claude-fable-5-1": {
+        "name": "Claude Fable 5.1",
+        "reasoning": true,
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ],
+          "output": [
+            "text"
+          ]
+        }
+      }
+    }
+  },
+  "openclaw": {
+    "baseUrl": "https://api.88api.ai",
+    "apiKey": "",
+    "api": "anthropic-messages",
+    "models": [
+      {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "name": "Claude Sonnet 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "name": "Claude Haiku 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      },
+      {
+        "id": "claude-fable-5-1",
+        "name": "Claude Fable 5.1",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      }
+    ]
+  },
+  "hermes": {
+    "name": "88api",
+    "base_url": "https://api.88api.ai",
+    "api_key": "",
+    "api_mode": "anthropic_messages",
+    "models": [
+      {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+        "context_length": 1000000
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "name": "Claude Sonnet 5.5",
+        "context_length": 1000000
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "name": "Claude Haiku 5.5",
+        "context_length": 1000000
+      },
+      {
+        "id": "claude-fable-5-1",
+        "name": "Claude Fable 5.1",
+        "context_length": 1000000
+      }
+    ]
+  },
+  "pi": {
+    "name": "88API",
+    "baseUrl": "https://api.88api.ai",
+    "api": "anthropic-messages",
+    "apiKey": "",
+    "models": [
+      {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "name": "Claude Sonnet 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "name": "Claude Haiku 5.5",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      },
+      {
+        "id": "claude-fable-5-1",
+        "name": "Claude Fable 5.1",
+        "reasoning": true,
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 1000000,
+        "maxTokens": 128000
+      }
+    ]
+  }
+}

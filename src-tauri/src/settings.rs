@@ -12,13 +12,6 @@ use std::sync::{OnceLock, RwLock};
 pub struct VisibleApps {
     #[serde(default = "default_visible_app_claude")]
     pub claude: bool,
-    #[serde(
-        rename = "claude-desktop",
-        alias = "claudeDesktop",
-        alias = "claude_desktop",
-        default = "default_visible_app_claude_desktop"
-    )]
-    pub claude_desktop: bool,
     #[serde(default = "default_visible_app_codex")]
     pub codex: bool,
     #[serde(default = "default_visible_app_gemini")]
@@ -29,13 +22,13 @@ pub struct VisibleApps {
     pub hermes: bool,
     #[serde(default = "default_visible_app_openclaw")]
     pub openclaw: bool,
+    #[serde(default = "default_visible_app_pi")]
+    pub pi: bool,
+    #[serde(default = "default_visible_app_claude_desktop")]
+    pub claude_desktop: bool,
 }
 
 fn default_visible_app_claude() -> bool {
-    true
-}
-
-fn default_visible_app_claude_desktop() -> bool {
     true
 }
 
@@ -59,15 +52,24 @@ fn default_visible_app_openclaw() -> bool {
     true
 }
 
+fn default_visible_app_pi() -> bool {
+    true
+}
+
+fn default_visible_app_claude_desktop() -> bool {
+    true
+}
+
 pub fn default_visible_apps() -> VisibleApps {
     VisibleApps {
         claude: true,
-        claude_desktop: true,
         codex: true,
         gemini: false,
         opencode: true,
         hermes: true,
         openclaw: true,
+        pi: true,
+        claude_desktop: true,
     }
 }
 
@@ -129,24 +131,26 @@ impl VisibleApps {
     pub fn is_enabled_for(&self, app_type: &AppType) -> bool {
         match app_type {
             AppType::Claude => self.claude,
-            AppType::ClaudeDesktop => self.claude_desktop,
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
             AppType::Hermes => self.hermes,
             AppType::OpenClaw => self.openclaw,
+            AppType::Pi => self.pi,
+            AppType::ClaudeDesktop => self.claude_desktop,
         }
     }
 
     pub fn set_enabled_for(&mut self, app_type: &AppType, enabled: bool) {
         match app_type {
             AppType::Claude => self.claude = enabled,
-            AppType::ClaudeDesktop => self.claude_desktop = enabled,
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
             AppType::Hermes => self.hermes = enabled,
             AppType::OpenClaw => self.openclaw = enabled,
+            AppType::Pi => self.pi = enabled,
+            AppType::ClaudeDesktop => self.claude_desktop = enabled,
         }
     }
 
@@ -167,15 +171,16 @@ impl VisibleApps {
     }
 }
 
-fn app_order() -> [AppType; 7] {
+fn app_order() -> [AppType; 8] {
     [
         AppType::Claude,
-        AppType::ClaudeDesktop,
         AppType::Codex,
         AppType::Gemini,
         AppType::OpenCode,
         AppType::Hermes,
         AppType::OpenClaw,
+        AppType::Pi,
+        AppType::ClaudeDesktop,
     ]
 }
 
@@ -310,7 +315,7 @@ impl WebDavSyncSettings {
     }
 
     pub fn normalize(&mut self) {
-        self.base_url = self.base_url.trim().trim_end_matches('/').to_string();
+        self.base_url = self.base_url.trim().to_string();
         self.remote_root = sanitize_path_segment(&self.remote_root);
         self.profile = sanitize_path_segment(&self.profile);
         self.username = self.username.trim().to_string();
@@ -341,6 +346,108 @@ impl WebDavSyncSettings {
     }
 }
 
+/// S3-compatible object storage sync settings.
+///
+/// These settings live in `settings.json`; they are intentionally not part of
+/// the SQLite schema so they stay compatible with the desktop upstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3SyncSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub auto_sync: bool,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default)]
+    pub access_key_id: String,
+    #[serde(default)]
+    pub secret_access_key: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default = "default_webdav_remote_root")]
+    pub remote_root: String,
+    #[serde(default = "default_webdav_profile")]
+    pub profile: String,
+    #[serde(default)]
+    pub status: WebDavSyncStatus,
+}
+
+impl Default for S3SyncSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_sync: false,
+            region: String::new(),
+            bucket: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            endpoint: String::new(),
+            remote_root: default_webdav_remote_root(),
+            profile: default_webdav_profile(),
+            status: WebDavSyncStatus::default(),
+        }
+    }
+}
+
+impl S3SyncSettings {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.bucket.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.bucket.required",
+                "S3 存储桶不能为空",
+                "S3 bucket is required.",
+            ));
+        }
+        if self.region.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.region.required",
+                "S3 区域不能为空",
+                "S3 region is required.",
+            ));
+        }
+        if self.access_key_id.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.access_key_id.required",
+                "S3 Access Key ID 不能为空",
+                "S3 Access Key ID is required.",
+            ));
+        }
+        if self.secret_access_key.trim().is_empty() {
+            return Err(AppError::localized(
+                "s3.secret_access_key.required",
+                "S3 Secret Access Key 不能为空",
+                "S3 Secret Access Key is required.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn normalize(&mut self) {
+        self.region = self.region.trim().to_string();
+        self.bucket = self.bucket.trim().to_string();
+        self.access_key_id = self.access_key_id.trim().to_string();
+        self.endpoint = self.endpoint.trim().to_string();
+        self.remote_root = self.remote_root.trim().to_string();
+        self.profile = self.profile.trim().to_string();
+        if self.remote_root.is_empty() {
+            self.remote_root = default_webdav_remote_root();
+        }
+        if self.profile.is_empty() {
+            self.profile = default_webdav_profile();
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bucket.is_empty()
+            && self.region.is_empty()
+            && self.access_key_id.is_empty()
+            && self.secret_access_key.is_empty()
+    }
+}
+
 fn sanitize_path_segment(raw: &str) -> String {
     raw.trim()
         .trim_matches('/')
@@ -361,6 +468,12 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
+    /// v2 also repairs dynamic provider ids emitted by older CLI builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_third_party_history_provider_bucket_v2:
+        Option<CodexThirdPartyHistoryProviderBucketMigration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_provider_template_v2: Option<CodexProviderTemplateMigration>,
     /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
     /// 这样重新开启能把关闭期间落入 openai 桶的官方会话补迁进来。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,9 +551,9 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_provider_claude: Option<String>,
+    pub pi_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_provider_claude_desktop: Option<String>,
+    pub current_provider_claude: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_codex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -451,6 +564,8 @@ pub struct AppSettings {
     pub current_provider_hermes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_openclaw: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_claude_desktop: Option<String>,
     #[serde(default = "default_visible_apps")]
     pub visible_apps: VisibleApps,
     #[serde(default = "migrated_visible_apps_settings")]
@@ -466,8 +581,8 @@ pub struct AppSettings {
     /// 是否开机自启
     #[serde(default)]
     pub launch_on_startup: bool,
-    /// Keep Codex ChatGPT login material in auth.json when switching to third-party providers.
-    /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
+    /// Keep Codex ChatGPT login material in auth.json during direct third-party switches.
+    /// Opt-in: defaults to false; proxy takeover always preserves native Codex authentication.
     #[serde(default)]
     pub preserve_codex_official_auth_on_switch: bool,
     /// Run official Codex providers under the shared "custom" model_provider id
@@ -479,18 +594,31 @@ pub struct AppSettings {
     /// cleared when the toggle turns off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unify_codex_migrate_existing: Option<bool>,
+    /// CLI-only: keep importing local session logs in the background while the
+    /// TUI runs, so the home usage chart tracks live activity. Absent in
+    /// settings written by other clients, which is why it defaults to true.
+    #[serde(default = "default_usage_auto_sync")]
+    pub usage_auto_sync: bool,
     /// Skills 同步方式（auto|symlink|copy）
     #[serde(default)]
     pub skill_sync_method: crate::services::skill::SyncMethod,
+    /// Skills SSOT location: cc_switch (default) or unified (~/.agents/skills/).
+    #[serde(default)]
+    pub skill_storage_location: crate::services::skill::SkillStorageLocation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<SecuritySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_sync: Option<WebDavSyncSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_sync: Option<S3SyncSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_retain_count: Option<u32>,
     /// 首选终端应用，用于会话恢复。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+    /// Preferred external editor command. When absent, no editor is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_editor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
     /// Claude 自定义端点列表
@@ -509,6 +637,10 @@ fn default_minimize_to_tray_on_close() -> bool {
     true
 }
 
+fn default_usage_auto_sync() -> bool {
+    true
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -524,13 +656,14 @@ impl Default for AppSettings {
             opencode_config_dir: None,
             hermes_config_dir: None,
             openclaw_config_dir: None,
+            pi_config_dir: None,
             current_provider_claude: None,
-            current_provider_claude_desktop: None,
             current_provider_codex: None,
             current_provider_gemini: None,
             current_provider_opencode: None,
             current_provider_hermes: None,
             current_provider_openclaw: None,
+            current_provider_claude_desktop: None,
             visible_apps: default_visible_apps(),
             visible_apps_settings: VisibleAppsSettings::default(),
             language: None,
@@ -540,11 +673,15 @@ impl Default for AppSettings {
             preserve_codex_official_auth_on_switch: false,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
+            usage_auto_sync: default_usage_auto_sync(),
             skill_sync_method: crate::services::skill::SyncMethod::default(),
+            skill_storage_location: crate::services::skill::SkillStorageLocation::default(),
             security: None,
             webdav_sync: None,
+            s3_sync: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            preferred_editor: None,
             local_migrations: None,
             custom_endpoints_claude: HashMap::new(),
             custom_endpoints_codex: HashMap::new(),
@@ -602,6 +739,13 @@ impl AppSettings {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
+        self.pi_config_dir = self
+            .pi_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         self.language = self
             .language
             .as_ref()
@@ -619,8 +763,22 @@ impl AppSettings {
             webdav.normalize();
         }
 
+        if let Some(s3) = self.s3_sync.as_mut() {
+            s3.normalize();
+        }
+        if self.s3_sync.as_ref().is_some_and(S3SyncSettings::is_empty) {
+            self.s3_sync = None;
+        }
+
         self.preferred_terminal = self
             .preferred_terminal
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.preferred_editor = self
+            .preferred_editor
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -687,7 +845,7 @@ pub(crate) fn reload_test_settings() {
     *guard = AppSettings::load();
 }
 
-fn resolve_override_path(raw: &str) -> PathBuf {
+pub(crate) fn resolve_override_path(raw: &str) -> PathBuf {
     if raw == "~" {
         if let Some(home) = home_dir() {
             return home;
@@ -731,6 +889,17 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
                 existing_migrations.codex_provider_template_v1;
         }
         if incoming_migrations
+            .codex_third_party_history_provider_bucket_v2
+            .is_none()
+        {
+            incoming_migrations.codex_third_party_history_provider_bucket_v2 =
+                existing_migrations.codex_third_party_history_provider_bucket_v2;
+        }
+        if incoming_migrations.codex_provider_template_v2.is_none() {
+            incoming_migrations.codex_provider_template_v2 =
+                existing_migrations.codex_provider_template_v2;
+        }
+        if incoming_migrations
             .codex_official_history_unify_v1
             .is_none()
         {
@@ -770,7 +939,7 @@ pub fn is_codex_third_party_history_provider_bucket_migrated() -> bool {
         .as_ref()
         .and_then(|migrations| {
             migrations
-                .codex_third_party_history_provider_bucket_v1
+                .codex_third_party_history_provider_bucket_v2
                 .as_ref()
         })
         .is_some_and(|migration| migration.scanned_history_files)
@@ -783,7 +952,7 @@ pub fn mark_codex_third_party_history_provider_bucket_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_third_party_history_provider_bucket_v1 = Some(migration);
+        migrations.codex_third_party_history_provider_bucket_v2 = Some(migration);
     })
 }
 
@@ -791,7 +960,7 @@ pub fn is_codex_provider_template_migrated() -> bool {
     get_settings()
         .local_migrations
         .as_ref()
-        .and_then(|migrations| migrations.codex_provider_template_v1.as_ref())
+        .and_then(|migrations| migrations.codex_provider_template_v2.as_ref())
         .is_some()
 }
 
@@ -802,7 +971,7 @@ pub fn mark_codex_provider_template_migrated(
         let migrations = settings
             .local_migrations
             .get_or_insert_with(Default::default);
-        migrations.codex_provider_template_v1 = Some(migration);
+        migrations.codex_provider_template_v2 = Some(migration);
     })
 }
 
@@ -860,6 +1029,19 @@ pub fn get_preferred_terminal() -> Option<String> {
         .and_then(|settings| settings.preferred_terminal.clone())
 }
 
+pub fn get_preferred_editor() -> Option<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.preferred_editor.clone())
+}
+
+pub fn set_preferred_editor(preferred_editor: Option<String>) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.preferred_editor = preferred_editor;
+    update_settings(settings)
+}
+
 pub fn ensure_security_auth_selected_type(selected_type: &str) -> Result<(), AppError> {
     let mut settings = get_settings();
     let current = settings
@@ -907,6 +1089,12 @@ pub fn preserve_codex_official_auth_on_switch() -> bool {
         .preserve_codex_official_auth_on_switch
 }
 
+pub fn set_preserve_codex_official_auth_on_switch(enabled: bool) -> Result<(), AppError> {
+    mutate_settings(|settings| {
+        settings.preserve_codex_official_auth_on_switch = enabled;
+    })
+}
+
 pub fn unify_codex_session_history() -> bool {
     settings_store()
         .read()
@@ -949,16 +1137,25 @@ pub fn get_openclaw_override_dir() -> Option<PathBuf> {
         .map(|p| resolve_override_path(p))
 }
 
+pub fn get_pi_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .pi_config_dir
+        .as_ref()
+        .map(|path| resolve_override_path(path))
+}
+
 pub fn get_current_provider(app_type: &AppType) -> Option<String> {
     let settings = settings_store().read().ok()?;
     match app_type {
         AppType::Claude => settings.current_provider_claude.clone(),
-        AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
         AppType::Codex => settings.current_provider_codex.clone(),
         AppType::Gemini => settings.current_provider_gemini.clone(),
         AppType::OpenCode => settings.current_provider_opencode.clone(),
         AppType::Hermes => settings.current_provider_hermes.clone(),
         AppType::OpenClaw => settings.current_provider_openclaw.clone(),
+        AppType::ClaudeDesktop => settings.current_provider_claude_desktop.clone(),
+        AppType::Pi => None,
     }
 }
 
@@ -967,14 +1164,15 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
 
     match app_type {
         AppType::Claude => settings.current_provider_claude = id.map(|value| value.to_string()),
-        AppType::ClaudeDesktop => {
-            settings.current_provider_claude_desktop = id.map(|value| value.to_string())
-        }
         AppType::Codex => settings.current_provider_codex = id.map(|value| value.to_string()),
         AppType::Gemini => settings.current_provider_gemini = id.map(|value| value.to_string()),
         AppType::OpenCode => settings.current_provider_opencode = id.map(|value| value.to_string()),
         AppType::Hermes => settings.current_provider_hermes = id.map(|value| value.to_string()),
         AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
+        AppType::ClaudeDesktop => {
+            settings.current_provider_claude_desktop = id.map(|value| value.to_string())
+        }
+        AppType::Pi => {}
     }
 
     update_settings(settings)
@@ -991,6 +1189,43 @@ pub fn set_theme_mode(mode: &str) -> Result<(), AppError> {
     let mut settings = get_settings();
     settings.theme = Some(mode.to_string());
     update_settings(settings)
+}
+
+pub fn get_icon_mode() -> Option<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.icons.clone())
+}
+
+pub fn set_icon_mode(mode: &str) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.icons = Some(mode.to_string());
+    update_settings(settings)
+}
+
+/// What [`usage_auto_sync_enabled`] reports when the settings lock is poisoned.
+///
+/// Fail-closed, because the two failure modes are not symmetric: resurrecting a
+/// background scan the user explicitly disabled burns their CPU behind their
+/// back and the setting they already flipped cannot stop it, while a paused
+/// auto-sync only means the home chart goes stale until the next manual sync.
+const USAGE_AUTO_SYNC_ON_POISONED_LOCK: bool = false;
+
+/// Whether the TUI may keep re-importing local session logs in the background.
+///
+/// A settings file that simply lacks the key still reads as enabled (see
+/// [`default_usage_auto_sync`]); only a lock we can no longer trust degrades to
+/// [`USAGE_AUTO_SYNC_ON_POISONED_LOCK`].
+pub fn usage_auto_sync_enabled() -> bool {
+    read_usage_auto_sync(settings_store())
+}
+
+fn read_usage_auto_sync(store: &RwLock<AppSettings>) -> bool {
+    store
+        .read()
+        .map(|settings| settings.usage_auto_sync)
+        .unwrap_or(USAGE_AUTO_SYNC_ON_POISONED_LOCK)
 }
 
 pub fn get_visible_apps() -> VisibleApps {
@@ -1068,6 +1303,21 @@ pub fn set_skill_sync_method(method: crate::services::skill::SyncMethod) -> Resu
     update_settings(settings)
 }
 
+pub fn get_skill_storage_location() -> crate::services::skill::SkillStorageLocation {
+    settings_store()
+        .read()
+        .map(|settings| settings.skill_storage_location)
+        .unwrap_or_default()
+}
+
+pub fn set_skill_storage_location(
+    location: crate::services::skill::SkillStorageLocation,
+) -> Result<(), AppError> {
+    let mut settings = get_settings();
+    settings.skill_storage_location = location;
+    update_settings(settings)
+}
+
 pub fn get_webdav_sync_settings() -> Option<WebDavSyncSettings> {
     settings_store()
         .read()
@@ -1076,8 +1326,7 @@ pub fn get_webdav_sync_settings() -> Option<WebDavSyncSettings> {
 }
 
 pub fn set_webdav_sync_settings(webdav_sync: Option<WebDavSyncSettings>) -> Result<(), AppError> {
-    let mut settings = get_settings();
-    settings.webdav_sync = match webdav_sync {
+    let webdav_sync = match webdav_sync {
         Some(mut cfg) => {
             cfg.normalize();
             cfg.validate()?;
@@ -1085,15 +1334,46 @@ pub fn set_webdav_sync_settings(webdav_sync: Option<WebDavSyncSettings>) -> Resu
         }
         None => None,
     };
-    update_settings(settings)
+    mutate_settings(move |settings| {
+        settings.webdav_sync = webdav_sync;
+    })
 }
 
 pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
-    let mut settings = get_settings();
-    if let Some(ref mut webdav) = settings.webdav_sync {
-        webdav.status = status;
-    }
-    update_settings(settings)
+    mutate_settings(move |settings| {
+        if let Some(ref mut webdav) = settings.webdav_sync {
+            webdav.status = status;
+        }
+    })
+}
+
+pub fn get_s3_sync_settings() -> Option<S3SyncSettings> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|settings| settings.s3_sync.clone())
+}
+
+pub fn set_s3_sync_settings(s3_sync: Option<S3SyncSettings>) -> Result<(), AppError> {
+    let s3_sync = match s3_sync {
+        Some(mut config) => {
+            config.normalize();
+            config.validate()?;
+            Some(config)
+        }
+        None => None,
+    };
+    mutate_settings(move |settings| {
+        settings.s3_sync = s3_sync;
+    })
+}
+
+pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
+    mutate_settings(move |settings| {
+        if let Some(ref mut s3) = settings.s3_sync {
+            s3.status = status;
+        }
+    })
 }
 
 pub fn webdav_jianguoyun_preset(username: &str, password: &str) -> WebDavSyncSettings {
@@ -1160,12 +1440,227 @@ pub fn set_skip_claude_onboarding(enabled: bool) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::AppSettings;
+    use super::{
+        get_pi_override_dir, get_preferred_editor, get_s3_sync_settings, get_settings,
+        get_webdav_sync_settings, set_preferred_editor, set_s3_sync_settings,
+        set_webdav_sync_settings, update_settings, AppSettings, LocalMigrations, S3SyncSettings,
+        WebDavSyncSettings,
+    };
+    use crate::test_support::TestEnvGuard;
+
+    #[test]
+    fn pi_override_dir_is_normalized_and_resolved() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        let settings = AppSettings {
+            pi_config_dir: Some("  ~/custom-pi  ".to_string()),
+            ..Default::default()
+        };
+        update_settings(settings).expect("save isolated settings");
+
+        assert_eq!(get_pi_override_dir(), Some(home.path().join("custom-pi")));
+        assert_eq!(get_settings().pi_config_dir.as_deref(), Some("~/custom-pi"));
+    }
+    use serde_json::json;
+    use std::sync::RwLock;
+
+    #[test]
+    fn usage_auto_sync_defaults_on_and_survives_a_settings_file_without_the_key() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+
+        assert!(AppSettings::default().usage_auto_sync);
+
+        // Settings written by an older build (or by the desktop app) simply
+        // omit the key; it must read back as enabled.
+        let legacy: AppSettings =
+            serde_json::from_value(json!({ "showInTray": true })).expect("deserialize legacy");
+        assert!(legacy.usage_auto_sync);
+
+        let opted_out: AppSettings =
+            serde_json::from_value(json!({ "usageAutoSync": false })).expect("deserialize opt-out");
+        assert!(!opted_out.usage_auto_sync);
+
+        update_settings(AppSettings {
+            usage_auto_sync: false,
+            ..AppSettings::default()
+        })
+        .expect("persist settings");
+        assert!(!super::usage_auto_sync_enabled());
+    }
+
+    #[test]
+    fn usage_auto_sync_fails_closed_on_a_poisoned_lock() {
+        // A local store, so poisoning it cannot leak into the process-global
+        // settings every other test reads through.
+        let store = RwLock::new(AppSettings {
+            usage_auto_sync: true,
+            ..AppSettings::default()
+        });
+        assert!(super::read_usage_auto_sync(&store));
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.write().expect("take the write lock");
+            panic!("poison the settings lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(store.read().is_err(), "the lock should now be poisoned");
+
+        assert!(
+            !super::read_usage_auto_sync(&store),
+            "an explicitly disabled background scan must never resurrect itself"
+        );
+    }
 
     #[test]
     fn codex_unified_session_history_defaults_off() {
         let settings = AppSettings::default();
         assert!(!settings.unify_codex_session_history);
         assert_eq!(settings.unify_codex_migrate_existing, None);
+    }
+
+    #[test]
+    fn preferred_editor_defaults_none_and_uses_camel_case() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+
+        let settings = AppSettings::default();
+        assert_eq!(settings.preferred_editor, None);
+        let default_json = serde_json::to_value(&settings).expect("serialize default settings");
+        assert!(default_json.get("preferredEditor").is_none());
+
+        let configured = AppSettings {
+            preferred_editor: Some("code --wait".to_string()),
+            ..settings
+        };
+        let configured_json =
+            serde_json::to_value(configured).expect("serialize configured editor");
+        assert_eq!(configured_json["preferredEditor"], "code --wait");
+    }
+
+    #[test]
+    fn preferred_editor_normalizes_trimmed_and_blank_values() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_preferred_editor(Some("  code --wait  ".to_string())).expect("save preferred editor");
+        assert_eq!(get_preferred_editor().as_deref(), Some("code --wait"));
+
+        set_preferred_editor(Some(" \t ".to_string())).expect("clear preferred editor");
+        assert_eq!(get_preferred_editor(), None);
+
+        let persisted = std::fs::read_to_string(home.path().join(".cc-switch/settings.json"))
+            .expect("read isolated settings");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&persisted).expect("parse isolated settings");
+        assert!(persisted.get("preferredEditor").is_none());
+    }
+
+    #[test]
+    fn codex_dynamic_provider_v2_does_not_reuse_v1_markers() {
+        let migrations: LocalMigrations = serde_json::from_value(json!({
+            "codexThirdPartyHistoryProviderBucketV1": {
+                "completedAt": "2026-07-15T00:00:00Z",
+                "targetProviderId": "custom",
+                "sourceProviderIds": ["aicodemirror"],
+                "migratedJsonlFiles": 1,
+                "migratedStateRows": 1,
+                "scannedHistoryFiles": true
+            },
+            "codexProviderTemplateV1": {
+                "completedAt": "2026-07-15T00:00:00Z",
+                "migratedProviderIds": ["aicodemirror"]
+            }
+        }))
+        .expect("deserialize v1 migration markers");
+
+        assert!(migrations
+            .codex_third_party_history_provider_bucket_v1
+            .is_some());
+        assert!(migrations.codex_provider_template_v1.is_some());
+        assert!(migrations
+            .codex_third_party_history_provider_bucket_v2
+            .is_none());
+        assert!(migrations.codex_provider_template_v2.is_none());
+    }
+
+    #[test]
+    fn s3_settings_use_upstream_camel_case_shape_and_defaults() {
+        let settings = S3SyncSettings::default();
+        assert!(!settings.auto_sync);
+        assert_eq!(settings.remote_root, "cc-switch-sync");
+        assert_eq!(settings.profile, "default");
+
+        let value = serde_json::to_value(settings).expect("serialize S3 settings");
+        assert!(value.get("accessKeyId").is_some());
+        assert!(value.get("secretAccessKey").is_some());
+        assert!(value.get("remoteRoot").is_some());
+    }
+
+    #[test]
+    fn saved_cloud_sync_backends_can_coexist_like_upstream() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_webdav_sync_settings(Some(WebDavSyncSettings {
+            enabled: true,
+            auto_sync: true,
+            base_url: "https://dav.example.com".to_string(),
+            username: "alice".to_string(),
+            password: "webdav-secret".to_string(),
+            ..WebDavSyncSettings::default()
+        }))
+        .expect("save WebDAV settings");
+        set_s3_sync_settings(Some(S3SyncSettings {
+            enabled: true,
+            auto_sync: false,
+            region: "us-east-1".to_string(),
+            bucket: "sync-bucket".to_string(),
+            access_key_id: "AKID".to_string(),
+            secret_access_key: "s3-secret".to_string(),
+            ..S3SyncSettings::default()
+        }))
+        .expect("save S3 settings");
+
+        let webdav = get_webdav_sync_settings().expect("WebDAV settings remain saved");
+        let s3 = get_s3_sync_settings().expect("S3 settings saved");
+        assert!(webdav.enabled);
+        assert!(webdav.auto_sync);
+        assert_eq!(webdav.password, "webdav-secret");
+        assert!(s3.enabled);
+        assert_eq!(s3.secret_access_key, "s3-secret");
+    }
+
+    #[test]
+    fn webdav_settings_preserve_trailing_collection_slash() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _environment = TestEnvGuard::isolated(home.path());
+        update_settings(AppSettings::default()).expect("reset isolated settings");
+
+        set_webdav_sync_settings(Some(WebDavSyncSettings {
+            enabled: true,
+            base_url: "  https://dav.example.com/dav/  ".to_string(),
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            ..WebDavSyncSettings::default()
+        }))
+        .expect("save WebDAV settings");
+
+        assert_eq!(
+            get_webdav_sync_settings()
+                .expect("read saved WebDAV settings")
+                .base_url,
+            "https://dav.example.com/dav/"
+        );
+
+        super::reload_test_settings();
+        assert_eq!(
+            get_webdav_sync_settings()
+                .expect("reload persisted WebDAV settings")
+                .base_url,
+            "https://dav.example.com/dav/"
+        );
     }
 }

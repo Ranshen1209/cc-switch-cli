@@ -59,7 +59,7 @@ impl CostCalculator {
 
     /// 按 app_type 选择输入 token 语义后计算成本。
     ///
-    /// Codex/OpenAI Responses 与 Gemini 的输入 token 字段包含 cache read 部分；
+    /// Codex/OpenAI Responses 与 Gemini 的输入 token 字段包含 cache read/write 部分；
     /// Claude/Anthropic 的 input_tokens 已经是 fresh input。
     pub fn calculate_for_app(
         app_type: &str,
@@ -161,19 +161,14 @@ pub async fn resolve_pricing_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> PricingConfig {
-    let default_app_type = if matches!(app_type, AppType::ClaudeDesktop) {
-        AppType::Claude
-    } else {
-        app_type.clone()
-    };
     let default_multiplier_raw = db
-        .get_default_cost_multiplier(default_app_type.as_str())
+        .get_default_cost_multiplier(app_type.as_str())
         .await
         .unwrap_or_else(|_| "1".to_string());
     let default_multiplier = parse_decimal_or(&default_multiplier_raw, Decimal::ONE);
 
     let default_pricing_model_source = db
-        .get_pricing_model_source(default_app_type.as_str())
+        .get_pricing_model_source(app_type.as_str())
         .await
         .unwrap_or_else(|_| "response".to_string());
     let default_pricing_model_source = sanitize_pricing_model_source(&default_pricing_model_source)
@@ -243,6 +238,30 @@ fn sanitize_pricing_model_source(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_gpt_6_astra_seeded_cost() {
+        let db = Database::memory().unwrap();
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 200,
+            cache_creation_tokens: 100,
+            model: None,
+            message_id: None,
+        };
+
+        for model in ["gpt-6-astra", "gpt-6-astra-high", "openai/gpt-6-astra"] {
+            let pricing = lookup_model_pricing(&db, model).expect("Astra pricing");
+            let cost = calculate_cost(&AppType::Codex, &usage, Some(&pricing), Decimal::ONE)
+                .expect("Astra cost");
+            assert_eq!(format_decimal(cost.input_cost), "0.007");
+            assert_eq!(format_decimal(cost.output_cost), "0.025");
+            assert_eq!(format_decimal(cost.cache_read_cost), "0.0002");
+            assert_eq!(format_decimal(cost.cache_creation_cost), "0.00125");
+            assert_eq!(format_decimal(cost.total_cost), "0.03345");
+        }
+    }
 
     #[test]
     fn test_cost_calculation() {

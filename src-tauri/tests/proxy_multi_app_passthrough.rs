@@ -1,9 +1,12 @@
+#[path = "support.rs"]
+mod support;
+
 use std::sync::Arc;
 
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     routing::post,
     Json, Router,
 };
@@ -542,7 +545,7 @@ async fn proxy_gemini_prefixed_route_passthroughs_v1beta_requests() {
 
 #[tokio::test]
 #[serial]
-async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
+async fn proxy_codex_non_streaming_timeout_does_not_retry_the_same_provider() {
     let upstream_state = RetryUpstreamState::default();
     let upstream_router = Router::new()
         .route("/v1/responses", post(handle_retrying_codex_response))
@@ -617,21 +620,11 @@ async fn proxy_codex_retries_with_app_non_streaming_timeout_policy() {
         .await
         .expect("send codex request to proxy");
 
-    assert!(
-        response.status().is_success(),
-        "retry request should succeed"
-    );
-    let body: Value = response.json().await.expect("parse retry response");
-    assert_eq!(
-        body.pointer("/output/0/content/0/text")
-            .and_then(|v| v.as_str()),
-        Some("attempt 2"),
-        "second upstream attempt should win after the first one times out"
-    );
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
         upstream_state.attempts.load(Ordering::SeqCst),
-        2,
-        "proxy should use the codex app policy to retry timed out requests"
+        1,
+        "a retry budget advances to another provider; it must not resend to the same provider"
     );
 
     service.stop().await.expect("stop proxy service");
@@ -899,23 +892,116 @@ async fn proxy_gemini_query_streaming_uses_stream_timeouts() {
         .await
         .expect("send gemini streaming request to proxy");
 
-    assert!(
-        response.status().is_success(),
-        "stream should be established before timeout"
-    );
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
-        Some("text/event-stream")
-    );
-    let body_result = response.text().await;
-    assert!(
-        body_result.is_err(),
-        "query-based Gemini streaming should use streaming timeouts instead of buffered non-stream handling"
+        response.status(),
+        StatusCode::GATEWAY_TIMEOUT,
+        "the first chunk must arrive before the stream is committed to the client"
     );
 
     service.stop().await.expect("stop proxy service");
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+#[serial]
+async fn proxy_codex_decodes_zstd_before_json_on_all_routes() {
+    let _guard = support::lock_test_mutex();
+    support::reset_test_fs();
+    let _home = support::ensure_test_home();
+    let upstream_state = UpstreamState::default();
+    let upstream_router = Router::new()
+        .route("/v1/responses", post(handle_responses))
+        .route("/v1/responses/compact", post(handle_responses))
+        .route("/v1/chat/completions", post(handle_responses))
+        .with_state(upstream_state.clone());
+
+    let upstream_listener = bind_test_listener().await;
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr");
+    let upstream_handle = tokio::spawn(async move {
+        let _ = axum::serve(upstream_listener, upstream_router).await;
+    });
+
+    let db = Arc::new(Database::memory().expect("create memory database"));
+    let provider = Provider {
+        id: "codex-official".to_string(),
+        name: "Codex Official".to_string(),
+        settings_config: json!({
+            "auth": {"OPENAI_API_KEY": "sk-test-codex"},
+            "config": format!("base_url = \"http://{}\"\nwire_api = \"responses\"\n", upstream_addr)
+        }),
+        website_url: None,
+        category: Some("codex".to_string()),
+        created_at: None,
+        sort_index: None,
+        notes: None,
+        meta: None,
+        icon: None,
+        icon_color: None,
+        in_failover_queue: false,
+    };
+    db.save_provider("codex", &provider)
+        .expect("save codex provider");
+    db.set_current_provider("codex", &provider.id)
+        .expect("set current codex provider");
+
+    let mut codex_proxy = db
+        .get_proxy_config_for_app("codex")
+        .await
+        .expect("get codex proxy config");
+    codex_proxy.auto_failover_enabled = false;
+    db.update_proxy_config_for_app(codex_proxy)
+        .await
+        .expect("update codex proxy config");
+
+    let service = ProxyService::new(db);
+    let mut runtime_config = service.get_config().await.expect("read proxy config");
+    runtime_config.listen_port = 0;
+
+    let proxy = service
+        .start_with_runtime_config(runtime_config)
+        .await
+        .expect("start proxy service");
+
+    let client = reqwest::Client::new();
+    for path in [
+        "/responses",
+        "/v1/responses",
+        "/responses/compact",
+        "/v1/responses/compact",
+        "/chat/completions",
+        "/v1/chat/completions",
+    ] {
+        let body = json!({"model":"gpt-test", "input":"compressed hello", "messages":[{"role":"user","content":"compressed hello"}]});
+        let compressed = zstd::stream::encode_all(body.to_string().as_bytes(), 0).unwrap();
+        let response = client
+            .post(format!("http://{}:{}{path}", proxy.address, proxy.port))
+            .header("content-type", "application/json")
+            .header("content-encoding", "zstd")
+            .body(compressed)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{path}: {}",
+            response.text().await.unwrap()
+        );
+        assert_eq!(
+            upstream_state.request_body.lock().await.as_ref().unwrap()["model"],
+            "gpt-test"
+        );
+    }
+    for (encoding, body) in [("zstd", "invalid compressed data"), ("unknown", "{}")] {
+        let response = client
+            .post(format!("http://{}:{}/responses", proxy.address, proxy.port))
+            .header("content-type", "application/json")
+            .header("content-encoding", encoding)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    service.stop().await.unwrap();
     upstream_handle.abort();
 }

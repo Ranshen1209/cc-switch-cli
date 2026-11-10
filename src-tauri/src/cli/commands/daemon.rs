@@ -8,6 +8,13 @@ use crate::daemon::ipc::client;
 use crate::daemon::ipc::protocol::{Request, Response};
 use crate::error::AppError;
 
+#[cfg(target_vendor = "apple")]
+extern "C" {
+    #[cfg_attr(target_arch = "aarch64", link_name = "daemon")]
+    #[cfg_attr(not(target_arch = "aarch64"), link_name = "daemon$1050")]
+    fn apple_daemon(nochdir: libc::c_int, noclose: libc::c_int) -> libc::c_int;
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum DaemonCommand {
     /// Start the supervisor daemon. Without --detach, runs in the foreground
@@ -40,13 +47,19 @@ fn start_daemon(detach: bool) -> Result<(), AppError> {
     }
 
     let binary_path = current_executable()?;
+    let Some(pidfile) = daemon::acquire_lifetime_pidfile().map_err(AppError::Message)? else {
+        return Ok(());
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|err| AppError::Message(format!("build daemon runtime failed: {err}")))?;
-    runtime
-        .block_on(daemon::run(binary_path))
-        .map_err(AppError::Message)
+    let result = runtime.block_on(daemon::run(binary_path, &pidfile));
+    // `Runtime::drop` waits for spawn_blocking session-import tasks. Release
+    // daemon.pid only afterwards so schema migration can trust the lease.
+    drop(runtime);
+    drop(pidfile);
+    result.map_err(AppError::Message)
 }
 
 fn stop_daemon() -> Result<(), AppError> {
@@ -139,8 +152,11 @@ fn current_executable() -> Result<PathBuf, AppError> {
 
 #[cfg(unix)]
 fn detach_into_background() -> Result<(), AppError> {
-    // Double-fork via libc::daemon. nochdir=1 keeps cwd, noclose=0 redirects
+    // Daemonize via the platform C library. nochdir=1 keeps cwd, noclose=0 redirects
     // stdio to /dev/null so the daemon doesn't keep the parent terminal open.
+    #[cfg(target_vendor = "apple")]
+    let rc = unsafe { apple_daemon(1, 0) };
+    #[cfg(not(target_vendor = "apple"))]
     #[allow(deprecated)]
     let rc = unsafe { libc::daemon(1, 0) };
     if rc != 0 {

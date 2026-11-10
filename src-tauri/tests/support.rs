@@ -23,12 +23,15 @@ pub fn ensure_test_home() -> &'static Path {
     std::env::set_var("HOME", home);
     #[cfg(windows)]
     std::env::set_var("USERPROFILE", home);
+    std::env::set_var("CC_SWITCH_TEST_HOME", home);
     std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
     std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
     std::env::set_var("XDG_STATE_HOME", home.join(".state"));
     std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
     std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
     std::env::set_var("CODEX_HOME", home.join(".codex"));
+    std::env::set_var("HERMES_HOME", home.join(".hermes"));
+    std::env::set_var("LOCALAPPDATA", home.join("AppData").join("Local"));
     home.as_path()
 }
 
@@ -39,7 +42,9 @@ pub fn reset_test_fs() {
     for sub in [
         ".claude",
         ".codex",
+        ".hermes",
         ".cc-switch",
+        ".agents",
         ".gemini",
         ".openclaw",
         ".config",

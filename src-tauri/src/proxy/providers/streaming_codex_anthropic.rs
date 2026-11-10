@@ -61,6 +61,7 @@ struct AnthropicToResponsesState {
     output_items: Vec<(u32, Value)>,
     anthropic_usage: Map<String, Value>,
     stop_reason: Option<String>,
+    stream_truncated: bool,
     tool_context: CodexToolContext,
 }
 
@@ -76,6 +77,7 @@ impl Default for AnthropicToResponsesState {
             output_items: Vec::new(),
             anthropic_usage: Map::new(),
             stop_reason: None,
+            stream_truncated: false,
             tool_context: CodexToolContext::default(),
         }
     }
@@ -374,7 +376,11 @@ impl AnthropicToResponsesState {
                 let is_custom_tool = self.tool_context.is_custom_tool_chat_name(&name);
                 let item = response_tool_call_item_from_chat_name(
                     &item_id,
-                    "completed",
+                    if self.stream_truncated {
+                        "incomplete"
+                    } else {
+                        "completed"
+                    },
                     &call_id,
                     &name,
                     &arguments,
@@ -382,19 +388,21 @@ impl AnthropicToResponsesState {
                     &self.tool_context,
                 );
                 let mut events = Vec::new();
-                if is_custom_tool {
-                    let input = item.get("input").and_then(Value::as_str).unwrap_or("");
-                    events.push(sse::custom_tool_call_input_done(
-                        output_index,
-                        &item_id,
-                        input,
-                    ));
-                } else {
-                    events.push(sse::function_call_arguments_done(
-                        output_index,
-                        &item_id,
-                        &arguments,
-                    ));
+                if !self.stream_truncated {
+                    if is_custom_tool {
+                        let input = item.get("input").and_then(Value::as_str).unwrap_or("");
+                        events.push(sse::custom_tool_call_input_done(
+                            output_index,
+                            &item_id,
+                            input,
+                        ));
+                    } else {
+                        events.push(sse::function_call_arguments_done(
+                            output_index,
+                            &item_id,
+                            &arguments,
+                        ));
+                    }
                 }
                 events.push(sse::output_item_done(output_index, &item));
                 self.output_items.push((output_index, item));
@@ -474,7 +482,7 @@ impl AnthropicToResponsesState {
             response["incomplete_details"] = json!({ "reason": reason });
         }
 
-        events.push(sse::response_completed(&response));
+        events.push(sse::response_terminal(&response));
         self.completed = true;
         events
     }
@@ -746,6 +754,7 @@ pub(crate) fn create_responses_sse_stream_from_anthropic_with_context<
                 // an I/O error) after emitting partial output. Report it as incomplete so
                 // Codex does not accept the truncated output as a normal completion.
                 state.stop_reason = Some("max_tokens".to_string());
+                state.stream_truncated = true;
                 for event in state.finalize() {
                     yield Ok(event);
                 }
@@ -898,10 +907,72 @@ mod tests {
         );
         let merged = run(input).await;
         assert!(merged.contains("\"delta\":\"partial\""));
-        assert!(merged.contains("event: response.completed"));
+        assert!(merged.contains("event: response.incomplete"));
+        assert!(!merged.contains("event: response.completed"));
         // The top-level response is incomplete (message output items keep their own
         // "completed" status, but the response status must not be "completed").
         assert!(merged.contains("\"status\":\"incomplete\""));
+        assert!(merged.contains("\"reason\":\"max_output_tokens\""));
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_stop_reasons_emit_response_incomplete_event() {
+        // Codex reads incomplete_details only from a response.incomplete event.
+        for (stop_reason, reason) in [
+            ("max_tokens", "max_output_tokens"),
+            ("refusal", "content_filter"),
+        ] {
+            let input = format!(
+                concat!(
+                    "event: message_start\n",
+                    "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_inc\",\"model\":\"claude\",\"usage\":{{\"input_tokens\":4}}}}}}\n\n",
+                    "event: content_block_start\n",
+                    "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
+                    "event: content_block_delta\n",
+                    "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"partial\"}}}}\n\n",
+                    "event: content_block_stop\n",
+                    "data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n",
+                    "event: message_delta\n",
+                    "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{}\"}},\"usage\":{{\"output_tokens\":8}}}}\n\n",
+                    "event: message_stop\n",
+                    "data: {{\"type\":\"message_stop\"}}\n\n"
+                ),
+                stop_reason
+            );
+            let merged = run(&input).await;
+            assert!(
+                merged.contains("event: response.incomplete"),
+                "{stop_reason}: {merged}"
+            );
+            assert!(
+                merged.contains("\"type\":\"response.incomplete\""),
+                "{stop_reason}"
+            );
+            assert!(
+                !merged.contains("event: response.completed"),
+                "{stop_reason}"
+            );
+            assert!(
+                merged.contains(&format!("\"reason\":\"{reason}\"")),
+                "{stop_reason}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_truncated_tool_call_is_not_marked_completed() {
+        let input = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tool_truncated\",\"model\":\"claude\"}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"exec\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\"}}\n\n"
+        );
+
+        let merged = run(input).await;
+        assert!(merged.contains("\"status\":\"incomplete\""));
+        assert!(!merged.contains("event: response.function_call_arguments.done"));
         assert!(merged.contains("\"reason\":\"max_output_tokens\""));
     }
 
@@ -999,6 +1070,8 @@ mod tests {
             "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n",
             "event: content_block_delta\n",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n",
             "event: content_block_stop\n",
             "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "event: message_delta\n",

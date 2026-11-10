@@ -11,6 +11,8 @@ pub struct ManagedAuthAccount {
     pub avatar_url: Option<String>,
     pub authenticated_at: i64,
     pub is_default: bool,
+    #[serde(default)]
+    pub reauth_required: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -51,6 +53,7 @@ fn map_account(
         login: account.login,
         avatar_url: account.avatar_url,
         authenticated_at: account.authenticated_at,
+        reauth_required: account.reauth_required,
     }
 }
 
@@ -72,9 +75,16 @@ pub struct AuthService;
 
 impl AuthService {
     pub async fn start_login(auth_provider: &str) -> Result<ManagedAuthDeviceCodeResponse, String> {
+        Self::start_login_for_account(auth_provider, None).await
+    }
+
+    pub async fn start_login_for_account(
+        auth_provider: &str,
+        account_id: Option<&str>,
+    ) -> Result<ManagedAuthDeviceCodeResponse, String> {
         let auth_provider = ensure_auth_provider(auth_provider)?;
         match auth_provider {
-            AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::start_device_flow()
+            AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::start_device_flow(account_id)
                 .await
                 .map(|response| map_device_code_response(auth_provider, response))
                 .map_err(|error| error.to_string()),
@@ -98,6 +108,10 @@ impl AuthService {
                     }))
                 }
                 Err(CodexOAuthError::AuthorizationPending) => Ok(None),
+                Err(CodexOAuthError::DuplicateAccount) => Err(
+                    "This account is already added. Reauthenticate the existing account instead."
+                        .to_string(),
+                ),
                 Err(error) => Err(error.to_string()),
             },
             _ => unreachable!(),
@@ -162,6 +176,31 @@ impl AuthService {
             AUTH_PROVIDER_CODEX_OAUTH => CodexOAuthService::set_default_account(account_id)
                 .await
                 .map_err(|error| error.to_string()),
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn get_quota(
+        auth_provider: &str,
+        account_id: Option<&str>,
+    ) -> Result<crate::services::subscription::SubscriptionQuota, String> {
+        let auth_provider = ensure_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_CODEX_OAUTH => Ok(CodexOAuthService::get_quota(account_id).await),
+            _ => unreachable!(),
+        }
+    }
+
+    pub async fn reset_quota(
+        auth_provider: &str,
+        account_id: Option<&str>,
+        credit_id: Option<&str>,
+    ) -> Result<crate::services::subscription::CodexResetConsumeResult, String> {
+        let auth_provider = ensure_auth_provider(auth_provider)?;
+        match auth_provider {
+            AUTH_PROVIDER_CODEX_OAUTH => {
+                CodexOAuthService::reset_quota(account_id, credit_id).await
+            }
             _ => unreachable!(),
         }
     }

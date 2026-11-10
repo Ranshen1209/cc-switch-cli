@@ -13,7 +13,10 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage_driver::{save_resume_hint, scan_jsonl_incremental};
+use crate::services::session_usage_driver::{
+    resume_hint_from_shared_cursor, save_resume_hint, scan_jsonl_incremental,
+    shared_tail_fingerprint_from_file, unchanged_jsonl_identity_is_suspicious,
+};
 use crate::services::usage_stats::{
     effective_usage_log_filter, find_model_pricing, should_skip_session_insert, DedupKey,
 };
@@ -21,20 +24,31 @@ use crate::session_manager::scan_cache_store::{ScanCacheStore, SyncResumeHint};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
 const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ClaudeSyncState {
+    last_modified: i64,
+    last_line_offset: i64,
+    last_byte_offset: Option<i64>,
+    last_tail_fingerprint: Option<i64>,
+}
+
 /// 同步结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSyncResult {
     pub imported: u32,
     pub skipped: u32,
     pub files_scanned: u32,
+    pub suspected_duplicates: u32,
+    pub deferred_files: u32,
     pub errors: Vec<String>,
 }
 
@@ -50,11 +64,160 @@ pub struct DataSourceSummary {
 
 impl SessionSyncResult {
     pub fn merge(&mut self, other: SessionSyncResult) {
-        self.imported += other.imported;
-        self.skipped += other.skipped;
-        self.files_scanned += other.files_scanned;
+        self.imported = self.imported.saturating_add(other.imported);
+        self.skipped = self.skipped.saturating_add(other.skipped);
+        self.files_scanned = self.files_scanned.saturating_add(other.files_scanned);
+        self.suspected_duplicates = self
+            .suspected_duplicates
+            .saturating_add(other.suspected_duplicates);
+        self.deferred_files = self.deferred_files.saturating_add(other.deferred_files);
         self.errors.extend(other.errors);
     }
+}
+
+/// Serializes session usage imports within this process. Callers that need a
+/// multi-step operation (backup -> reset -> reimport) hold the same lock for
+/// the complete sequence.
+pub(crate) fn session_sync_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Serializes session imports across both threads and cc-switch processes.
+///
+/// The file lock lives beside the database so the TUI, daemon, and one-shot
+/// CLI commands all rendezvous on the same inode. In-memory test databases do
+/// not have a cross-process representation and therefore use only the process
+/// mutex.
+pub(crate) struct SessionSyncGuard {
+    file: Option<File>,
+    _process: MutexGuard<'static, ()>,
+}
+
+// Rust 1.91's std file-lock implementation returns Unsupported on Android
+// without calling Bionic's available flock(2). Keep the workaround scoped to
+// Android so every other target retains the existing std behavior.
+#[cfg(target_os = "android")]
+fn android_session_sync_flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn lock_session_sync_file(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "android")]
+    return android_session_sync_flock(file, libc::LOCK_EX);
+
+    #[cfg(not(target_os = "android"))]
+    file.lock()
+}
+
+fn unlock_session_sync_file(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "android")]
+    return android_session_sync_flock(file, libc::LOCK_UN);
+
+    #[cfg(not(target_os = "android"))]
+    file.unlock()
+}
+
+impl Drop for SessionSyncGuard {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            let _ = unlock_session_sync_file(file);
+        }
+    }
+}
+
+fn open_session_sync_lock(path: &Path) -> Result<File, AppError> {
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AppError::InvalidInput(format!(
+            "会话用量同步锁不能是符号链接: {}",
+            path.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| AppError::io(path, error))?
+    };
+
+    #[cfg(not(unix))]
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| AppError::io(path, error))?;
+
+    let metadata = file.metadata().map_err(|error| AppError::io(path, error))?;
+    if !metadata.is_file() {
+        return Err(AppError::InvalidInput(format!(
+            "会话用量同步锁不是普通文件: {}",
+            path.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.nlink() != 1 {
+            return Err(AppError::InvalidInput(format!(
+                "会话用量同步锁不能是硬链接: {}",
+                path.display()
+            )));
+        }
+
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| AppError::io(path, error))?;
+    }
+
+    Ok(file)
+}
+
+/// Acquire the process-wide mutex and then the database-scoped file lock. A
+/// panic in an earlier sync must not permanently disable future imports; the
+/// protected state is committed through SQLite transactions, so recovering a
+/// poisoned mutex is safe.
+pub(crate) fn acquire_session_sync_guard(db: &Database) -> Result<SessionSyncGuard, AppError> {
+    let process = match session_sync_mutex().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Session usage sync lock was poisoned; recovering it");
+            poisoned.into_inner()
+        }
+    };
+
+    let file = db
+        .session_usage_lock_path()
+        .map(|path| {
+            let file = open_session_sync_lock(&path)?;
+            lock_session_sync_file(&file).map_err(|error| AppError::io(&path, error))?;
+            Ok::<_, AppError>(file)
+        })
+        .transpose()?;
+
+    Ok(SessionSyncGuard {
+        file,
+        _process: process,
+    })
 }
 
 /// 从 JSONL 中解析出的 assistant 消息使用数据
@@ -169,6 +332,34 @@ pub mod sync_progress {
 }
 
 pub fn sync_all_session_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
+    let _sync_guard = acquire_session_sync_guard(db)?;
+    sync_all_session_usage_unlocked(db)
+}
+
+/// Rebuild Codex session usage from its local rollout logs.
+///
+/// The shared sync guard intentionally covers the whole backup -> reset ->
+/// reimport sequence. A failed backup returns before any usage row is
+/// removed. Once reset succeeds, the Usage view must be notified even when
+/// the reimport is empty or fails so it never keeps rendering stale rows.
+pub(crate) fn rebuild_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
+    let _sync_guard = acquire_session_sync_guard(db)?;
+    db.backup_database_file()?;
+    db.reset_codex_usage()?;
+
+    let result = {
+        let _progress = sync_progress::begin();
+        let _durability = db.bulk_import_durability_guard();
+        crate::services::session_usage_codex::sync_codex_usage(db)
+    };
+    crate::usage_events::notify_log_recorded();
+    result
+}
+
+/// Synchronization core for callers that already hold [`session_sync_mutex`].
+pub(crate) fn sync_all_session_usage_unlocked(
+    db: &Database,
+) -> Result<SessionSyncResult, AppError> {
     let _progress = sync_progress::begin();
     // 导入周期内本连接临时 synchronous=NORMAL（守卫恢复 FULL）：批量事务
     // 不逐次 fsync，HDD/macOS 上是首次导入的主要开销；usage 行可从源文件
@@ -178,6 +369,8 @@ pub fn sync_all_session_usage(db: &Database) -> Result<SessionSyncResult, AppErr
         imported: 0,
         skipped: 0,
         files_scanned: 0,
+        suspected_duplicates: 0,
+        deferred_files: 0,
         errors: vec![],
     };
     merge_sync_step(&mut result, "Claude", sync_claude_session_logs(db));
@@ -196,6 +389,14 @@ pub fn sync_all_session_usage(db: &Database) -> Result<SessionSyncResult, AppErr
         "OpenCode",
         crate::services::session_usage_opencode::sync_opencode_usage(db),
     );
+    merge_sync_step(
+        &mut result,
+        "Pi",
+        crate::services::session_usage_pi::sync_pi_usage(db),
+    );
+    if result.imported > 0 {
+        crate::usage_events::notify_log_recorded();
+    }
     Ok(result)
 }
 
@@ -225,6 +426,8 @@ pub(crate) fn run_session_usage_sync_cycle(
         imported: 0,
         skipped: 0,
         files_scanned: 0,
+        suspected_duplicates: 0,
+        deferred_files: 0,
         errors: vec![],
     };
 
@@ -267,22 +470,12 @@ pub(crate) fn spawn_periodic_session_usage_sync(
     db: Arc<Database>,
     context: &'static str,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_periodic_session_usage_sync_after(db, context, Duration::ZERO)
-}
-
-pub(crate) fn spawn_periodic_session_usage_sync_after(
-    db: Arc<Database>,
-    context: &'static str,
-    initial_delay: Duration,
-) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if !initial_delay.is_zero() {
-            tokio::time::sleep(initial_delay).await;
-        }
         run_session_usage_sync_cycle_on_blocking_thread(db.clone(), format!("{context}-initial"))
             .await;
 
         let mut interval = tokio::time::interval(Duration::from_secs(SESSION_SYNC_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
             interval.tick().await;
@@ -325,6 +518,35 @@ async fn run_periodic_session_usage_sync_tick_on_blocking_thread(
     run_session_usage_sync_cycle_on_blocking_thread(db, context).await;
 }
 
+/// Load the shared Claude cursor columns added by upstream schema v18.
+/// A failed read aborts the Claude pass so missing cursor state cannot turn
+/// into a full historical replay after detail rows have been rolled up.
+fn load_claude_sync_states(db: &Database) -> Result<HashMap<String, ClaudeSyncState>, AppError> {
+    let conn = lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_path, last_modified, last_line_offset, last_byte_offset,
+                    last_tail_fingerprint
+             FROM session_log_sync",
+        )
+        .map_err(|e| AppError::Database(format!("预取 Claude 同步游标失败: {e}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                ClaudeSyncState {
+                    last_modified: row.get(1)?,
+                    last_line_offset: row.get(2)?,
+                    last_byte_offset: row.get(3)?,
+                    last_tail_fingerprint: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(|e| AppError::Database(format!("预取 Claude 同步游标失败: {e}")))?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|e| AppError::Database(format!("预取 Claude 同步游标失败: {e}")))
+}
+
 /// 同步 Claude Code 会话日志到使用统计数据库
 pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppError> {
     let projects_dir = get_claude_config_dir().join("projects");
@@ -333,6 +555,8 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
             imported: 0,
             skipped: 0,
             files_scanned: 0,
+            suspected_duplicates: 0,
+            deferred_files: 0,
             errors: vec![],
         });
     }
@@ -341,6 +565,8 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
         imported: 0,
         skipped: 0,
         files_scanned: 0,
+        suspected_duplicates: 0,
+        deferred_files: 0,
         errors: vec![],
     };
 
@@ -348,7 +574,7 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
     let jsonl_files = collect_jsonl_files(&projects_dir);
 
     // 一次性读取全部同步状态，避免对每个文件单独查询数据库。
-    let sync_states = get_all_sync_states(db)?;
+    let sync_states = load_claude_sync_states(db)?;
 
     // 本次同步周期共享的定价缓存，避免每条消息重复查 model_pricing 表。
     let mut pricing_cache = PricingCache::new();
@@ -471,6 +697,160 @@ struct ClaudeResumeState {
     session_id: Option<String>,
 }
 
+enum ClaudeCursorResolution {
+    SkipUnchanged,
+    Continue {
+        file: Option<File>,
+        hint: Option<SyncResumeHint>,
+    },
+}
+
+/// Convert upstream's legacy line cursor to the byte immediately after the
+/// same `read_until` fragments, including a final fragment without `\n`.
+fn legacy_cursor_hint(
+    file: &mut File,
+    file_path: &str,
+    state: ClaudeSyncState,
+) -> Result<SyncResumeHint, AppError> {
+    let mut byte_offset = 0u64;
+    {
+        let mut reader = BufReader::new(&mut *file);
+        let mut raw = Vec::new();
+        for _ in 0..state.last_line_offset {
+            raw.clear();
+            let read = reader
+                .read_until(b'\n', &mut raw)
+                .map_err(|e| AppError::Config(format!("读取 Claude 旧行游标失败: {e}")))?;
+            if read == 0 {
+                break;
+            }
+            byte_offset += read as u64;
+        }
+    }
+
+    let parser_state = serde_json::to_string(&ClaudeResumeState { session_id: None })
+        .map_err(|e| AppError::Config(format!("序列化 Claude 续传状态失败: {e}")))?;
+    resume_hint_from_shared_cursor(
+        file,
+        file_path,
+        state.last_modified,
+        state.last_line_offset,
+        byte_offset,
+        parser_state,
+    )
+    .ok_or_else(|| AppError::Config("无法转换 Claude 旧行游标".to_string()))
+}
+
+/// Resolve a legacy or v18 Claude cursor and retain the validated descriptor
+/// for scanning, closing the validate/reopen race around path replacement.
+fn resolve_claude_cursor(
+    db: &Database,
+    file_path: &Path,
+    state: ClaudeSyncState,
+    resume_line_offset: i64,
+    matching_sidecar: Option<&SyncResumeHint>,
+) -> Result<ClaudeCursorResolution, AppError> {
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
+    let file_modified = metadata_modified_nanos(&metadata);
+    if file_modified <= state.last_modified {
+        if state.last_byte_offset.is_none() {
+            return Ok(ClaudeCursorResolution::SkipUnchanged);
+        }
+        let mut identity_hint = matching_sidecar.cloned();
+        if let Some(hint) = identity_hint.as_mut() {
+            hint.last_line_offset = resume_line_offset;
+        }
+        if !unchanged_jsonl_identity_is_suspicious(
+            &metadata,
+            identity_hint.as_ref(),
+            state.last_modified,
+            resume_line_offset,
+        ) {
+            return Ok(ClaudeCursorResolution::SkipUnchanged);
+        }
+    }
+
+    let mut file =
+        File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
+    let file_modified = metadata_modified_nanos(&metadata);
+    let file_size = metadata.len();
+    let Some(raw_offset) = state.last_byte_offset else {
+        let hint = if state.last_line_offset > 0 {
+            Some(legacy_cursor_hint(
+                &mut file,
+                &file_path.to_string_lossy(),
+                state,
+            )?)
+        } else {
+            None
+        };
+        return Ok(ClaudeCursorResolution::Continue {
+            file: Some(file),
+            hint,
+        });
+    };
+    let byte_offset = u64::try_from(raw_offset).ok();
+    let mut rewrite_reason = match byte_offset {
+        Some(offset) if offset <= file_size => None,
+        _ => Some("截断"),
+    };
+
+    if let Some(offset) = byte_offset.filter(|offset| *offset <= file_size) {
+        if let Some(expected) = state.last_tail_fingerprint {
+            let actual = shared_tail_fingerprint_from_file(&mut file, offset)
+                .ok_or_else(|| AppError::Config("无法读取 Claude 游标边界尾部".to_string()))?;
+            if actual != expected {
+                rewrite_reason = Some("重写");
+            }
+        }
+    }
+
+    if let Some(reason) = rewrite_reason {
+        let fingerprint = shared_tail_fingerprint_from_file(&mut file, file_size)
+            .ok_or_else(|| AppError::Config("无法读取 Claude 文件尾部".to_string()))?;
+        let pinned_offset = i64::try_from(file_size)
+            .map_err(|_| AppError::Config("Claude 会话日志过大，无法保存字节游标".to_string()))?;
+        let conn = lock_conn!(db.conn);
+        update_claude_sync_state_conn(
+            &conn,
+            &file_path.to_string_lossy(),
+            file_modified,
+            pinned_offset,
+            Some(fingerprint),
+        )?;
+        return Err(AppError::Config(format!(
+            "检测到文件被外部{reason}，改写区间已跳过以防重复计数（不会再导入）"
+        )));
+    }
+
+    let byte_offset = byte_offset.unwrap_or_default();
+    if byte_offset == 0 {
+        return Ok(ClaudeCursorResolution::Continue {
+            file: Some(file),
+            hint: None,
+        });
+    }
+    let parser_state = serde_json::to_string(&ClaudeResumeState { session_id: None })
+        .map_err(|e| AppError::Config(format!("序列化 Claude 续传状态失败: {e}")))?;
+    let hint = resume_hint_from_shared_cursor(
+        &mut file,
+        &file_path.to_string_lossy(),
+        state.last_modified,
+        resume_line_offset,
+        byte_offset,
+        parser_state,
+    )
+    .ok_or_else(|| AppError::Config("无法建立 Claude 字节续传提示".to_string()))?;
+    Ok(ClaudeCursorResolution::Continue {
+        file: Some(file),
+        hint: Some(hint),
+    })
+}
+
 /// 同步单个 JSONL 文件，返回 (imported, skipped)
 ///
 /// 文件读取走通用增量驱动（`session_usage_driver`）：mtime 跳过、sidecar
@@ -480,7 +860,7 @@ fn sync_single_file(
     db: &Database,
     file_path: &Path,
     file_mtime: i64,
-    sync_states: &HashMap<String, (i64, i64)>,
+    sync_states: &HashMap<String, ClaudeSyncState>,
     pricing_cache: &mut PricingCache,
     resume: Option<&ScanCacheStore>,
     resume_hints: &HashMap<String, SyncResumeHint>,
@@ -488,19 +868,64 @@ fn sync_single_file(
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 检查同步状态（从预加载的快照读取，避免每个文件一次 DB 查询）
-    let (last_modified, last_offset) = sync_states.get(&file_path_str).copied().unwrap_or((0, 0));
+    let state = sync_states.get(&file_path_str).copied().unwrap_or_default();
+    // 通用驱动只把非零行游标视为可续传。上游 v18 固定写 0，因此字节游标
+    // 非零时仅在本轮驱动快照中使用 1；提交主库和 sidecar 前仍写回上游的 0。
+    let driver_line_offset = if state.last_byte_offset.is_some_and(|offset| offset > 0) {
+        state.last_line_offset.max(1)
+    } else {
+        state.last_line_offset
+    };
 
     let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
 
     // fix 2：续传提示取自预载 map（零 per-file 查询）；sidecar 是否可用另行传入，
     // 供驱动决定末行无换行时是否回退 mtime-1。
-    let hint = resume_hints.get(&file_path_str).cloned();
+    let mut hint = resume_hints.get(&file_path_str).cloned();
+    let sidecar_matches = hint.as_ref().is_some_and(|hint| {
+        hint.last_modified == state.last_modified
+            && hint.last_line_offset == state.last_line_offset
+            && state
+                .last_byte_offset
+                .is_none_or(|offset| hint.byte_offset == offset)
+    });
+    let matching_sidecar = sidecar_matches.then_some(hint.as_ref()).flatten();
+    let scan_file;
+    match resolve_claude_cursor(db, file_path, state, driver_line_offset, matching_sidecar)? {
+        ClaudeCursorResolution::SkipUnchanged => return Ok((0, 0)),
+        ClaudeCursorResolution::Continue {
+            file,
+            hint: Some(mut resolved_hint),
+        } => {
+            scan_file = file;
+            if state.last_byte_offset.is_some() && sidecar_matches {
+                let local_hint = hint.as_ref().expect("matching hint must exist");
+                let local_state_is_valid = local_hint
+                    .state
+                    .as_deref()
+                    .is_some_and(|state| serde_json::from_str::<ClaudeResumeState>(state).is_ok());
+                if local_state_is_valid {
+                    resolved_hint.state.clone_from(&local_hint.state);
+                    resolved_hint.pending_tail_len = local_hint.pending_tail_len;
+                    resolved_hint.pending_tail_hash = local_hint.pending_tail_hash;
+                }
+            }
+            hint = Some(resolved_hint);
+        }
+        ClaudeCursorResolution::Continue { file, hint: None } => {
+            scan_file = file;
+            if state.last_byte_offset.is_none() || !sidecar_matches {
+                hint = None;
+            }
+        }
+    }
 
     let outcome = scan_jsonl_incremental(
         file_path,
+        scan_file,
         file_mtime,
-        last_modified,
-        last_offset,
+        state.last_modified,
+        driver_line_offset,
         hint,
         resume.is_some(),
         || ClaudeResumeState { session_id: None },
@@ -581,9 +1006,12 @@ fn sync_single_file(
     )?;
 
     // 文件未变化（mtime 跳过）
-    let Some(outcome) = outcome else {
+    let Some(mut outcome) = outcome else {
         return Ok((0, 0));
     };
+    let shared_tail_fingerprint = outcome
+        .shared_tail_fingerprint
+        .ok_or_else(|| AppError::Config("无法计算 Claude 游标边界指纹".to_string()))?;
 
     // 写入数据库：整文件在一个事务内完成 INSERT / 去重查询 / 同步状态更新，
     // 超大文件每 SESSION_LOG_COMMIT_BATCH 行分段提交，避免逐行 fsync。
@@ -634,23 +1062,23 @@ fn sync_single_file(
     }
 
     // 在同一事务内更新同步状态后统一提交
-    update_sync_state_conn(
+    let byte_offset = i64::try_from(outcome.byte_pos)
+        .map_err(|_| AppError::Config("Claude 会话日志过大，无法保存字节游标".to_string()))?;
+    update_claude_sync_state_conn(
         &tx,
         &file_path_str,
         outcome.file_modified,
-        outcome.line_offset,
+        byte_offset,
+        Some(shared_tail_fingerprint),
     )?;
     tx.commit()
         .map_err(|e| AppError::Database(format!("提交事务失败: {e}")))?;
     drop(guard);
 
+    // 与上游一致，字节游标建立后共享行号固定为 0；sidecar 也使用相同快照值。
+    outcome.line_offset = 0;
     // 主库进度提交成功后，把字节位置与状态写回 sidecar（尽力而为）
     save_resume_hint(resume, &file_path_str, &outcome);
-
-    // 每个文件若有新插入行，只通知一次（旧实现为每行一次）
-    if imported > 0 {
-        crate::usage_events::notify_log_recorded();
-    }
 
     Ok((imported, skipped))
 }
@@ -758,6 +1186,50 @@ pub(crate) fn update_sync_state_conn(
     Ok(())
 }
 
+/// Write the shared v18 Claude cursor using upstream's byte-offset,
+/// fingerprint, and fixed-zero line-offset semantics.
+fn update_claude_sync_state_conn(
+    conn: &rusqlite::Connection,
+    file_path: &str,
+    last_modified: i64,
+    last_byte_offset: i64,
+    last_tail_fingerprint: Option<i64>,
+) -> Result<(), AppError> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    conn.prepare_cached(
+        "INSERT OR REPLACE INTO session_log_sync
+             (file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset,
+              last_tail_fingerprint)
+         VALUES (?1, ?2, 0, ?3, ?4, ?5)",
+    )
+    .and_then(|mut stmt| {
+        stmt.execute(rusqlite::params![
+            file_path,
+            last_modified,
+            now,
+            last_byte_offset,
+            last_tail_fingerprint,
+        ])
+    })
+    .map_err(|e| AppError::Database(format!("更新 Claude 同步状态失败: {e}")))?;
+    Ok(())
+}
+
+/// Update one session cursor outside an existing transaction.
+pub(crate) fn update_sync_state(
+    db: &Database,
+    file_path: &str,
+    last_modified: i64,
+    last_offset: i64,
+) -> Result<(), AppError> {
+    let conn = lock_conn!(db.conn);
+    update_sync_state_conn(&conn, file_path, last_modified, last_offset)
+}
+
 /// 插入单条会话日志到 proxy_request_logs，返回是否成功插入 (true=新插入, false=已存在)
 ///
 /// 调用方在同一事务连接上批量调用本函数；INSERT 与去重查询均走 prepare_cached
@@ -807,6 +1279,11 @@ fn insert_session_log_entry(
     };
 
     let pricing = cached_model_pricing(conn, pricing_cache, &msg.model);
+    let pricing_model = if pricing.is_some() {
+        msg.model.as_str()
+    } else {
+        ""
+    };
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -832,12 +1309,12 @@ fn insert_session_log_entry(
     let mut stmt = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO proxy_request_logs (
-            request_id, provider_id, app_type, model, request_model,
+            request_id, provider_id, app_type, model, request_model, pricing_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )
         .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
     let inserted_rows = stmt
@@ -847,6 +1324,7 @@ fn insert_session_log_entry(
             "claude",   // app_type
             msg.model,
             msg.model, // request_model = model
+            pricing_model,
             msg.input_tokens,
             msg.output_tokens,
             msg.cache_read_tokens,
@@ -960,7 +1438,83 @@ pub(crate) fn delete_session_logs_covered_by_proxy_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_manager::scan_cache_store::ScanCacheStore;
+
+    #[test]
+    fn memory_database_session_guard_does_not_create_a_lock_file() -> Result<(), AppError> {
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::memory()?;
+        assert!(db.session_usage_lock_path().is_none());
+        let _guard = acquire_session_sync_guard(&db)?;
+        assert!(!home.path().join(".cc-switch").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_sync_lock_rejects_symlinks_and_hardlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target");
+        fs::write(&target, b"sentinel").expect("seed target");
+
+        let symlink_path = temp.path().join("symlink.lock");
+        symlink(&target, &symlink_path).expect("create symlink");
+        assert!(open_session_sync_lock(&symlink_path).is_err());
+
+        let hardlink_path = temp.path().join("hardlink.lock");
+        fs::hard_link(&target, &hardlink_path).expect("create hardlink");
+        assert!(open_session_sync_lock(&hardlink_path).is_err());
+        assert_eq!(fs::read(&target).expect("read target"), b"sentinel");
+    }
+
+    #[test]
+    fn session_sync_guard_blocks_another_process_and_keeps_lock_inode() -> Result<(), AppError> {
+        const CHILD_ENV: &str = "CC_SWITCH_TEST_SESSION_LOCK_CHILD";
+        const TEST_NAME: &str = "services::session_usage::tests::session_sync_guard_blocks_another_process_and_keeps_lock_inode";
+
+        if let Some(home) = std::env::var_os(CHILD_ENV) {
+            let home = PathBuf::from(home);
+            let _env = crate::test_support::TestEnvGuard::isolated(&home);
+            let db = Database::init()?;
+            fs::write(home.join("attempted"), b"1").expect("write attempted marker");
+            let _guard = acquire_session_sync_guard(&db)?;
+            fs::write(home.join("acquired"), b"1").expect("write acquired marker");
+            return Ok(());
+        }
+
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init()?;
+        let lock_path = db.session_usage_lock_path().expect("file database lock");
+        let guard = acquire_session_sync_guard(&db)?;
+
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("resolve current test executable"),
+        )
+        .args(["--exact", TEST_NAME, "--test-threads=1"])
+        .env(CHILD_ENV, home.path())
+        .spawn()
+        .expect("spawn lock contender");
+
+        let attempted = home.path().join("attempted");
+        let acquired = home.path().join("acquired");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !attempted.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(attempted.exists(), "child did not reach lock acquisition");
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!acquired.exists(), "child bypassed the held file lock");
+
+        drop(guard);
+        let status = child.wait().expect("wait for lock contender");
+        assert!(status.success(), "lock contender failed: {status}");
+        assert!(acquired.exists());
+        assert!(lock_path.exists(), "lock file must keep a stable inode");
+        Ok(())
+    }
 
     /// sync_progress：begin 归零并置 active，guard drop 后 snapshot 归 None。
     /// （lib 测试内只有本用例读写这些计数器：单文件级 sync_* 测试不经过
@@ -977,52 +1531,111 @@ mod tests {
         assert!(sync_progress::snapshot().is_none());
     }
 
-    /// 字节续传判别测试：sync1 后把头部第一个换行改成空格（总字节数不变、
-    /// 行数少一），再追加新消息并 bump mtime。行式回退路径会因行号整体前移把
-    /// 新行误跳过（对照组导入 0 条）；字节续传路径 seek 越过被改动的头部，
-    /// 恰好只读到新增行（实验组导入 1 条）。
     #[test]
-    fn test_byte_resume_survives_head_line_shift() -> Result<(), AppError> {
-        let m1 = r#"{"type":"assistant","message":{"id":"m1","model":"claude-x","usage":{"input_tokens":10,"output_tokens":100},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s1"}"#;
-        let m2 = r#"{"type":"assistant","message":{"id":"m2","model":"claude-x","usage":{"input_tokens":11,"output_tokens":200},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:01Z","sessionId":"s1"}"#;
-        let m3 = r#"{"type":"assistant","message":{"id":"m3","model":"claude-x","usage":{"input_tokens":12,"output_tokens":300},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:02Z","sessionId":"s1"}"#;
+    fn claude_session_import_records_explicit_pricing_evidence() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        conn.execute(
+            "INSERT OR REPLACE INTO model_pricing (
+                 model_id, display_name, input_cost_per_million,
+                 output_cost_per_million, cache_read_cost_per_million,
+                 cache_creation_cost_per_million
+             ) VALUES ('writer-priced-free', 'Writer Priced Free', '0', '0', '0', '0')",
+            [],
+        )?;
 
-        let run = |resume: Option<&ScanCacheStore>| -> Result<(u32, u32), AppError> {
-            let db = Database::memory()?;
-            let tmp = tempfile::tempdir().expect("tempdir");
-            let path = write_temp_jsonl(tmp.path(), "session.jsonl", &format!("{m1}\n{m2}\n"));
-            let path_str = path.to_string_lossy().to_string();
-            let mut cache = PricingCache::new();
+        let mut pricing_cache = PricingCache::new();
+        for (request_id, model, timestamp) in [
+            (
+                "claude-priced-evidence",
+                "writer-priced-free",
+                "1970-01-01T00:16:40Z",
+            ),
+            (
+                "claude-unpriced-evidence",
+                "writer-unknown",
+                "1970-01-01T00:33:20Z",
+            ),
+        ] {
+            let message = ParsedAssistantUsage {
+                message_id: request_id.to_string(),
+                model: model.to_string(),
+                input_tokens: 10,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                stop_reason: Some("end_turn".to_string()),
+                timestamp: Some(timestamp.to_string()),
+                session_id: Some(request_id.to_string()),
+            };
+            assert!(insert_session_log_entry(
+                &conn,
+                &mut pricing_cache,
+                request_id,
+                &message
+            )?);
+        }
 
-            // fix 2：提示由调用方预载后传入；测试每次调用前从 store 现取（等价生产
-            // 侧从预载 map 查找），使第二次调用能拿到第一次保存的续传提示。
-            let hints = resume
-                .map(|s| s.load_all_sync_resume().unwrap_or_default())
-                .unwrap_or_default();
-            let (imported, _) =
-                sync_single_file(&db, &path, 1, &HashMap::new(), &mut cache, resume, &hints)?;
-            assert_eq!(imported, 2);
+        let priced: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'claude-priced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        let unpriced: Option<String> = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs
+             WHERE request_id = 'claude-unpriced-evidence'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(priced.as_deref(), Some("writer-priced-free"));
+        assert_eq!(
+            unpriced.as_deref(),
+            Some(""),
+            "new unpriced rows must be explicit rather than legacy NULL"
+        );
 
-            // 头部换行 → 空格（字节数不变，行边界移位），再追加 m3
-            let content = fs::read_to_string(&path).expect("read back");
-            let shifted = content.replacen('\n', " ", 1) + m3 + "\n";
-            fs::write(&path, shifted).expect("rewrite");
+        Ok(())
+    }
 
-            let mut states = HashMap::new();
-            states.insert(path_str, get_sync_state(&db, &path.to_string_lossy())?);
-            let hints = resume
-                .map(|s| s.load_all_sync_resume().unwrap_or_default())
-                .unwrap_or_default();
-            sync_single_file(&db, &path, 2, &states, &mut cache, resume, &hints)
-        };
+    #[cfg(unix)]
+    #[test]
+    fn codex_rebuild_backup_failure_keeps_existing_usage() -> Result<(), AppError> {
+        use std::os::unix::fs::symlink;
 
-        // 对照组（无续传提示）：行号前移导致 m3 被误跳过——这正是字节续传要修的
-        assert_eq!(run(None)?, (0, 0));
+        let home = tempfile::tempdir().expect("isolated test home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model, input_tokens,
+                    output_tokens, cache_read_tokens, latency_ms, status_code,
+                    created_at, data_source
+                 ) VALUES
+                    ('codex-before-failed-backup', '_codex_session', 'codex', 'gpt',
+                     1, 1, 0, 0, 200, 1, 'codex_session');",
+            )?;
+        }
 
-        // 实验组（字节续传）：seek 越过头部，精确导入 m3
-        let store = ScanCacheStore::in_memory()?;
-        assert_eq!(run(Some(&store))?, (1, 0));
+        let backup_dir = home.path().join(".cc-switch/backups");
+        if backup_dir.exists() {
+            fs::remove_dir_all(&backup_dir).expect("remove existing backup directory");
+        }
+        let outside = home.path().join("outside-backups");
+        fs::create_dir_all(&outside).expect("create external backup target");
+        symlink(&outside, &backup_dir).expect("create backup directory symlink");
 
+        assert!(rebuild_codex_usage(&db).is_err());
+        let conn = lock_conn!(db.conn);
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs
+             WHERE request_id = 'codex-before-failed-backup'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(remaining, 1);
         Ok(())
     }
 
@@ -1260,11 +1873,390 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn shared_v18_cursor_resumes_without_reimporting_prefix() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = r#"{"type":"assistant","message":{"id":"shared-a","model":"claude-x","usage":{"input_tokens":10,"output_tokens":100},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s1"}"#;
+        let second = r#"{"type":"assistant","message":{"id":"shared-b","model":"claude-x","usage":{"input_tokens":11,"output_tokens":200},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:01Z","sessionId":"s1"}"#;
+        let third = r#"{"type":"assistant","message":{"id":"shared-c","model":"claude-x","usage":{"input_tokens":12,"output_tokens":300},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:02Z","sessionId":"s1"}"#;
+        let prefix = format!("{first}\n{second}\n");
+        let path = write_temp_jsonl(
+            tmp.path(),
+            "shared-v18.jsonl",
+            &format!("{prefix}{third}\n"),
+        );
+        let path_str = path.to_string_lossy().to_string();
+
+        let prefix_offset = prefix.len() as u64;
+        let prefix_fingerprint = {
+            let mut file = File::open(&path).expect("open shared cursor file");
+            shared_tail_fingerprint_from_file(&mut file, prefix_offset).expect("fingerprint prefix")
+        };
+        let mut states = HashMap::new();
+        states.insert(
+            path_str.clone(),
+            ClaudeSyncState {
+                last_modified: 1,
+                last_line_offset: 0,
+                last_byte_offset: Some(prefix_offset as i64),
+                last_tail_fingerprint: Some(prefix_fingerprint),
+            },
+        );
+        let mut stale_sidecar = {
+            let mut file = File::open(&path).expect("open stale sidecar file");
+            resume_hint_from_shared_cursor(
+                &mut file,
+                &path_str,
+                1,
+                0,
+                prefix_offset,
+                serde_json::to_string(&ClaudeResumeState { session_id: None })
+                    .expect("serialize state"),
+            )
+            .expect("build stale sidecar hint")
+        };
+        stale_sidecar.state = Some("not-json".to_string());
+        let hints = HashMap::from([(path_str.clone(), stale_sidecar)]);
+
+        let mut pricing_cache = PricingCache::new();
+        let result = sync_single_file(&db, &path, 2, &states, &mut pricing_cache, None, &hints)?;
+        assert_eq!(result, (1, 0));
+
+        let conn = lock_conn!(db.conn);
+        let imported: Vec<String> = conn
+            .prepare(
+                "SELECT request_id FROM proxy_request_logs
+                 WHERE request_id IN ('session:shared-a', 'session:shared-b', 'session:shared-c')
+                 ORDER BY request_id",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(imported, vec!["session:shared-c"]);
+        let cursor: (i64, i64, Option<i64>) = conn.query_row(
+            "SELECT last_line_offset, last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = ?1",
+            [&path_str],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(cursor.0, 0);
+        assert_eq!(
+            cursor.1,
+            fs::metadata(&path).expect("stat shared cursor file").len() as i64
+        );
+        assert!(cursor.2.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_line_cursor_converts_without_reimporting_prefix() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = r#"{"type":"assistant","message":{"id":"legacy-a","model":"claude-x","usage":{"input_tokens":10,"output_tokens":100},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s1"}"#;
+        let replacement = first.replace("legacy-a", "legacy-x");
+        assert_eq!(first.len(), replacement.len());
+        let second = r#"{"type":"assistant","message":{"id":"legacy-b","model":"claude-x","usage":{"input_tokens":11,"output_tokens":200},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:01Z","sessionId":"s1"}"#;
+        let path = write_temp_jsonl(
+            tmp.path(),
+            "legacy-v17.jsonl",
+            &format!("{first}\n{second}\n"),
+        );
+        let path_str = path.to_string_lossy().to_string();
+        let stale_sidecar = {
+            let mut file = File::open(&path).expect("open legacy file");
+            resume_hint_from_shared_cursor(
+                &mut file,
+                &path_str,
+                1,
+                1,
+                (first.len() + 1) as u64,
+                serde_json::to_string(&ClaudeResumeState { session_id: None })
+                    .expect("serialize state"),
+            )
+            .expect("build legacy sidecar")
+        };
+        fs::write(&path, format!("{replacement}\n{second}\n")).expect("rewrite legacy prefix");
+        let states = HashMap::from([(
+            path_str.clone(),
+            ClaudeSyncState {
+                last_modified: 1,
+                last_line_offset: 1,
+                last_byte_offset: None,
+                last_tail_fingerprint: None,
+            },
+        )]);
+        let hints = HashMap::from([(path_str.clone(), stale_sidecar)]);
+
+        let mut pricing_cache = PricingCache::new();
+        assert_eq!(
+            sync_single_file(&db, &path, 2, &states, &mut pricing_cache, None, &hints,)?,
+            (1, 0)
+        );
+
+        let conn = lock_conn!(db.conn);
+        let imported: Vec<String> = conn
+            .prepare(
+                "SELECT request_id FROM proxy_request_logs
+                 WHERE request_id IN ('session:legacy-a', 'session:legacy-b', 'session:legacy-x')
+                 ORDER BY request_id",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(imported, vec!["session:legacy-b"]);
+        let cursor: (i64, i64, Option<i64>) = conn.query_row(
+            "SELECT last_line_offset, last_byte_offset, last_tail_fingerprint
+             FROM session_log_sync WHERE file_path = ?1",
+            [&path_str],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(cursor.0, 0);
+        assert_eq!(
+            cursor.1,
+            fs::metadata(&path).expect("stat legacy file").len() as i64
+        );
+        assert!(cursor.2.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_cursor_includes_unterminated_line_before_future_append() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = test_claude_line("legacy-tail-a", 100);
+        let second = test_claude_line("legacy-tail-b", 200);
+        let third = test_claude_line("legacy-tail-c", 300);
+        let path = write_temp_jsonl(
+            tmp.path(),
+            "legacy-unterminated.jsonl",
+            &format!("{first}\n{second}"),
+        );
+        let path_str = path.to_string_lossy().to_string();
+        let states = HashMap::from([(
+            path_str.clone(),
+            ClaudeSyncState {
+                last_modified: 1,
+                last_line_offset: 2,
+                last_byte_offset: None,
+                last_tail_fingerprint: None,
+            },
+        )]);
+
+        let mut pricing_cache = PricingCache::new();
+        assert_eq!(
+            sync_single_file(
+                &db,
+                &path,
+                2,
+                &states,
+                &mut pricing_cache,
+                None,
+                &HashMap::new(),
+            )?,
+            (0, 0)
+        );
+        {
+            let conn = lock_conn!(db.conn);
+            let converted_offset: i64 = conn.query_row(
+                "SELECT last_byte_offset FROM session_log_sync WHERE file_path = ?1",
+                [&path_str],
+                |row| row.get(0),
+            )?;
+            assert_eq!(converted_offset, (first.len() + 1 + second.len()) as i64);
+        }
+
+        fs::write(&path, format!("{first}\n{second}\n{third}\n"))
+            .expect("append after unterminated legacy line");
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("open appended legacy file")
+            .set_times(
+                fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(2)),
+            )
+            .expect("advance appended file mtime");
+        let states = load_claude_sync_states(&db)?;
+        let file_mtime = metadata_modified_nanos(&fs::metadata(&path).expect("stat appended file"));
+        assert_eq!(
+            sync_single_file(
+                &db,
+                &path,
+                file_mtime,
+                &states,
+                &mut pricing_cache,
+                None,
+                &HashMap::new(),
+            )?,
+            (1, 0)
+        );
+
+        let conn = lock_conn!(db.conn);
+        let imported: Vec<String> = conn
+            .prepare(
+                "SELECT request_id FROM proxy_request_logs
+                 WHERE request_id LIKE 'session:legacy-tail-%'
+                 ORDER BY request_id",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(imported, vec!["session:legacy-tail-c"]);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_v18_same_mtime_truncation_pins_cursor() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first = r#"{"type":"assistant","message":{"id":"truncated-a","model":"claude-x","usage":{"input_tokens":10,"output_tokens":100},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s1"}"#;
+        let second = r#"{"type":"assistant","message":{"id":"truncated-b","model":"claude-x","usage":{"input_tokens":11,"output_tokens":200},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:01Z","sessionId":"s1"}"#;
+        let original = format!("{first}\n{second}\n");
+        let path = write_temp_jsonl(tmp.path(), "truncated-v18.jsonl", &original);
+        let path_str = path.to_string_lossy().to_string();
+        let metadata = fs::metadata(&path).expect("stat original file");
+        let modified = metadata.modified().expect("read original mtime");
+        let modified_nanos = metadata_modified_nanos(&metadata);
+        let original_size = metadata.len();
+        let (fingerprint, hint) = {
+            let mut file = File::open(&path).expect("open original file");
+            let fingerprint = shared_tail_fingerprint_from_file(&mut file, original_size)
+                .expect("fingerprint original");
+            let hint = resume_hint_from_shared_cursor(
+                &mut file,
+                &path_str,
+                modified_nanos,
+                0,
+                original_size,
+                serde_json::to_string(&ClaudeResumeState { session_id: None })
+                    .expect("serialize state"),
+            )
+            .expect("build original hint");
+            (fingerprint, hint)
+        };
+
+        fs::write(&path, format!("{first}\n")).expect("truncate file");
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("open truncated file")
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .expect("restore original mtime");
+
+        let states = HashMap::from([(
+            path_str.clone(),
+            ClaudeSyncState {
+                last_modified: modified_nanos,
+                last_line_offset: 0,
+                last_byte_offset: Some(original_size as i64),
+                last_tail_fingerprint: Some(fingerprint),
+            },
+        )]);
+        let hints = HashMap::from([(path_str.clone(), hint)]);
+        let mut pricing_cache = PricingCache::new();
+        let error = sync_single_file(
+            &db,
+            &path,
+            modified_nanos,
+            &states,
+            &mut pricing_cache,
+            None,
+            &hints,
+        )
+        .expect_err("same-mtime truncation must be pinned");
+        assert!(error.to_string().contains("截断"));
+
+        let conn = lock_conn!(db.conn);
+        let pinned: i64 = conn.query_row(
+            "SELECT last_byte_offset FROM session_log_sync WHERE file_path = ?1",
+            [&path_str],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            pinned,
+            fs::metadata(&path).expect("stat truncated file").len() as i64
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shared_v18_rewrite_pins_cursor_without_replay() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original = r#"{"type":"assistant","message":{"id":"shared-a","model":"claude-x","usage":{"input_tokens":10,"output_tokens":100},"stop_reason":"end_turn"},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s1"}"#;
+        let replacement = original.replace("shared-a", "shared-x");
+        assert_eq!(original.len(), replacement.len());
+        let original_content = format!("{original}\n");
+        let path = write_temp_jsonl(tmp.path(), "rewritten-v18.jsonl", &original_content);
+        let path_str = path.to_string_lossy().to_string();
+        let byte_offset = original_content.len() as u64;
+        let original_fingerprint = {
+            let mut file = File::open(&path).expect("open original cursor file");
+            shared_tail_fingerprint_from_file(&mut file, byte_offset).expect("fingerprint original")
+        };
+        fs::write(&path, format!("{replacement}\n")).expect("rewrite shared cursor file");
+
+        let mut states = HashMap::new();
+        states.insert(
+            path_str.clone(),
+            ClaudeSyncState {
+                last_modified: 1,
+                last_line_offset: 0,
+                last_byte_offset: Some(byte_offset as i64),
+                last_tail_fingerprint: Some(original_fingerprint),
+            },
+        );
+        // The local hint describes the rewritten bytes and would pass its own
+        // 64-byte check. The shared 4 KiB fingerprint must still take priority.
+        let matching_sidecar = {
+            let mut file = File::open(&path).expect("open rewritten cursor file");
+            resume_hint_from_shared_cursor(
+                &mut file,
+                &path_str,
+                1,
+                0,
+                byte_offset,
+                serde_json::to_string(&ClaudeResumeState { session_id: None })
+                    .expect("serialize state"),
+            )
+            .expect("build matching local hint")
+        };
+        let hints = HashMap::from([(path_str.clone(), matching_sidecar)]);
+        let mut pricing_cache = PricingCache::new();
+        let error = sync_single_file(&db, &path, 2, &states, &mut pricing_cache, None, &hints)
+            .expect_err("rewritten shared cursor must be pinned");
+        assert!(
+            error.to_string().contains("重写"),
+            "unexpected error: {error}"
+        );
+
+        let conn = lock_conn!(db.conn);
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+            row.get(0)
+        })?;
+        assert_eq!(rows, 0, "rewritten history must not be replayed");
+        let pinned: i64 = conn.query_row(
+            "SELECT last_byte_offset FROM session_log_sync WHERE file_path = ?1",
+            [&path_str],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            pinned,
+            fs::metadata(&path)
+                .expect("stat rewritten cursor file")
+                .len() as i64
+        );
+        Ok(())
+    }
+
     /// 在临时目录写入一个 JSONL 文件并返回其路径。
     fn write_temp_jsonl(dir: &Path, name: &str, content: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, content).expect("write jsonl");
         path
+    }
+
+    fn test_claude_line(message_id: &str, output_tokens: u32) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{message_id}","model":"claude-x","usage":{{"input_tokens":10,"output_tokens":{output_tokens}}},"stop_reason":"end_turn"}},"timestamp":"2026-01-01T00:00:00Z","sessionId":"s1"}}"#
+        )
     }
 
     /// 单文件多消息经由单事务写入后，imported/skipped 计数应与旧逐行自动提交
@@ -1287,7 +2279,7 @@ mod tests {
         );
         let path = write_temp_jsonl(tmp.path(), "session.jsonl", content);
 
-        let states: HashMap<String, (i64, i64)> = HashMap::new();
+        let states: HashMap<String, ClaudeSyncState> = HashMap::new();
         let mut cache = PricingCache::new();
 
         // 首轮：m1/m2 导入，m3/m4 在插入前被过滤（既不计 imported 也不计 skipped）。
@@ -1347,7 +2339,7 @@ mod tests {
         );
         let path = write_temp_jsonl(tmp.path(), "session.jsonl", &content);
 
-        let states: HashMap<String, (i64, i64)> = HashMap::new();
+        let states: HashMap<String, ClaudeSyncState> = HashMap::new();
         let mut cache = PricingCache::new();
         let (imported, skipped) =
             sync_single_file(&db, &path, 1, &states, &mut cache, None, &HashMap::new())?;

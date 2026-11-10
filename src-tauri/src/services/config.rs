@@ -120,6 +120,13 @@ impl ConfigService {
 
     /// 根据备份 ID 恢复配置
     pub fn restore_from_backup_id(backup_id: &str, state: &AppState) -> Result<String, AppError> {
+        Ok(Self::restore_from_backup_id_with_warning(backup_id, state)?.0)
+    }
+
+    pub(crate) fn restore_from_backup_id_with_warning(
+        backup_id: &str,
+        state: &AppState,
+    ) -> Result<(String, Option<String>), AppError> {
         let config_path = crate::config::get_app_config_path();
         let backup_dir = config_path
             .parent()
@@ -132,7 +139,7 @@ impl ConfigService {
             return Err(AppError::Message(format!("备份文件不存在: {}", backup_id)));
         }
 
-        Self::import_config_from_path(&backup_path, state)
+        Self::import_config_from_path_with_warning(&backup_path, state)
     }
 
     /// 从文件名提取时间戳字符串
@@ -232,19 +239,35 @@ impl ConfigService {
     }
 
     pub fn import_config_from_path(file_path: &Path, state: &AppState) -> Result<String, AppError> {
+        Ok(Self::import_config_from_path_with_warning(file_path, state)?.0)
+    }
+
+    pub(crate) fn import_config_from_path_with_warning(
+        file_path: &Path,
+        state: &AppState,
+    ) -> Result<(String, Option<String>), AppError> {
         let db_path = crate::config::get_app_config_dir().join("cc-switch.db");
         if !db_path.exists() {
             return Err(AppError::Config("数据库不存在，无法导入".to_string()));
         }
 
-        // Pre-import backup (SQL).
-        let backup_id = Self::create_backup(&db_path, None)?;
-
-        // Import SQL into DB (also performs an internal binary snapshot backup).
-        state.db.import_sql(file_path)?;
-        state.refresh_config_from_db()?;
-
-        Ok(backup_id)
+        crate::services::sync_protocol::run_with_sync_lock_sync(|| {
+            // Backup and import form one Skills mutation: no local Skills change may
+            // fall into the gap and then be absent from both the database and backup.
+            let backup_id = {
+                let _skill_state_guard = crate::services::skill::skill_state_write_guard();
+                let backup_id = Self::create_backup(&db_path, None)?;
+                // Import SQL into DB (also performs an internal binary snapshot backup).
+                state.db.import_sql(file_path)?;
+                backup_id
+            };
+            state.refresh_config_from_db()?;
+            let warning = crate::services::sync_protocol::project_restored_state_best_effort(
+                state,
+                "Configuration import",
+            );
+            Ok((backup_id, warning))
+        })
     }
 
     /// 同步当前供应商到对应的 live 配置。
@@ -288,11 +311,11 @@ impl ConfigService {
         match app_type {
             AppType::Codex => Self::sync_codex_live(config, &current_id, &provider)?,
             AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
-            AppType::ClaudeDesktop => {}
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
             AppType::OpenCode => {}
             AppType::Hermes => {}
             AppType::OpenClaw => {}
+            AppType::ClaudeDesktop | AppType::Pi => {}
         }
 
         Ok(())
@@ -313,11 +336,22 @@ impl ConfigService {
             provider,
             common_config_snippet.as_deref(),
             apply_common_config,
+            &config
+                .get_manager(&AppType::Codex)
+                .map(|manager| manager.providers.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
         )?;
         crate::mcp::sync_enabled_to_codex(config)?;
 
         let auth_path = crate::codex_config::get_codex_auth_path();
-        let auth_after = if auth_path.exists() {
+        let auth_after = if ProviderService::codex_live_write_category(provider) == Some("official")
+        {
+            provider
+                .settings_config
+                .get("auth")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}))
+        } else if auth_path.exists() {
             crate::config::read_json_file(&auth_path)?
         } else {
             serde_json::json!({})

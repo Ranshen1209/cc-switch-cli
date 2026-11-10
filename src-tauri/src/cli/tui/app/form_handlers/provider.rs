@@ -1,45 +1,15 @@
 use super::*;
 use crate::ProviderService;
+use serde_json::Value;
 use url::Url;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderValidationTarget {
+    Main(ProviderAddField),
+    UsageScript,
+}
+
 impl App {
-    pub(super) fn handle_provider_template_key(
-        &mut self,
-        key: KeyEvent,
-        data: &UiData,
-    ) -> Option<Action> {
-        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
-            return None;
-        };
-
-        if !matches!(provider.page, form::ProviderFormPage::Main) {
-            return None;
-        }
-
-        if provider.focus != FormFocus::Templates || !matches!(provider.mode, FormMode::Add) {
-            return None;
-        }
-
-        match key.code {
-            KeyCode::Left => {
-                provider.template_idx = provider.template_idx.saturating_sub(1);
-                Some(Action::None)
-            }
-            KeyCode::Right => {
-                let max = provider.template_count().saturating_sub(1);
-                provider.template_idx = (provider.template_idx + 1).min(max);
-                Some(Action::None)
-            }
-            KeyCode::Enter => {
-                let existing_ids = data.existing_provider_ids();
-                provider.apply_template(provider.template_idx, &existing_ids);
-                provider.focus = FormFocus::Fields;
-                Some(Action::None)
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn handle_provider_focus_key(
         &mut self,
         key: KeyEvent,
@@ -50,13 +20,16 @@ impl App {
         };
 
         if matches!(provider.page, form::ProviderFormPage::UsageQuery) {
-            return self.handle_usage_query_page_key(key);
+            return self.handle_usage_query_page_key(key, data);
         }
         if matches!(provider.page, form::ProviderFormPage::CodexModelCatalog) {
             return self.handle_codex_model_catalog_page_key(key);
         }
         if matches!(provider.page, form::ProviderFormPage::CodexLocalRouting) {
             return self.handle_codex_local_routing_page_key(key, data);
+        }
+        if matches!(provider.page, form::ProviderFormPage::LocalProxySettings) {
+            return self.handle_local_proxy_settings_page_key(key);
         }
         if matches!(provider.page, form::ProviderFormPage::ClaudeQuickConfig) {
             return self.handle_claude_quick_config_page_key(key, data);
@@ -73,55 +46,161 @@ impl App {
     }
 
     pub(super) fn build_provider_form_save_action(&mut self, data: &UiData) -> Action {
-        let validation_message = {
+        let validation = {
             let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                 return Action::None;
             };
+            provider.refresh_usage_query_provider_kind();
+            provider.field_errors.clear();
+            provider.usage_query_field_errors.clear();
+            if let Some(message) = provider.usage_query_script_validation_error() {
+                provider.set_usage_query_field_error(form::UsageQueryField::Script, message);
+            }
+            let hermes_base_url_error =
+                matches!(provider.app_type, crate::app_config::AppType::Hermes)
+                    .then(|| validate_hermes_base_url(&provider.hermes_base_url.value))
+                    .flatten();
 
-            if provider.name.is_blank() {
-                Some(if provider.mode.is_edit() {
-                    texts::tui_toast_provider_missing_name()
-                } else {
-                    texts::tui_toast_provider_add_missing_fields()
-                })
-            } else if ProviderService::is_provider_key_app(&provider.app_type)
-                && provider.id.is_blank()
-            {
-                Some(texts::tui_toast_provider_add_missing_fields())
+            if ProviderService::is_provider_key_app(&provider.app_type) && provider.id.is_blank() {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::Id),
+                    texts::tui_toast_provider_add_missing_fields().to_string(),
+                ))
             } else if ProviderService::validate_provider_key_for_add(
                 &provider.app_type,
                 provider.id.value.as_str(),
             )
             .is_err()
             {
-                Some(texts::tui_hermes_provider_key_invalid())
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::Id),
+                    texts::tui_hermes_provider_key_invalid().to_string(),
+                ))
+            } else if provider.name.is_blank() {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::Name),
+                    if provider.mode.is_edit() {
+                        texts::tui_toast_provider_missing_name().to_string()
+                    } else {
+                        texts::tui_toast_provider_add_missing_fields().to_string()
+                    },
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
+                && !provider.mode.is_edit()
+                && !crate::pi_config::is_valid_request_url(&provider.current_provider_base_url())
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::OpenCodeBaseUrl),
+                    texts::base_url_empty_error().to_string(),
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
+                && !provider.mode.is_edit()
+                && !crate::openclaw_config::OPENCLAW_API_PROTOCOLS
+                    .contains(&provider.opencode_npm_package.value.trim())
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::OpenClawApiProtocol),
+                    texts::tui_toast_provider_add_missing_fields().to_string(),
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Pi)
+                && !provider.mode.is_edit()
+                && !provider.openclaw_models.iter().any(|model| {
+                    model
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty())
+                })
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::OpenClawModels),
+                    texts::tui_toast_provider_add_missing_fields().to_string(),
+                ))
             } else if matches!(provider.app_type, crate::app_config::AppType::Hermes)
                 && !is_valid_hermes_rate_limit_delay(&provider.hermes_rate_limit_delay.value)
             {
-                Some(texts::tui_hermes_rate_limit_delay_invalid())
-            } else if matches!(provider.app_type, crate::app_config::AppType::Hermes) {
-                validate_hermes_base_url(&provider.hermes_base_url.value)
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::HermesRateLimitDelay),
+                    texts::tui_hermes_rate_limit_delay_invalid().to_string(),
+                ))
+            } else if let Some(message) = hermes_base_url_error {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::HermesBaseUrl),
+                    message.to_string(),
+                ))
             } else if matches!(provider.app_type, crate::app_config::AppType::Codex)
                 && !provider.is_codex_official_provider()
                 && provider.codex_base_url.is_blank()
             {
-                Some(texts::base_url_empty_error())
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::CodexBaseUrl),
+                    texts::base_url_empty_error().to_string(),
+                ))
+            } else if matches!(provider.app_type, crate::app_config::AppType::Codex)
+                && matches!(provider.claude_api_format, form::ClaudeApiFormat::Anthropic)
+                && !is_valid_codex_max_output_tokens(&provider.codex_max_output_tokens.value)
+            {
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::CodexMaxOutputTokens),
+                    texts::tui_codex_max_output_tokens_invalid().to_string(),
+                ))
             } else if let Some(message) = validate_usage_query_form(provider) {
-                Some(message)
+                Some((ProviderValidationTarget::UsageScript, message.to_string()))
             } else if !provider.ensure_generated_id(&data.existing_provider_ids()) {
-                Some(if provider.mode.is_edit() {
-                    texts::tui_toast_provider_missing_name()
-                } else {
-                    texts::tui_toast_provider_add_missing_fields()
-                })
+                Some((
+                    ProviderValidationTarget::Main(ProviderAddField::Name),
+                    if provider.mode.is_edit() {
+                        texts::tui_toast_provider_missing_name().to_string()
+                    } else {
+                        texts::tui_toast_provider_add_missing_fields().to_string()
+                    },
+                ))
             } else {
                 None
             }
         };
 
-        if let Some(message) = validation_message {
+        if let Some((target, message)) = validation {
+            if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                match target {
+                    ProviderValidationTarget::Main(field) => {
+                        provider.page = form::ProviderFormPage::Main;
+                        provider.focus = FormFocus::Fields;
+                        provider.sync_main_field_index(field);
+                        provider.set_main_field_error(field, message.clone());
+                    }
+                    ProviderValidationTarget::UsageScript => {
+                        provider.open_usage_query_page();
+                        provider.focus = FormFocus::JsonPreview;
+                        provider.set_usage_query_field_error(
+                            form::UsageQueryField::Script,
+                            message.clone(),
+                        );
+                    }
+                }
+            }
             self.push_toast(message, ToastKind::Warning);
             return Action::None;
+        }
+
+        let local_proxy_validation = self.form.as_ref().and_then(|form| match form {
+            FormState::ProviderAdd(provider) => validate_local_proxy_settings_form(provider),
+            _ => None,
+        });
+        if let Some(message) = local_proxy_validation {
+            self.push_toast(message, ToastKind::Error);
+            return Action::None;
+        }
+
+        let invalid_custom_user_agent = self.form.as_ref().is_some_and(|form| {
+            matches!(
+                form,
+                FormState::ProviderAdd(provider)
+                    if provider.supports_local_proxy_settings()
+                        && !provider.custom_user_agent_is_valid()
+            )
+        });
+        if invalid_custom_user_agent {
+            self.push_toast(texts::tui_user_agent_invalid_hint(), ToastKind::Warning);
         }
 
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
@@ -135,20 +214,29 @@ impl App {
         Action::EditorSubmit {
             submit: match &provider.mode {
                 FormMode::Add => EditorSubmit::ProviderAdd,
-                FormMode::Edit { id } => EditorSubmit::ProviderEdit { id: id.clone() },
+                FormMode::Edit { id } => EditorSubmit::ProviderEdit {
+                    id: id.clone(),
+                    expected_pi_settings_config: provider.initial_pi_settings_config(),
+                },
             },
             content,
         }
     }
 
     fn handle_provider_fields_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
-        let (fields, selected, editing) = self.prepare_provider_field_selection()?;
-
-        if editing {
-            self.handle_provider_field_editing(selected, key, data)
-        } else {
-            self.handle_provider_field_navigation(fields, selected, key, data)
+        let editing_field = self.form.as_ref().and_then(|form| match form {
+            FormState::ProviderAdd(provider) => match provider.text_edit_target() {
+                Some(form::ProviderTextField::Main(field)) => Some(field),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(field) = editing_field {
+            return self.handle_provider_field_editing(field, key, data);
         }
+
+        let (fields, selected) = self.prepare_provider_field_selection()?;
+        self.handle_provider_field_navigation(fields, selected, key, data)
     }
 
     fn handle_provider_field_editing(
@@ -157,17 +245,23 @@ impl App {
         key: KeyEvent,
         data: &UiData,
     ) -> Option<Action> {
-        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
-            return None;
-        };
-
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                provider.editing = false;
+            KeyCode::Esc => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.cancel_text_edit();
+                Some(Action::None)
+            }
+            KeyCode::Enter => {
+                self.commit_active_text_edit(data);
                 Some(Action::None)
             }
             _ => {
                 TextEditCommand::from_key(key)?;
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
                 let policy = TextInputPolicy {
                     max_chars: (selected == ProviderAddField::Notes)
                         .then_some(PROVIDER_NOTES_MAX_CHARS),
@@ -178,7 +272,10 @@ impl App {
                     .and_then(|input| input.apply_key_with_policy(key, policy))
                     .map(|edit| edit.changed)
                     .unwrap_or(false);
-                self.finish_provider_input_change(selected, changed, data);
+                if changed {
+                    provider.clear_main_field_error(selected);
+                }
+                provider.sync_main_field_index(selected);
                 Some(Action::None)
             }
         }
@@ -216,6 +313,51 @@ impl App {
                 }
                 Some(Action::None)
             }
+            KeyCode::Char('f')
+                if matches!(
+                    selected,
+                    ProviderAddField::CodexModel
+                        | ProviderAddField::GeminiModel
+                        | ProviderAddField::OpenCodeModelId
+                ) =>
+            {
+                Some(self.handle_provider_model_fetch(selected))
+            }
+            KeyCode::Char('f') if selected == ProviderAddField::OpenClawModels => {
+                let is_pi = self.form.as_ref().is_some_and(|form| {
+                    matches!(form, FormState::ProviderAdd(provider) if provider.app_type == AppType::Pi)
+                });
+                is_pi.then(|| self.handle_provider_model_fetch(selected))
+            }
+            KeyCode::Char('f')
+                if matches!(
+                    selected,
+                    ProviderAddField::ClaudeBaseUrl | ProviderAddField::CodexBaseUrl
+                ) =>
+            {
+                let (enabled, app_type) = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return None;
+                    };
+                    if !provider.supports_full_url_mode() {
+                        return Some(Action::None);
+                    }
+                    (provider.toggle_full_url_mode(), provider.app_type.clone())
+                };
+                if enabled
+                    && !data
+                        .proxy
+                        .routes_current_app_through_proxy(&app_type)
+                        .unwrap_or(false)
+                {
+                    self.overlay = Overlay::Confirm(ConfirmOverlay {
+                        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+                        message: texts::tui_full_url_requires_proxy_message().to_string(),
+                        action: ConfirmAction::ProviderApiFormatProxyNotice,
+                    });
+                }
+                Some(Action::None)
+            }
             KeyCode::Char(' ') | KeyCode::Enter => {
                 Some(self.handle_provider_field_activate(selected, key, data))
             }
@@ -230,7 +372,27 @@ impl App {
         data: &UiData,
     ) -> Action {
         match selected {
+            // Enter only: Space and the arrow keys keep their field-level
+            // meanings while the Fields pane has focus.
+            ProviderAddField::Template => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                    return Action::None;
+                };
+                if !matches!(provider.mode, FormMode::Add) {
+                    return Action::None;
+                }
+                self.overlay = Overlay::ProviderTemplatePicker {
+                    selected: provider.template_idx,
+                };
+                Action::None
+            }
             ProviderAddField::ClaudeApiFormat => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
                     return Action::None;
                 };
@@ -241,7 +403,44 @@ impl App {
                 };
                 Action::None
             }
+            ProviderAddField::CodexAnthropicApiKeyField => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.claude_api_key_field = match provider.claude_api_key_field {
+                    crate::provider::ClaudeApiKeyField::AuthToken => {
+                        crate::provider::ClaudeApiKeyField::ApiKey
+                    }
+                    crate::provider::ClaudeApiKeyField::ApiKey => {
+                        crate::provider::ClaudeApiKeyField::AuthToken
+                    }
+                };
+                Action::None
+            }
+            ProviderAddField::CodexImpersonateClaudeCode => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.codex_impersonate_claude_code = !provider.codex_impersonate_claude_code;
+                Action::None
+            }
+            ProviderAddField::CodexPromptCacheRouting => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.cycle_codex_prompt_cache_routing();
+                Action::None
+            }
             ProviderAddField::CodexWireApi => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
@@ -271,6 +470,9 @@ impl App {
                 Action::None
             }
             ProviderAddField::GeminiAuthType => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
@@ -281,6 +483,9 @@ impl App {
                 Action::None
             }
             ProviderAddField::OpenClawApiProtocol => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
@@ -299,6 +504,9 @@ impl App {
                 Action::None
             }
             ProviderAddField::HermesApiMode => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
@@ -306,20 +514,19 @@ impl App {
                 Action::None
             }
             ProviderAddField::ClaudeModelConfig => {
-                self.overlay = Overlay::ClaudeModelPicker {
-                    selected: 0,
-                    editing: false,
-                };
-                Action::None
-            }
-            ProviderAddField::ClaudeDesktopModelConfig => {
-                self.overlay = Overlay::ClaudeModelPicker {
-                    selected: 0,
-                    editing: false,
-                };
+                if matches!(key.code, KeyCode::Enter) {
+                    self.overlay = Overlay::ClaudeModelPicker {
+                        selected: 0,
+                        column: ClaudeModelPickerColumn::Model,
+                        editing: false,
+                    };
+                }
                 Action::None
             }
             ProviderAddField::ClaudeQuickConfig => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
@@ -327,6 +534,9 @@ impl App {
                 Action::None
             }
             ProviderAddField::CodexQuickConfig => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
@@ -366,6 +576,19 @@ impl App {
                     return Action::None;
                 };
                 provider.toggle_claude_tool_search();
+                Action::None
+            }
+            ProviderAddField::ClaudeFallbackOneM => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.toggle_claude_fallback_one_m();
+                }
+                Action::None
+            }
+            ProviderAddField::ClaudeEffortMax => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.toggle_claude_effort_max();
                 Action::None
             }
             ProviderAddField::ClaudeDisableAutoUpgrade => {
@@ -437,6 +660,28 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::ClaudeInactiveFields => {
+                if matches!(key.code, KeyCode::Enter) {
+                    if let Some(FormState::ProviderAdd(form)) = self.form.as_ref() {
+                        let fields = form
+                            .claude_inactive
+                            .iter()
+                            .map(|field| format!("{}: {}", field.path.join("."), field.value))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.overlay = Overlay::Confirm(ConfirmOverlay {
+                            title: crate::t!(
+                                "Copy inactive fields into editor?",
+                                "将未应用字段复制到编辑器？"
+                            )
+                            .to_string(),
+                            message: fields,
+                            action: ConfirmAction::ClaudeCopyInactive,
+                        });
+                    }
+                }
+                Action::None
+            }
             ProviderAddField::CommonSnippet => {
                 if matches!(key.code, KeyCode::Enter) {
                     let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
@@ -466,6 +711,15 @@ impl App {
                 }
                 Action::None
             }
+            ProviderAddField::LocalProxySettings => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return Action::None;
+                    };
+                    provider.open_local_proxy_settings_page();
+                }
+                Action::None
+            }
             ProviderAddField::CodexModel
             | ProviderAddField::GeminiModel
             | ProviderAddField::OpenCodeModelId => {
@@ -478,8 +732,8 @@ impl App {
                 if selected == ProviderAddField::Id && !provider.is_id_editable() {
                     return Action::None;
                 }
-                if provider.input(selected).is_some() {
-                    provider.editing = true;
+                if matches!(key.code, KeyCode::Enter) {
+                    provider.begin_main_text_edit(selected);
                 }
                 Action::None
             }
@@ -525,7 +779,16 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                Some(self.handle_provider_field_activate(selected, key, data))
+                let toggle_result = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return None;
+                    };
+                    provider.toggle_claude_quick_config_field(selected, &data.config.common_snippet)
+                };
+                if let Err(err) = toggle_result {
+                    self.push_toast(err, ToastKind::Warning);
+                }
+                Some(Action::None)
             }
             _ => None,
         }
@@ -569,7 +832,16 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                Some(self.handle_provider_field_activate(selected, key, data))
+                let toggle_result = {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                        return None;
+                    };
+                    provider.toggle_codex_quick_config_field(selected, &data.config.common_snippet)
+                };
+                if let Err(err) = toggle_result {
+                    self.push_toast(err, ToastKind::Warning);
+                }
+                Some(Action::None)
             }
             _ => None,
         }
@@ -624,6 +896,97 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    fn handle_local_proxy_settings_page_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let selected = self.prepare_local_proxy_settings_field_selection()?;
+
+        Some(match key.code {
+            KeyCode::Esc => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.close_local_proxy_settings_page();
+                }
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.local_proxy_settings_field_idx =
+                        provider.local_proxy_settings_field_idx.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() {
+                    provider.local_proxy_settings_field_idx =
+                        (provider.local_proxy_settings_field_idx + 1).min(
+                            provider
+                                .local_proxy_settings_fields()
+                                .len()
+                                .saturating_sub(1),
+                        );
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                match selected {
+                    form::LocalProxySettingsField::UserAgent => {
+                        self.open_user_agent_picker();
+                    }
+                    form::LocalProxySettingsField::HeaderOverrides => {
+                        let initial = self.form.as_ref().and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(form::format_local_proxy_header_overrides(
+                                    &provider.local_proxy_header_overrides,
+                                ))
+                            }
+                            _ => None,
+                        });
+                        if let Some(initial) = initial {
+                            self.open_editor(
+                                texts::tui_local_proxy_headers_editor_title(),
+                                EditorKind::Json,
+                                initial,
+                                EditorSubmit::ProviderFormApplyLocalProxyHeaders,
+                            );
+                        }
+                    }
+                    form::LocalProxySettingsField::BodyOverrides => {
+                        let initial = self.form.as_ref().and_then(|form| match form {
+                            FormState::ProviderAdd(provider) => {
+                                Some(form::format_local_proxy_body_override(
+                                    provider.local_proxy_body_override.as_ref(),
+                                ))
+                            }
+                            _ => None,
+                        });
+                        if let Some(initial) = initial {
+                            self.open_editor(
+                                texts::tui_local_proxy_body_editor_title(),
+                                EditorKind::Json,
+                                initial,
+                                EditorSubmit::ProviderFormApplyLocalProxyBody,
+                            );
+                        }
+                    }
+                }
+                Action::None
+            }
+            _ => Action::None,
+        })
+    }
+
+    fn open_user_agent_picker(&mut self) {
+        let selected = self
+            .form
+            .as_ref()
+            .and_then(|form| match form {
+                FormState::ProviderAdd(provider) => Some(form::user_agent_picker_selection(
+                    &provider.custom_user_agent.value,
+                )),
+                _ => None,
+            })
+            .unwrap_or(form::USER_AGENT_PICKER_CUSTOM_INDEX);
+        self.overlay = Overlay::UserAgentPicker { selected };
     }
 
     /// Keys for the inline model-catalog table (when its zone is focused inside
@@ -871,13 +1234,51 @@ impl App {
             form::CodexModelCatalogField::ContextWindow => {
                 texts::tui_codex_model_catalog_context_prompt()
             }
+            form::CodexModelCatalogField::ReasoningLevels
+            | form::CodexModelCatalogField::DefaultReasoningLevel => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                    return;
+                };
+                let Some(index) = row else { return };
+                let Some(model) = provider.codex_model_catalog.get(index) else {
+                    return;
+                };
+                let checked = form::CODEX_REASONING_LEVELS
+                    .map(|level| model.reasoning_levels.iter().any(|value| value == level));
+                self.overlay = if field == form::CodexModelCatalogField::ReasoningLevels {
+                    Overlay::CodexReasoningLevelsPicker {
+                        row: index,
+                        selected: 0,
+                        checked,
+                    }
+                } else {
+                    let options: Vec<String> = std::iter::once(String::new())
+                        .chain(
+                            form::CODEX_REASONING_LEVELS
+                                .iter()
+                                .zip(checked)
+                                .filter(|(_, enabled)| *enabled)
+                                .map(|(level, _)| (*level).to_string()),
+                        )
+                        .collect();
+                    let selected = options
+                        .iter()
+                        .position(|level| level == &model.default_reasoning_level)
+                        .unwrap_or(0);
+                    Overlay::CodexDefaultReasoningPicker {
+                        row: index,
+                        selected,
+                        options,
+                    }
+                };
+                return;
+            }
         };
         self.overlay = Overlay::TextInput(TextInputState {
             title: texts::tui_codex_model_catalog().to_string(),
             prompt: prompt.to_string(),
             input: TextInput::new(value),
             submit: TextSubmit::CodexModelCatalogField { row, field },
-            secret: false,
         });
     }
 
@@ -893,8 +1294,13 @@ impl App {
 
         Action::ProviderModelFetch {
             base_url: provider.codex_base_url.value.clone(),
+            is_full_url: provider.is_full_url,
             api_key: (!provider.codex_api_key.value.trim().is_empty())
                 .then(|| provider.codex_api_key.value.clone()),
+            custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                .then(|| provider.custom_user_agent.value.clone()),
+            api_protocol: None,
+            request_headers: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::CodexLocalRouting,
@@ -902,7 +1308,7 @@ impl App {
         }
     }
 
-    fn handle_usage_query_page_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_usage_query_page_key(&mut self, key: KeyEvent, data: &UiData) -> Option<Action> {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
             return None;
         };
@@ -931,13 +1337,19 @@ impl App {
             };
         }
 
-        let (fields, selected, editing) = self.prepare_usage_query_field_selection()?;
-
-        if editing {
-            self.handle_usage_query_field_editing(selected, key)
-        } else {
-            self.handle_usage_query_field_navigation(fields, selected, key)
+        let editing_field = self.form.as_ref().and_then(|form| match form {
+            FormState::ProviderAdd(provider) => match provider.text_edit_target() {
+                Some(form::ProviderTextField::UsageQuery(field)) => Some(field),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(field) = editing_field {
+            return self.handle_usage_query_field_editing(field, key, data);
         }
+
+        let (fields, selected) = self.prepare_usage_query_field_selection()?;
+        self.handle_usage_query_field_navigation(fields, selected, key)
     }
 
     fn open_usage_query_page_with_notice(&mut self) {
@@ -961,32 +1373,34 @@ impl App {
         &mut self,
         selected: form::UsageQueryField,
         key: KeyEvent,
+        data: &UiData,
     ) -> Option<Action> {
-        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
-            return None;
-        };
-
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => {
-                provider.usage_query_editing = false;
-                if matches!(
-                    selected,
-                    form::UsageQueryField::Timeout | form::UsageQueryField::AutoInterval
-                ) {
-                    normalize_usage_query_numeric_fields(provider);
-                }
+            KeyCode::Esc => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
+                provider.cancel_text_edit();
+                Some(Action::None)
+            }
+            KeyCode::Enter => {
+                self.commit_active_text_edit(data);
                 Some(Action::None)
             }
             _ => {
                 TextEditCommand::from_key(key)?;
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return None;
+                };
                 let changed = provider
                     .usage_query_input_mut(selected)
                     .and_then(|input| input.apply_key(key))
                     .map(|edit| edit.changed)
                     .unwrap_or(false);
                 if changed {
-                    provider.touch_usage_query();
+                    provider.clear_usage_query_field_error(selected);
                 }
+                provider.sync_usage_query_field_index(selected);
                 Some(Action::None)
             }
         }
@@ -1022,13 +1436,17 @@ impl App {
                 Some(Action::None)
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                Some(self.handle_usage_query_field_activate(selected))
+                Some(self.handle_usage_query_field_activate(selected, key))
             }
             _ => None,
         }
     }
 
-    fn handle_usage_query_field_activate(&mut self, selected: form::UsageQueryField) -> Action {
+    fn handle_usage_query_field_activate(
+        &mut self,
+        selected: form::UsageQueryField,
+        key: KeyEvent,
+    ) -> Action {
         match selected {
             form::UsageQueryField::Enabled => {
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
@@ -1038,6 +1456,9 @@ impl App {
                 Action::None
             }
             form::UsageQueryField::Template => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
                     return Action::None;
                 };
@@ -1050,20 +1471,30 @@ impl App {
                 Action::None
             }
             form::UsageQueryField::CodingPlanProvider => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
                 provider.cycle_usage_query_coding_plan_provider();
                 Action::None
             }
-            form::UsageQueryField::Script => self.open_usage_query_script_editor(),
+            form::UsageQueryField::Script => {
+                if matches!(key.code, KeyCode::Enter) {
+                    self.open_usage_query_script_editor()
+                } else {
+                    Action::None
+                }
+            }
             _ => {
+                if !matches!(key.code, KeyCode::Enter) {
+                    return Action::None;
+                }
                 let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
                     return Action::None;
                 };
-                if provider.usage_query_input(selected).is_some() {
-                    provider.usage_query_editing = true;
-                }
+                provider.begin_usage_query_text_edit(selected);
                 Action::None
             }
         }
@@ -1114,7 +1545,12 @@ impl App {
 
         Action::ProviderModelFetch {
             base_url: provider.hermes_base_url.value.clone(),
+            is_full_url: false,
             api_key: Some(provider.hermes_api_key.value.clone()),
+            custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                .then(|| provider.custom_user_agent.value.clone()),
+            api_protocol: None,
+            request_headers: None,
             codex_oauth: false,
             codex_oauth_account_id: None,
             field: ProviderAddField::HermesModels,
@@ -1132,39 +1568,90 @@ impl App {
         };
 
         if matches!(key.code, KeyCode::Enter) {
-            let api_key = match selected {
-                ProviderAddField::CodexModel => (!provider.codex_api_key.value.trim().is_empty())
-                    .then(|| provider.codex_api_key.value.clone()),
-                ProviderAddField::GeminiModel => (!provider.gemini_api_key.value.trim().is_empty())
-                    .then(|| provider.gemini_api_key.value.clone()),
-                ProviderAddField::OpenCodeModelId => {
-                    (!provider.opencode_api_key.value.trim().is_empty())
-                        .then(|| provider.opencode_api_key.value.clone())
-                }
-                ProviderAddField::HermesModels => {
-                    (!provider.hermes_api_key.value.trim().is_empty())
-                        .then(|| provider.hermes_api_key.value.clone())
-                }
-                _ => None,
-            };
-            let base_url = match selected {
-                ProviderAddField::CodexModel => provider.codex_base_url.value.clone(),
-                ProviderAddField::GeminiModel => provider.gemini_base_url.value.clone(),
-                ProviderAddField::OpenCodeModelId => provider.opencode_base_url.value.clone(),
-                ProviderAddField::HermesModels => provider.hermes_base_url.value.clone(),
-                _ => String::new(),
-            };
-            Action::ProviderModelFetch {
-                base_url,
-                api_key,
-                codex_oauth: false,
-                codex_oauth_account_id: None,
-                field: selected,
-                claude_idx: None,
-            }
-        } else {
-            provider.editing = true;
+            provider.begin_main_text_edit(selected);
             Action::None
+        } else {
+            Action::None
+        }
+    }
+
+    fn handle_provider_model_fetch(&mut self, selected: ProviderAddField) -> Action {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+            return Action::None;
+        };
+        let mut api_key = match selected {
+            ProviderAddField::CodexModel => (!provider.codex_api_key.value.trim().is_empty())
+                .then(|| provider.codex_api_key.value.clone()),
+            ProviderAddField::GeminiModel => (!provider.gemini_api_key.value.trim().is_empty())
+                .then(|| provider.gemini_api_key.value.clone()),
+            ProviderAddField::OpenCodeModelId => {
+                (!provider.opencode_api_key.value.trim().is_empty())
+                    .then(|| provider.opencode_api_key.value.clone())
+            }
+            ProviderAddField::HermesModels => (!provider.hermes_api_key.value.trim().is_empty())
+                .then(|| provider.hermes_api_key.value.clone()),
+            ProviderAddField::OpenClawModels => {
+                (!provider.opencode_api_key.value.trim().is_empty())
+                    .then(|| provider.opencode_api_key.value.clone())
+            }
+            _ => None,
+        };
+        let base_url = match selected {
+            ProviderAddField::CodexModel => provider.codex_base_url.value.clone(),
+            ProviderAddField::GeminiModel => provider.gemini_base_url.value.clone(),
+            ProviderAddField::OpenCodeModelId => provider.opencode_base_url.value.clone(),
+            ProviderAddField::HermesModels => provider.hermes_base_url.value.clone(),
+            ProviderAddField::OpenClawModels if matches!(provider.app_type, AppType::Pi) => {
+                provider.current_provider_base_url()
+            }
+            ProviderAddField::OpenClawModels => provider.opencode_base_url.value.clone(),
+            _ => String::new(),
+        };
+        let (api_protocol, mut request_headers) =
+            if selected == ProviderAddField::OpenClawModels && provider.app_type == AppType::Pi {
+                let settings = provider.to_provider_json_value()["settingsConfig"].clone();
+                let protocol = settings
+                    .get("api")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let headers = settings
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .map(|headers| {
+                        headers
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                value
+                                    .as_str()
+                                    .map(|value| (name.clone(), value.to_string()))
+                            })
+                            .collect::<std::collections::BTreeMap<_, _>>()
+                    })
+                    .filter(|headers| !headers.is_empty());
+                (protocol, headers)
+            } else {
+                (None, None)
+            };
+        if api_protocol.as_deref() == Some("anthropic-messages") {
+            if let Some(key) = api_key.take() {
+                request_headers
+                    .get_or_insert_with(std::collections::BTreeMap::new)
+                    .entry("x-api-key".to_string())
+                    .or_insert(key);
+            }
+        }
+        Action::ProviderModelFetch {
+            base_url,
+            is_full_url: provider.is_full_url && matches!(selected, ProviderAddField::CodexModel),
+            api_key,
+            custom_user_agent: (!provider.custom_user_agent.value.trim().is_empty())
+                .then(|| provider.custom_user_agent.value.clone()),
+            api_protocol,
+            request_headers,
+            codex_oauth: false,
+            codex_oauth_account_id: None,
+            field: selected,
+            claude_idx: None,
         }
     }
 
@@ -1174,15 +1661,19 @@ impl App {
         };
 
         if matches!(provider.app_type, AppType::Codex) {
-            self.handle_codex_provider_preview_key(key)
+            self.handle_codex_provider_preview_key(key, data)
         } else {
             self.handle_regular_provider_preview_key(key, data)
         }
     }
 
-    fn handle_codex_provider_preview_key(&mut self, key: KeyEvent) -> Option<Action> {
+    fn handle_codex_provider_preview_key(
+        &mut self,
+        key: KeyEvent,
+        data: &UiData,
+    ) -> Option<Action> {
         match key.code {
-            KeyCode::Enter => Some(self.open_codex_provider_preview_editor()),
+            KeyCode::Enter => Some(self.open_codex_provider_preview_editor(data)),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.adjust_codex_preview_scroll(|scroll| scroll.saturating_sub(1));
                 Some(Action::None)
@@ -1203,7 +1694,7 @@ impl App {
         }
     }
 
-    fn open_codex_provider_preview_editor(&mut self) -> Action {
+    fn open_codex_provider_preview_editor(&mut self, data: &UiData) -> Action {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
             return Action::None;
         };
@@ -1227,13 +1718,15 @@ impl App {
                 );
             }
             form::CodexPreviewSection::Config => {
-                let provider_json = provider.to_provider_json_value();
-                let config_text = provider_json
-                    .get("settingsConfig")
-                    .and_then(|value| value.get("config"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                let config_text = match provider
+                    .effective_codex_config_text_with_common_config(&data.config.common_snippet)
+                {
+                    Ok(config_text) => config_text,
+                    Err(err) => {
+                        self.push_toast(err, ToastKind::Error);
+                        return Action::None;
+                    }
+                };
                 self.open_editor(
                     texts::tui_codex_config_toml_title(),
                     EditorKind::Plain,
@@ -1332,7 +1825,7 @@ impl App {
 
     fn prepare_provider_field_selection(
         &mut self,
-    ) -> Option<(Vec<ProviderAddField>, ProviderAddField, bool)> {
+    ) -> Option<(Vec<ProviderAddField>, ProviderAddField)> {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
             return None;
         };
@@ -1356,12 +1849,12 @@ impl App {
         }
 
         let selected = fields.get(provider.field_idx).copied()?;
-        Some((fields, selected, provider.editing))
+        Some((fields, selected))
     }
 
     fn prepare_usage_query_field_selection(
         &mut self,
-    ) -> Option<(Vec<form::UsageQueryField>, form::UsageQueryField, bool)> {
+    ) -> Option<(Vec<form::UsageQueryField>, form::UsageQueryField)> {
         let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
             return None;
         };
@@ -1380,7 +1873,7 @@ impl App {
         }
 
         let selected = fields.get(provider.usage_query_field_idx).copied()?;
-        Some((fields, selected, provider.usage_query_editing))
+        Some((fields, selected))
     }
 
     fn prepare_codex_local_routing_field_selection(
@@ -1411,7 +1904,28 @@ impl App {
         Some((fields, selected))
     }
 
-    fn finish_provider_input_change(
+    fn prepare_local_proxy_settings_field_selection(
+        &mut self,
+    ) -> Option<form::LocalProxySettingsField> {
+        let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+            return None;
+        };
+        if !matches!(provider.page, form::ProviderFormPage::LocalProxySettings)
+            || !matches!(provider.focus, FormFocus::Fields)
+        {
+            return None;
+        }
+
+        provider.local_proxy_settings_field_idx = provider.local_proxy_settings_field_idx.min(
+            provider
+                .local_proxy_settings_fields()
+                .len()
+                .saturating_sub(1),
+        );
+        provider.selected_local_proxy_settings_field()
+    }
+
+    pub(super) fn finish_provider_input_change(
         &mut self,
         selected: ProviderAddField,
         changed: bool,
@@ -1435,13 +1949,68 @@ impl App {
             );
         }
         if changed && usage_query_provider_credential_field(selected) {
+            provider.refresh_usage_query_provider_kind();
             provider.refresh_usage_query_custom_variable_comment();
         }
         // The fallback model lives outside the model-mapping sub-page, so editing it
         // here must still mark the model config touched to persist ANTHROPIC_MODEL.
         if changed && selected == ProviderAddField::ClaudeFallbackModel {
-            provider.mark_claude_model_config_touched();
+            provider.mark_claude_fallback_model_touched();
         }
+
+        if let Some(message) = validate_provider_inline_field(provider, selected) {
+            provider.set_main_field_error(selected, message);
+        } else {
+            provider.clear_main_field_error(selected);
+        }
+    }
+}
+
+pub(super) fn validate_provider_inline_field(
+    provider: &form::ProviderAddFormState,
+    field: ProviderAddField,
+) -> Option<String> {
+    match field {
+        ProviderAddField::Name if provider.name.is_blank() => Some(
+            if provider.mode.is_edit() {
+                texts::tui_toast_provider_missing_name()
+            } else {
+                texts::tui_toast_provider_add_missing_fields()
+            }
+            .to_string(),
+        ),
+        ProviderAddField::Id
+            if ProviderService::is_provider_key_app(&provider.app_type)
+                && (provider.id.is_blank()
+                    || ProviderService::validate_provider_key_for_add(
+                        &provider.app_type,
+                        provider.id.value.as_str(),
+                    )
+                    .is_err()) =>
+        {
+            Some(texts::tui_hermes_provider_key_invalid().to_string())
+        }
+        ProviderAddField::HermesRateLimitDelay
+            if !is_valid_hermes_rate_limit_delay(&provider.hermes_rate_limit_delay.value) =>
+        {
+            Some(texts::tui_hermes_rate_limit_delay_invalid().to_string())
+        }
+        ProviderAddField::HermesBaseUrl => {
+            validate_hermes_base_url(&provider.hermes_base_url.value).map(str::to_string)
+        }
+        ProviderAddField::CodexBaseUrl
+            if matches!(provider.app_type, AppType::Codex)
+                && !provider.is_codex_official_provider()
+                && provider.codex_base_url.is_blank() =>
+        {
+            Some(texts::base_url_empty_error().to_string())
+        }
+        ProviderAddField::CodexMaxOutputTokens
+            if !is_valid_codex_max_output_tokens(&provider.codex_max_output_tokens.value) =>
+        {
+            Some(texts::tui_codex_max_output_tokens_invalid().to_string())
+        }
+        _ => None,
     }
 }
 
@@ -1472,6 +2041,10 @@ fn sanitize_number_char(ch: char) -> Option<char> {
     (ch.is_ascii_digit() || ch == '.').then_some(ch)
 }
 
+fn sanitize_integer_char(ch: char) -> Option<char> {
+    ch.is_ascii_digit().then_some(ch)
+}
+
 fn provider_field_sanitize_fn(
     app_type: &AppType,
     selected: ProviderAddField,
@@ -1481,8 +2054,14 @@ fn provider_field_sanitize_fn(
             Some(sanitize_provider_key_char)
         }
         (&AppType::Hermes, ProviderAddField::HermesRateLimitDelay) => Some(sanitize_number_char),
+        (&AppType::Codex, ProviderAddField::CodexMaxOutputTokens) => Some(sanitize_integer_char),
         _ => None,
     }
+}
+
+fn is_valid_codex_max_output_tokens(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed.parse::<u64>().is_ok_and(|value| value > 0)
 }
 
 fn is_valid_hermes_rate_limit_delay(value: &str) -> bool {
@@ -1536,7 +2115,8 @@ fn is_provider_divider_field(field: Option<&ProviderAddField>) -> bool {
     matches!(
         field,
         Some(
-            ProviderAddField::ClaudeAdvancedDivider
+            ProviderAddField::TemplateDivider
+                | ProviderAddField::ClaudeAdvancedDivider
                 | ProviderAddField::CodexAdvancedDivider
                 | ProviderAddField::HermesAdvancedDivider
                 | ProviderAddField::CommonConfigDivider
@@ -1556,35 +2136,20 @@ fn next_openclaw_api_protocol(current: &str) -> &'static str {
     protocols[next_idx]
 }
 
-fn normalize_usage_query_numeric_fields(provider: &mut form::ProviderAddFormState) {
-    let timeout = form::normalize_usage_timeout(&provider.usage_query_timeout.value);
-    provider.usage_query_timeout.set(timeout.to_string());
-
-    let interval = form::normalize_usage_interval(&provider.usage_query_auto_interval.value);
-    provider.usage_query_auto_interval.set(interval.to_string());
+fn validate_usage_query_form(provider: &form::ProviderAddFormState) -> Option<&'static str> {
+    provider.usage_query_script_validation_error()
 }
 
-fn validate_usage_query_form(provider: &form::ProviderAddFormState) -> Option<&'static str> {
-    if !provider.usage_query_enabled {
+fn validate_local_proxy_settings_form(provider: &form::ProviderAddFormState) -> Option<String> {
+    if !provider.supports_local_proxy_settings() {
         return None;
     }
 
-    if matches!(
-        provider.usage_query_template,
-        form::UsageQueryTemplate::GitHubCopilot
-            | form::UsageQueryTemplate::TokenPlan
-            | form::UsageQueryTemplate::Balance
-    ) {
-        return None;
+    let headers = form::format_local_proxy_header_overrides(&provider.local_proxy_header_overrides);
+    if let Err(error) = form::parse_local_proxy_header_overrides(&headers) {
+        return Some(error);
     }
 
-    let code = provider.usage_query_code.trim();
-    if code.is_empty() {
-        return Some(texts::tui_usage_query_script_empty());
-    }
-    if !code.contains("return") {
-        return Some(texts::tui_usage_query_must_have_return());
-    }
-
-    None
+    let body = form::format_local_proxy_body_override(provider.local_proxy_body_override.as_ref());
+    form::parse_local_proxy_body_override(&body).err()
 }

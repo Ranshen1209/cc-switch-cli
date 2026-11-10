@@ -14,10 +14,6 @@ pub(crate) fn should_sync_live(app_type: &AppType) -> bool {
             crate::config::get_claude_config_dir().exists()
                 || crate::config::get_claude_mcp_path().exists()
         }
-        AppType::ClaudeDesktop => crate::claude_desktop_config::get_config_library_path()
-            .ok()
-            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-            .is_some_and(|path| path.exists()),
         // Codex is considered initialized if ~/.codex (or override dir) exists.
         AppType::Codex => crate::codex_config::get_codex_config_dir().exists(),
         // Gemini is considered initialized if ~/.gemini (or override dir) exists.
@@ -28,6 +24,12 @@ pub(crate) fn should_sync_live(app_type: &AppType) -> bool {
         AppType::Hermes => crate::hermes_config::get_hermes_dir().exists(),
         // OpenClaw is considered initialized if ~/.openclaw (or override dir) exists.
         AppType::OpenClaw => get_openclaw_dir().exists(),
+        // Pi live provider writes are owned by the revision-aware native service.
+        AppType::Pi => false,
+        AppType::ClaudeDesktop => crate::claude_desktop_config::get_config_library_path()
+            .ok()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+            .is_some_and(|path| path.exists()),
     }
 }
 

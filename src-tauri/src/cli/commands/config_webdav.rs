@@ -140,15 +140,15 @@ fn show() -> Result<(), AppError> {
 
     println!("{}", highlight(crate::t!("WebDAV Sync", "WebDAV 同步")));
     println!("{}", "═".repeat(60));
-    println!("Enabled: {}", yes_no(settings.enabled));
-    println!("Base URL: {}", settings.base_url);
-    println!("Remote Root: {}", settings.remote_root);
-    println!("Profile: {}", settings.profile);
-    println!("Username: {}", blank_as_na(&settings.username));
-    println!("Password: {}", masked_secret(&settings.password));
-    println!("Auto Sync: {}", yes_no(settings.auto_sync));
+    println!("Enabled:      {}", yes_no(settings.enabled));
+    println!("Base URL:     {}", settings.base_url);
+    println!("Remote Root:  {}", settings.remote_root);
+    println!("Profile:      {}", settings.profile);
+    println!("Username:     {}", blank_as_na(&settings.username));
+    println!("Password:     {}", blank_as_na(&settings.password));
+    println!("Auto Sync:    {}", yes_no(settings.auto_sync));
     println!(
-        "Last Sync: {}",
+        "Last Sync:    {}",
         settings
             .status
             .last_sync_at
@@ -156,7 +156,7 @@ fn show() -> Result<(), AppError> {
             .unwrap_or_else(|| "N/A".to_string())
     );
     println!(
-        "Last Error: {}",
+        "Last Error:   {}",
         settings
             .status
             .last_error
@@ -197,8 +197,8 @@ fn set(
     println!(
         "{}",
         success(crate::t!(
-            "OK WebDAV settings saved.",
-            "OK WebDAV 设置已保存。"
+            "✓ WebDAV settings saved.",
+            "✓ WebDAV 设置已保存。"
         ))
     );
     Ok(())
@@ -209,8 +209,8 @@ fn clear() -> Result<(), AppError> {
     println!(
         "{}",
         success(crate::t!(
-            "OK WebDAV settings cleared.",
-            "OK WebDAV 设置已清空。"
+            "✓ WebDAV settings cleared.",
+            "✓ WebDAV 设置已清空。"
         ))
     );
     Ok(())
@@ -243,8 +243,8 @@ fn jianguoyun(
     println!(
         "{}",
         success(crate::t!(
-            "OK Jianguoyun WebDAV preset applied.",
-            "OK 已应用坚果云 WebDAV 预设。"
+            "✓ Jianguoyun WebDAV preset applied.",
+            "✓ 已应用坚果云 WebDAV 预设。"
         ))
     );
     Ok(())
@@ -255,8 +255,8 @@ fn check_connection() -> Result<(), AppError> {
     println!(
         "{}",
         success(crate::t!(
-            "OK WebDAV connection succeeded.",
-            "OK WebDAV 连接成功。"
+            "✓ WebDAV connection succeeded.",
+            "✓ WebDAV 连接成功。"
         ))
     );
     Ok(())
@@ -269,29 +269,25 @@ fn upload() -> Result<(), AppError> {
 }
 
 fn download() -> Result<(), AppError> {
-    let summary = WebDavSyncService::download()?;
-    sync_live_config_after_webdav();
+    let (summary, post_sync_warning) = WebDavSyncService::download_with_warning()?;
+    if let Some(error) = &post_sync_warning {
+        let en = format!("Live config sync after WebDAV operation failed: {error}");
+        let zh = format!("WebDAV 操作后同步 live 配置失败: {error}");
+        println!("{}", warning(crate::t!(&en, &zh)));
+    }
     println!("{}", success(&summary.message));
     Ok(())
 }
 
 fn migrate_v1_to_v2() -> Result<(), AppError> {
-    let summary = WebDavSyncService::migrate_v1_to_v2()?;
-    sync_live_config_after_webdav();
-    println!("{}", success(&summary.message));
-    Ok(())
-}
-
-fn sync_live_config_after_webdav() {
-    let Ok(state) = crate::AppState::try_new() else {
-        return;
-    };
-
-    if let Err(err) = crate::services::ProviderService::sync_current_to_live(&state) {
-        let en = format!("Live config sync after WebDAV operation failed: {err}");
-        let zh = format!("WebDAV 操作后同步 live 配置失败: {err}");
+    let (summary, post_sync_warning) = WebDavSyncService::migrate_v1_to_v2_with_warning()?;
+    if let Some(error) = &post_sync_warning {
+        let en = format!("Live config sync after WebDAV operation failed: {error}");
+        let zh = format!("WebDAV 操作后同步 live 配置失败: {error}");
         println!("{}", warning(crate::t!(&en, &zh)));
     }
+    println!("{}", success(&summary.message));
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -355,13 +351,6 @@ fn blank_as_na(value: &str) -> &str {
     } else {
         trimmed
     }
-}
-
-fn masked_secret(value: &str) -> String {
-    if value.trim().is_empty() {
-        return "N/A".to_string();
-    }
-    "********".to_string()
 }
 
 #[cfg(test)]

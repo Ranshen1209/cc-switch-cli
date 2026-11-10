@@ -1,3 +1,6 @@
+use super::content_encoding::{
+    decompress_body, get_content_encoding, is_supported_content_encoding,
+};
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, Uri},
@@ -18,7 +21,6 @@ use super::{
     providers::{ClaudeAdapter, ProviderAdapter},
     response::{
         build_anthropic_stream_response, build_buffered_codex_anthropic_response_with_context,
-        build_buffered_codex_anthropic_stream_response_with_context,
         build_buffered_codex_chat_response, build_buffered_codex_chat_response_with_context,
         build_buffered_json_response, build_buffered_passthrough_response,
         build_codex_anthropic_response_with_context,
@@ -41,56 +43,97 @@ pub async fn get_status(State(state): State<ProxyServerState>) -> impl IntoRespo
     Json(state.snapshot_status().await)
 }
 
+/// Return the active cc-switch-managed Codex model catalog.
+///
+/// Codex probes `/models` or `/v1/models` and expects its native catalog
+/// envelope with a top-level `models` field.
+pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
+    let generated_path = crate::codex_config::get_codex_model_catalog_path();
+    let active_catalog_path = match crate::codex_config::read_codex_config_text() {
+        Ok(config_text) => {
+            crate::codex_config::resolve_cc_switch_catalog_path(&config_text, &generated_path)
+        }
+        Err(_) => None,
+    };
+
+    let catalog = if let Some(catalog_path) =
+        active_catalog_path.as_ref().filter(|path| path.exists())
+    {
+        let text = std::fs::read_to_string(catalog_path).unwrap_or_default();
+        serde_json::from_str(&text).unwrap_or(json!({ "models": [] }))
+    } else {
+        if active_catalog_path.is_none() {
+            log::debug!(
+                "[models] stale guard: catalog not served because config.toml does not reference the cc-switch catalog"
+            );
+        }
+        json!({ "models": [] })
+    };
+
+    Ok(Json(catalog))
+}
+
 pub async fn handle_messages(
     State(state): State<ProxyServerState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    handle_claude_request(state, headers, body, AppType::Claude).await
+    handle_claude_request(state, headers, body).await
 }
 
-pub async fn handle_claude_desktop_messages(
-    State(state): State<ProxyServerState>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Response {
-    if let Err(error) = validate_claude_desktop_gateway_auth(&state, &headers) {
-        return proxy_error_response(error);
-    }
-    handle_claude_request(state, headers, body, AppType::ClaudeDesktop).await
-}
+fn decode_codex_request_body(
+    headers: &mut axum::http::HeaderMap,
+    body_bytes: Bytes,
+) -> Result<Bytes, ProxyError> {
+    let Some(encoding) = get_content_encoding(headers) else {
+        return Ok(body_bytes);
+    };
 
-pub async fn handle_claude_desktop_models(
-    State(state): State<ProxyServerState>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(error) = validate_claude_desktop_gateway_auth(&state, &headers) {
-        return proxy_error_response(error);
+    if !is_supported_content_encoding(&encoding) {
+        return Err(ProxyError::InvalidRequest(format!(
+            "Unsupported request content-encoding: {encoding}"
+        )));
     }
 
-    let providers = match state
-        .provider_router
-        .select_providers(AppType::ClaudeDesktop.as_str())
-        .await
-    {
-        Ok(providers) => providers,
-        Err(error) => return proxy_error_response(error),
+    log::debug!("[Codex] 解压请求体: content-encoding={encoding}");
+    let decompressed = match decompress_body(&encoding, &body_bytes) {
+        Ok(Some(decompressed)) => decompressed,
+        // is_supported_content_encoding 已确保编码受支持，正常不会返回 None；
+        // 防御性兜底：宁可报错，也不能把压缩字节当 JSON 透传下去。
+        Ok(None) => {
+            return Err(ProxyError::InvalidRequest(format!(
+                "Unsupported request content-encoding: {encoding}"
+            )));
+        }
+        Err(e) => {
+            log::warn!("[Codex] 请求体解压失败 ({encoding}): {e}");
+            return Err(ProxyError::InvalidRequest(format!(
+                "Failed to decompress request body ({encoding}): {e}"
+            )));
+        }
     };
-    let Some(provider) = providers.first() else {
-        return proxy_error_response(ProxyError::NoAvailableProvider);
-    };
-    match crate::claude_desktop_config::model_list_response(provider) {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => proxy_error_response(ProxyError::ConfigError(error.to_string())),
-    }
+
+    headers.remove(axum::http::header::CONTENT_ENCODING);
+    headers.remove(axum::http::header::CONTENT_LENGTH);
+    headers.remove(axum::http::header::TRANSFER_ENCODING);
+
+    Ok(Bytes::from(decompressed))
 }
 
 pub async fn handle_chat_completions(
     State(state): State<ProxyServerState>,
     uri: Uri,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
 ) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
     handle_passthrough_request(
         state,
         headers,
@@ -104,9 +147,17 @@ pub async fn handle_chat_completions(
 pub async fn handle_responses(
     State(state): State<ProxyServerState>,
     uri: Uri,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
 ) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
     handle_passthrough_request(
         state,
         headers,
@@ -120,9 +171,17 @@ pub async fn handle_responses(
 pub async fn handle_responses_compact(
     State(state): State<ProxyServerState>,
     uri: Uri,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    mut headers: HeaderMap,
+    body_bytes: Bytes,
 ) -> Response {
+    let body_bytes = match decode_codex_request_body(&mut headers, body_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
+    };
+    let body = match Json::<Value>::from_bytes(&body_bytes) {
+        Ok(Json(body)) => body,
+        Err(err) => return err.into_response(),
+    };
     handle_passthrough_request(
         state,
         headers,
@@ -161,12 +220,11 @@ async fn handle_claude_request(
     state: ProxyServerState,
     headers: HeaderMap,
     body: Value,
-    app_type: AppType,
 ) -> Response {
     state
         .record_estimated_input_tokens(estimate_tokens_from_value(&body))
         .await;
-    let context = match HandlerContext::load(&state, app_type, &headers, &body).await {
+    let context = match HandlerContext::load(&state, AppType::Claude, &headers, &body).await {
         Ok(context) => context,
         Err(error) => {
             state.record_request_error(&error).await;
@@ -185,6 +243,7 @@ async fn handle_claude_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = body
         .get("stream")
@@ -402,34 +461,6 @@ async fn handle_claude_request(
     .await
 }
 
-fn validate_claude_desktop_gateway_auth(
-    state: &ProxyServerState,
-    headers: &HeaderMap,
-) -> Result<(), ProxyError> {
-    let expected = crate::claude_desktop_config::get_or_create_gateway_token(state.db.as_ref())
-        .map_err(|error| ProxyError::AuthError(error.to_string()))?;
-    let value = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .ok_or_else(|| {
-            ProxyError::AuthError(
-                "Claude Desktop gateway request is missing Authorization".to_string(),
-            )
-        })?
-        .to_str()
-        .map_err(|_| ProxyError::AuthError("Invalid Authorization header".to_string()))?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-        .unwrap_or_default()
-        .trim();
-    if token != expected {
-        return Err(ProxyError::AuthError(
-            "Invalid Claude Desktop gateway token".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn build_buffered_claude_transform_response<F>(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -487,7 +518,7 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
                     output_items.push(item.clone());
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.incomplete" => {
                 completed_response = Some(data.get("response").cloned().unwrap_or(data));
             }
             "response.failed" => {
@@ -502,13 +533,15 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     }
 
     let mut response = completed_response.ok_or_else(|| {
-        ProxyError::TransformError("No response.completed event in upstream SSE".to_string())
+        ProxyError::TransformError(
+            "No response.completed or response.incomplete event in upstream SSE".to_string(),
+        )
     })?;
 
     if !output_items.is_empty() {
         let Some(response) = response.as_object_mut() else {
             return Err(ProxyError::TransformError(
-                "response.completed payload is not an object".to_string(),
+                "terminal response payload is not an object".to_string(),
             ));
         };
         response.insert("output".to_string(), Value::Array(output_items));
@@ -555,6 +588,7 @@ async fn handle_passthrough_request(
             return proxy_error_response(error);
         }
     };
+    forwarder.prewarm_provider_clients(&context.app_type, context.providers());
 
     let is_stream = request_is_streaming(&context.app_type, &endpoint, &body);
     let codex_tool_context = matches!(context.app_type, AppType::Codex).then(|| {
@@ -636,7 +670,7 @@ async fn handle_passthrough_request(
             super::forwarder::StreamingResponse::Live(response)
                 if converts_codex_anthropic
                     && status.is_success()
-                    && is_sse_response(&response) =>
+                    && !is_json_response(&response) =>
             {
                 build_codex_anthropic_stream_response_with_context(
                     response,
@@ -649,6 +683,7 @@ async fn handle_passthrough_request(
                 build_codex_anthropic_response_with_context(
                     response,
                     remaining_timeout(first_byte_timeout, request_started_at),
+                    true,
                     codex_tool_context.clone().unwrap_or_default(),
                 )
                 .await
@@ -680,6 +715,15 @@ async fn handle_passthrough_request(
                 )
                 .await
             }
+            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_anthropic => {
+                build_buffered_codex_anthropic_response_with_context(
+                    status,
+                    &response.headers,
+                    response.body,
+                    true,
+                    codex_tool_context.clone().unwrap_or_default(),
+                )
+            }
             super::forwarder::StreamingResponse::Buffered(response) if converts_codex_chat => {
                 build_buffered_codex_chat_response_with_context(
                     status,
@@ -689,23 +733,6 @@ async fn handle_passthrough_request(
                     codex_tool_context.clone().unwrap_or_default(),
                 )
                 .await
-            }
-            super::forwarder::StreamingResponse::Buffered(response) if converts_codex_anthropic => {
-                if status.is_success() {
-                    build_buffered_codex_anthropic_stream_response_with_context(
-                        status,
-                        &response.headers,
-                        response.body,
-                        codex_tool_context.clone().unwrap_or_default(),
-                    )
-                } else {
-                    build_buffered_codex_anthropic_response_with_context(
-                        status,
-                        &response.headers,
-                        response.body,
-                        codex_tool_context.clone().unwrap_or_default(),
-                    )
-                }
             }
             super::forwarder::StreamingResponse::Buffered(response) => {
                 build_buffered_passthrough_response(status, &response.headers, response.body)
@@ -1050,6 +1077,43 @@ async fn finish_codex_live_aware_response(
         current_provider_id_at_start: context.current_provider_id_at_start.clone(),
     });
 
+    if super::providers::should_convert_codex_responses_to_anthropic(&provider, endpoint) {
+        let request_log = Some(RequestLogContext::from_handler(
+            context,
+            provider.clone(),
+            false,
+            UsageLogPolicy::Transformed,
+        ));
+        let response_result = match response {
+            super::forwarder::StreamingResponse::Live(response) => {
+                build_codex_anthropic_response_with_context(
+                    response,
+                    remaining_timeout(non_streaming_timeout, request_started_at),
+                    false,
+                    tool_context,
+                )
+                .await
+            }
+            super::forwarder::StreamingResponse::Buffered(response) => {
+                build_buffered_codex_anthropic_response_with_context(
+                    response.status,
+                    &response.headers,
+                    response.body,
+                    false,
+                    tool_context,
+                )
+            }
+        };
+        return ResponseHandler::finish_buffered(
+            &context.state,
+            response_result,
+            status,
+            success_sync,
+            request_log,
+        )
+        .await;
+    }
+
     if super::providers::should_convert_codex_responses_to_chat(&provider, endpoint) {
         return match response {
             super::forwarder::StreamingResponse::Live(response)
@@ -1135,41 +1199,6 @@ async fn finish_codex_live_aware_response(
                 .await
             }
         };
-    }
-
-    if super::providers::should_convert_codex_responses_to_anthropic(&provider, endpoint) {
-        let request_log = Some(RequestLogContext::from_handler(
-            context,
-            provider.clone(),
-            false,
-            UsageLogPolicy::Transformed,
-        ));
-        let response_result = match response {
-            super::forwarder::StreamingResponse::Live(response) => {
-                build_codex_anthropic_response_with_context(
-                    response,
-                    remaining_timeout(non_streaming_timeout, request_started_at),
-                    tool_context,
-                )
-                .await
-            }
-            super::forwarder::StreamingResponse::Buffered(response) => {
-                build_buffered_codex_anthropic_response_with_context(
-                    response.status,
-                    &response.headers,
-                    response.body,
-                    tool_context,
-                )
-            }
-        };
-        return ResponseHandler::finish_buffered(
-            &context.state,
-            response_result,
-            status,
-            success_sync,
-            request_log,
-        )
-        .await;
     }
 
     match response {
@@ -1269,12 +1298,48 @@ fn passthrough_usage_log_policy(
     }
 }
 
+fn is_json_response(response: &super::forwarder::LiveResponse) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| {
+            let media_type = content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            media_type == "application/json" || media_type.ends_with("+json")
+        })
+}
+
 fn remaining_timeout(timeout: Option<Duration>, started_at: Instant) -> Option<Duration> {
     timeout.map(|timeout| timeout.saturating_sub(started_at.elapsed()))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compressed_codex_body_removes_stale_entity_headers() {
+        let payload = br#"{"model":"test"}"#;
+        let compressed = zstd::stream::encode_all(&payload[..], 0).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("content-encoding", "zstd".parse().unwrap());
+        headers.insert(
+            "content-length",
+            compressed.len().to_string().parse().unwrap(),
+        );
+        headers.insert("transfer-encoding", "chunked".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let decoded = super::decode_codex_request_body(&mut headers, compressed.into()).unwrap();
+        assert_eq!(decoded.as_ref(), payload);
+        for name in ["content-encoding", "content-length", "transfer-encoding"] {
+            assert!(!headers.contains_key(name));
+        }
+        assert_eq!(headers["content-type"], "application/json");
+    }
+
     use super::{
         build_buffered_claude_transform_response, endpoint_with_query, handle_responses,
         handle_responses_compact, responses_sse_to_response_value,
@@ -1496,10 +1561,13 @@ mod tests {
                 State(state),
                 Uri::from_static("/v1/responses"),
                 HeaderMap::new(),
-                Json(json!({
-                    "model": "gpt-5.4",
-                    "input": "hello"
-                })),
+                bytes::Bytes::from(
+                    json!({
+                        "model": "gpt-5.4",
+                        "input": "hello"
+                    })
+                    .to_string(),
+                ),
             ),
         )
         .await
@@ -1563,11 +1631,14 @@ mod tests {
             State(state),
             Uri::from_static("/v1/responses"),
             HeaderMap::new(),
-            Json(json!({
-                "model": "gpt-5.4",
-                "tools": [{"type": "tool_search"}],
-                "input": "Find Gmail tools"
-            })),
+            bytes::Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "tools": [{"type": "tool_search"}],
+                    "input": "Find Gmail tools"
+                })
+                .to_string(),
+            ),
         )
         .await;
 
@@ -1612,10 +1683,13 @@ mod tests {
             State(state),
             Uri::from_static("/v1/responses?beta=true"),
             HeaderMap::new(),
-            Json(json!({
-                "model": "gpt-5.4",
-                "input": "hello"
-            })),
+            bytes::Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "input": "hello"
+                })
+                .to_string(),
+            ),
         )
         .await;
 
@@ -1664,11 +1738,14 @@ mod tests {
             State(state),
             Uri::from_static("/v1/responses/compact?beta=true"),
             HeaderMap::new(),
-            Json(json!({
-                "model": "gpt-5.4",
-                "input": "hello",
-                "stream": true
-            })),
+            bytes::Bytes::from(
+                json!({
+                    "model": "gpt-5.4",
+                    "input": "hello",
+                    "stream": true
+                })
+                .to_string(),
+            ),
         )
         .await;
 
@@ -1836,5 +1913,21 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"upstr
 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n\n";
 
         assert!(responses_sse_to_response_value(sse).is_err());
+    }
+
+    #[test]
+    fn responses_sse_to_response_value_accepts_incomplete_terminal_event() {
+        let sse = "event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}}\n\n\
+event: response.incomplete\n\
+data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_inc\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n\n";
+
+        let response = responses_sse_to_response_value(sse).unwrap();
+        assert_eq!(response["status"], "incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+        assert_eq!(response["output"][0]["content"][0]["text"], "partial");
     }
 }

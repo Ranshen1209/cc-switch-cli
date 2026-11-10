@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use tempfile::{tempdir, TempDir};
 use zip::{write::SimpleFileOptions, DateTime};
 
+use crate::config::create_managed_config_dir_all;
 use crate::error::AppError;
-use crate::services::skill::SkillService;
+use crate::services::skill::{SkillService, SkillStorageLocation};
 
 const MAX_ZIP_ENTRIES: usize = 10_000;
 const MAX_ZIP_EXTRACT_BYTES: u64 = 512 * 1024 * 1024; // 512 MB
@@ -45,6 +46,7 @@ pub struct SkillsBackup {
 impl SkillsBackup {
     pub fn backup_current_skills() -> Result<Self, AppError> {
         let ssot = SkillService::get_ssot_dir()?;
+        ensure_unified_ssot_is_fully_managed(&ssot)?;
         let tmp = tempdir().map_err(|e| {
             io_context_localized(
                 "webdav.sync.skills_backup_tmpdir_failed",
@@ -69,11 +71,52 @@ impl SkillsBackup {
             fs::remove_dir_all(&self.ssot_dir).map_err(|e| AppError::io(&self.ssot_dir, e))?;
         }
         if self.backup_path.exists() {
-            fs::create_dir_all(&self.ssot_dir).map_err(|e| AppError::io(&self.ssot_dir, e))?;
+            create_managed_config_dir_all(&self.ssot_dir)?;
             copy_dir_recursive(&self.backup_path, &self.ssot_dir)?;
         }
         Ok(())
     }
+}
+
+fn unified_storage_enabled() -> bool {
+    crate::settings::get_skill_storage_location() == SkillStorageLocation::Unified
+}
+
+fn ensure_unified_ssot_is_fully_managed(ssot: &Path) -> Result<(), AppError> {
+    if !unified_storage_enabled() || !ssot.exists() {
+        return Ok(());
+    }
+    let managed = SkillService::load_index_unlocked()?.skills;
+    for entry in fs::read_dir(ssot).map_err(|error| AppError::io(ssot, error))? {
+        let entry = entry.map_err(|error| AppError::io(ssot, error))?;
+        let file_name = entry.file_name();
+        let name = file_name.to_str().ok_or_else(|| {
+            AppError::localized(
+                "sync.unified_skills_non_utf8_name",
+                format!(
+                    "Unified 技能目录包含无法安全识别的名称：{}",
+                    entry.path().display()
+                ),
+                format!(
+                    "Unified Skill storage contains a name that cannot be identified safely: {}",
+                    entry.path().display()
+                ),
+            )
+        })?;
+        if !managed.contains_key(name) {
+            return Err(AppError::localized(
+                "sync.unified_skills_contains_unmanaged",
+                format!(
+                    "Unified 技能目录包含未管理目录 {name}，云同步不会替换它。请先显式导入，或切回 CC Switch 存储。"
+                ),
+                format!(
+                    "Unified Skill storage contains the unmanaged directory {name}; cloud sync will not replace it. Import it explicitly or use CC Switch storage."
+                ),
+            ));
+        }
+        SkillService::validate_managed_skill_tree(&entry.path())?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +125,7 @@ impl SkillsBackup {
 
 pub fn zip_skills_ssot(dest_path: &Path) -> Result<(), AppError> {
     let source = SkillService::get_ssot_dir()?;
+    ensure_unified_ssot_is_fully_managed(&source)?;
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
@@ -289,7 +333,19 @@ pub fn restore_skills_zip(raw: &[u8]) -> Result<(), AppError> {
     }
 
     let ssot = SkillService::get_ssot_dir()?;
+    ensure_unified_ssot_is_fully_managed(&ssot)?;
     let bak = ssot.with_extension("bak");
+
+    if unified_storage_enabled() && bak.exists() {
+        return Err(AppError::localized(
+            "sync.unified_skills_backup_collision",
+            format!("Unified 技能恢复不会覆盖已有备份目录：{}", bak.display()),
+            format!(
+                "Unified Skill restore will not replace the existing backup directory: {}",
+                bak.display()
+            ),
+        ));
+    }
 
     // 原子替换：先 rename 到 .bak，再 copy，失败则回滚
     if ssot.exists() {
@@ -299,7 +355,9 @@ pub fn restore_skills_zip(raw: &[u8]) -> Result<(), AppError> {
         fs::rename(&ssot, &bak).map_err(|e| AppError::io(&ssot, e))?;
     }
 
-    if let Err(e) = copy_dir_recursive(&extracted, &ssot) {
+    if let Err(e) =
+        create_managed_config_dir_all(&ssot).and_then(|_| copy_dir_recursive(&extracted, &ssot))
+    {
         if bak.exists() {
             let _ = fs::remove_dir_all(&ssot);
             let _ = fs::rename(&bak, &ssot);
@@ -392,6 +450,7 @@ fn copy_dir_recursive_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{update_settings, AppSettings};
     use tempfile::tempdir;
 
     #[test]
@@ -472,5 +531,107 @@ mod tests {
             0,
             "should not write when the first chunk exceeds limit"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn unified_archive_refuses_to_touch_unmanaged_directories() {
+        let temp = tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let mut settings = AppSettings::default();
+        settings.skill_storage_location = SkillStorageLocation::Unified;
+        update_settings(settings).expect("enable unified Skill storage");
+
+        let ssot = SkillService::get_ssot_dir().expect("resolve unified SSOT");
+        fs::create_dir_all(ssot.join("personal")).expect("create unmanaged Skill");
+        fs::write(ssot.join("personal/SKILL.md"), "personal").expect("write unmanaged Skill");
+
+        let snapshot = temp.path().join("skills.zip");
+        let error = zip_skills_ssot(&snapshot)
+            .expect_err("cloud archive must not claim an unmanaged unified directory");
+
+        assert!(error.to_string().contains("personal"));
+        assert_eq!(
+            fs::read_to_string(ssot.join("personal/SKILL.md"))
+                .expect("read preserved unmanaged Skill"),
+            "personal"
+        );
+
+        let replacement = temp.path().join("replacement.zip");
+        let file = fs::File::create(&replacement).expect("create replacement archive");
+        zip::ZipWriter::new(file)
+            .finish()
+            .expect("finish replacement archive");
+        restore_skills_zip(&fs::read(&replacement).expect("read replacement archive"))
+            .expect_err("cloud restore must not replace an unmanaged unified directory");
+        assert_eq!(
+            fs::read_to_string(ssot.join("personal/SKILL.md"))
+                .expect("read preserved unmanaged Skill after restore refusal"),
+            "personal"
+        );
+
+        fs::remove_dir_all(ssot.join("personal")).expect("remove unmanaged fixture");
+        let sibling_backup = ssot.with_extension("bak");
+        fs::create_dir_all(&sibling_backup).expect("create external sibling backup");
+        fs::write(sibling_backup.join("keep.txt"), "external").expect("write external backup");
+        restore_skills_zip(&fs::read(&replacement).expect("read replacement archive"))
+            .expect_err("Unified restore must not remove a pre-existing sibling backup");
+        assert_eq!(
+            fs::read_to_string(sibling_backup.join("keep.txt"))
+                .expect("read preserved sibling backup"),
+            "external"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(home_settings)]
+    fn unified_archive_rejects_links_and_special_files_inside_managed_skills() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        let temp = tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let mut settings = AppSettings::default();
+        settings.skill_storage_location = SkillStorageLocation::Unified;
+        update_settings(settings).expect("enable unified Skill storage");
+
+        let ssot = SkillService::get_ssot_dir().expect("resolve unified SSOT");
+        let managed = ssot.join("managed");
+        fs::create_dir_all(&managed).expect("create managed Skill");
+        fs::write(managed.join("SKILL.md"), "managed").expect("write managed Skill");
+        let db = crate::database::Database::init().expect("initialize database");
+        db.save_skill(&crate::app_config::InstalledSkill {
+            id: "local:managed".to_string(),
+            name: "Managed".to_string(),
+            description: None,
+            directory: "managed".to_string(),
+            readme_url: None,
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            apps: crate::app_config::SkillApps::default(),
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        })
+        .expect("register managed Skill");
+
+        let external = temp.path().join("external.txt");
+        fs::write(&external, "external").expect("write external fixture");
+        let nested_link = managed.join("external-link");
+        symlink(&external, &nested_link).expect("create nested symlink");
+        let snapshot = temp.path().join("linked.zip");
+        zip_skills_ssot(&snapshot).expect_err("archive must reject nested symlinks");
+        assert_eq!(
+            fs::read_to_string(&external).expect("read external file"),
+            "external"
+        );
+
+        fs::remove_file(&nested_link).expect("remove symlink fixture");
+        let socket_path = managed.join("special.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("create special file fixture");
+        zip_skills_ssot(&snapshot).expect_err("archive must reject special files");
+        assert!(socket_path.exists());
     }
 }

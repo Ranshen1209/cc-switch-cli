@@ -7,12 +7,13 @@ use crate::app_config::AppType;
 use crate::cli::i18n::current_language;
 use crate::cli::i18n::texts;
 use crate::cli::i18n::Language;
-use crate::services::skill::SyncMethod;
+use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
 use super::data::UiData;
 use super::form::{
-    CodexWireApi, FormFocus, FormMode, FormState, GeminiAuthType, McpAddField, McpAddFormState,
-    McpTransport, PromptMetaField, PromptMetaFormState, ProviderAddField, ProviderAddFormState,
+    ClaudeModelPickerColumn, ClaudeModelRole, CodexWireApi, FormFocus, FormMode, FormState,
+    GeminiAuthType, McpAddField, McpAddFormState, McpKeyValueKind, McpTransport, PromptMetaField,
+    PromptMetaFormState, ProviderAddField, ProviderAddFormState,
 };
 use super::route::{NavItem, Route};
 use super::text_edit::{TextEditCommand, TextInput, TextInputPolicy};
@@ -30,24 +31,66 @@ mod form_handlers;
 mod helpers;
 mod menu;
 mod overlay_handlers;
+mod page_window;
+pub(crate) mod paged_list;
 #[cfg(test)]
 mod tests;
 mod types;
 
 pub(crate) use app_state::{
-    Action, App, ConfigItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
-    SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
+    Action, App, CloudSyncBackend, CloudSyncTransferIntent, ConfigItem,
+    GlobalOutboundProxySettingsItem, LocalProxySettingsItem, MoveDirection, ProxyVisualTransition,
+    S3ConfigItem, SettingsItem, WebDavConfigItem, PROXY_HERO_TRANSITION_TICKS,
 };
 pub(crate) use content_config::HERMES_MEMORY_ROW_COUNT;
 pub(crate) use content_usage::usage_active_pane_len;
 pub use editor_state::{EditorKind, EditorMode, EditorState, EditorSubmit};
 pub(crate) use helpers::*;
-pub use types::{
-    CommonSnippetViewSource, ConfirmAction, ConfirmOverlay, FilterScope, FilterState, Focus,
-    LoadingKind, ManagedAuthLoginState, Overlay, PricingState, SessionsPane, SessionsState,
-    SkillsDiscoverSource, TextInputState, TextSubmit, TextViewAction, TextViewState, Toast,
-    ToastKind, UsageMetric, UsagePane, UsageState,
+pub(crate) use types::{
+    model_fetch_filter, retire_session_messages, retire_session_rows, SessionPageSource,
+    SessionPageToken, SessionRowIdentity, MODEL_FETCH_QUERY_MAX_BYTES, MODEL_FETCH_QUERY_MAX_CHARS,
 };
+pub use types::{
+    CodexHistoryConfirmMode, CodexHistoryConfirmState, CommonSnippetViewSource, ConfirmAction,
+    ConfirmOverlay, FilterScope, FilterState, Focus, LoadingKind, ManagedAuthLoginState, Overlay,
+    PricingState, SessionProjectPickerState, SessionsPane, SessionsState, SkillsDiscoverSource,
+    TextInputState, TextSubmit, TextViewAction, TextViewState, Toast, ToastAction,
+    ToastActionScope, ToastKind, UsageMetric, UsagePane, UsageState,
+};
+#[cfg(test)]
+pub(crate) use types::{McpKeyValueEditorField, McpKeyValueEntryEditorState};
+
+pub(crate) fn global_outbound_proxy_text_input(
+    submit: TextSubmit,
+    value: String,
+) -> TextInputState {
+    let prompt = match submit {
+        TextSubmit::SettingsOutboundProxyUrl => crate::t!(
+            "Proxy URL (http, https, socks5, or socks5h)\nLeave blank to use environment variables.",
+            "代理 URL（http、https、socks5 或 socks5h）\n留空则使用环境变量"
+        ),
+        TextSubmit::SettingsOutboundProxyUsername => {
+            crate::t!("Username (optional)", "用户名（可选）")
+        }
+        TextSubmit::SettingsOutboundProxyPassword => {
+            crate::t!("Password (optional)", "密码（可选）")
+        }
+        _ => unreachable!("outbound proxy editor requires an outbound proxy submit target"),
+    };
+    TextInputState {
+        title: crate::t!("Global Outbound Proxy", "全局出站代理").to_string(),
+        prompt: prompt.to_string(),
+        input: TextInput::new(value),
+        submit,
+    }
+}
+
+pub(crate) fn global_outbound_proxy_error_message(error: crate::error::AppError) -> String {
+    match error {
+        crate::error::AppError::InvalidInput(message) => message,
+        other => other.to_string(),
+    }
+}
 
 pub(crate) fn supports_failover_controls(app_type: &AppType) -> bool {
     app_type.supports_failover()

@@ -39,8 +39,9 @@ fn provider_proxy_badge(app_type: &AppType, row: &ProviderRow) -> Option<Provide
             Some(ProviderProxyBadge::NoProxySupport)
         }
         AppType::Codex => {
-            crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
-                .then_some(ProviderProxyBadge::NeedsProxy)
+            (crate::proxy::providers::codex_provider_uses_chat_completions(&row.provider)
+                || crate::proxy::providers::codex_provider_uses_anthropic(&row.provider))
+            .then_some(ProviderProxyBadge::NeedsProxy)
         }
         _ => None,
     }
@@ -118,10 +119,6 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
         theme,
         texts::tui_provider_empty_title(),
         texts::tui_provider_empty_subtitle(),
-        &[
-            ("Enter", texts::tui_key_import_current_config()),
-            ("a", texts::tui_key_add_provider()),
-        ],
     );
 }
 
@@ -129,13 +126,22 @@ fn render_provider_empty_state(frame: &mut Frame<'_>, area: Rect, theme: &super:
 /// from the empty state so a freshly switched-to app reads as "loading", never
 /// as "no providers / import config".
 fn render_provider_loading_state(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
-    let line = Line::styled(
+    let content_lines = vec![Line::styled(
         texts::tui_provider_loading(),
         Style::default().fg(theme.comment),
+    )];
+    let top_padding = area.height.saturating_sub(content_lines.len() as u16) / 2;
+    let mut lines = Vec::with_capacity(top_padding as usize + content_lines.len());
+    for _ in 0..top_padding {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(content_lines);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false }),
+        area,
     );
-    let y = area.y + area.height.saturating_sub(1) / 2;
-    let centered = Rect::new(area.x, y, area.width, 1.min(area.height));
-    frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), centered);
 }
 
 pub(super) fn render_providers(
@@ -188,7 +194,7 @@ pub(super) fn render_providers(
             } else {
                 String::new()
             }
-        } else if matches!(app.app_type, AppType::OpenCode) {
+        } else if matches!(app.app_type, AppType::OpenCode | AppType::Pi) {
             if row.is_in_config {
                 "+".to_string()
             } else {
@@ -237,7 +243,7 @@ mod tests {
     use crate::cli::tui::data::ProviderUsageQuota;
     use crate::provider::{Provider, ProviderMeta, UsageData, UsageResult, UsageScript};
     use crate::services::{CredentialStatus, QuotaTier, SubscriptionQuota};
-    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+    use ratatui::buffer::Buffer;
     use serde_json::json;
 
     fn all_text(buf: &Buffer) -> String {
@@ -260,6 +266,22 @@ mod tests {
             None,
         );
         provider.category = Some("official".to_string());
+        provider.meta = Some(ProviderMeta {
+            usage_script: Some(UsageScript {
+                enabled: true,
+                language: "javascript".to_string(),
+                code: String::new(),
+                timeout: Some(10),
+                api_key: None,
+                base_url: None,
+                access_token: None,
+                user_id: None,
+                template_type: Some("official_subscription".to_string()),
+                auto_query_interval: Some(5),
+                coding_plan_provider: None,
+            }),
+            ..Default::default()
+        });
         data.providers.current_id = "official".to_string();
         data.providers.rows = vec![ProviderRow {
             id: "official".to_string(),
@@ -297,6 +319,7 @@ mod tests {
                 extra_usage: None,
                 error: None,
                 queried_at: Some(chrono::Utc::now().timestamp_millis()),
+                reset_credits: None,
             }),
         );
         data
@@ -323,8 +346,6 @@ mod tests {
                 template_type: Some("general".to_string()),
                 auto_query_interval: Some(5),
                 coding_plan_provider: None,
-                team_organization_id: None,
-                team_project_id: None,
             }),
             ..Default::default()
         });
@@ -363,6 +384,42 @@ mod tests {
         data
     }
 
+    fn coding_plan_usage_data() -> UiData {
+        let mut data = usage_script_data();
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota.finish(
+            target,
+            ProviderUsageQuota::Script(UsageResult {
+                success: true,
+                data: Some(vec![
+                    UsageData {
+                        plan_name: Some("five_hour".to_string()),
+                        extra: None,
+                        is_valid: Some(true),
+                        invalid_message: None,
+                        total: Some(100.0),
+                        used: Some(0.0),
+                        remaining: Some(100.0),
+                        unit: Some("%".to_string()),
+                    },
+                    UsageData {
+                        plan_name: Some("weekly_limit".to_string()),
+                        extra: None,
+                        is_valid: Some(true),
+                        invalid_message: None,
+                        total: Some(100.0),
+                        used: Some(100.0),
+                        remaining: Some(0.0),
+                        unit: Some("%".to_string()),
+                    },
+                ]),
+                error: None,
+            }),
+        );
+        data
+    }
+
     fn claude_openai_chat_data() -> UiData {
         let mut data = super::super::tests::minimal_data(&AppType::Claude);
         data.providers.rows[0].provider = Provider::with_id(
@@ -378,42 +435,6 @@ mod tests {
         data
     }
 
-    #[test]
-    fn provider_loading_state_only_renders_on_center_row() {
-        let _lock = super::super::tests::lock_env();
-        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
-        let theme = theme_for(&AppType::Claude);
-        let area = Rect::new(3, 2, 30, 9);
-        let mut terminal = Terminal::new(TestBackend::new(40, 15)).expect("terminal created");
-
-        terminal
-            .draw(|frame| {
-                for y in area.y..area.bottom() {
-                    for x in area.x..area.right() {
-                        frame.buffer_mut()[(x, y)].set_symbol(".");
-                    }
-                }
-                render_provider_loading_state(frame, area, &theme);
-            })
-            .expect("loading state rendered");
-
-        let buffer = terminal.backend().buffer();
-        let center_y = area.y + area.height / 2;
-        let center_line = (area.x..area.right())
-            .map(|x| buffer[(x, center_y)].symbol())
-            .collect::<String>();
-
-        assert!(
-            center_line.contains(texts::tui_provider_loading()),
-            "{center_line}"
-        );
-        assert_eq!(buffer[(area.x + area.width / 2, area.y)].symbol(), ".");
-        assert_eq!(
-            buffer[(area.x + area.width / 2, area.bottom() - 1)].symbol(),
-            "."
-        );
-    }
-
     fn codex_chat_wire_api_data() -> UiData {
         let mut data = super::super::tests::minimal_data(&AppType::Codex);
         data.providers.rows[0].provider = Provider::with_id(
@@ -424,6 +445,23 @@ mod tests {
             }),
             None,
         );
+        data
+    }
+
+    fn codex_anthropic_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Codex);
+        data.providers.rows[0].provider = Provider::with_id(
+            "p1".to_string(),
+            "Anthropic Gateway".to_string(),
+            json!({
+                "config": "model_provider = \"custom\"\nmodel = \"claude-sonnet-4-6\"\n\n[model_providers.custom]\nbase_url = \"https://api.example.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            }),
+            None,
+        );
+        data.providers.rows[0].provider.meta = Some(ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
         data
     }
 
@@ -457,6 +495,22 @@ mod tests {
         let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
 
         assert!(all.contains("Chat Wire Provider"), "{all}");
+        assert!(all.contains("[Needs Proxy]"), "{all}");
+    }
+
+    #[test]
+    fn codex_provider_list_marks_anthropic_as_needing_proxy() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = codex_anthropic_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 180, 40));
+
+        assert!(all.contains("Anthropic Gateway"), "{all}");
         assert!(all.contains("[Needs Proxy]"), "{all}");
     }
 
@@ -510,6 +564,94 @@ mod tests {
         assert!(
             all.contains(&format!("o {}", texts::tui_key_launch_temp())),
             "{all}"
+        );
+    }
+
+    #[test]
+    fn official_provider_list_shows_compact_reset_countdown() {
+        let _lock = super::super::tests::lock_env();
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut data = current_official_claude_data();
+        let Some(ProviderUsageQuota::Subscription(mut quota)) =
+            data.quota.state_for("official").unwrap().quota.clone()
+        else {
+            panic!("expected subscription quota");
+        };
+        quota.tiers[0].resets_at =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(12_630)).to_rfc3339());
+        quota.tiers[1].resets_at = Some("invalid".to_string());
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota
+            .finish(target, ProviderUsageQuota::Subscription(quota));
+
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 220, 40));
+        assert!(all.contains("5h 42%  7d 70%"), "{all}");
+        assert!(all.contains("(5h 3h30m)"), "{all}");
+        assert!(all.contains("7d 70%"), "{all}");
+        assert!(!all.contains("invalid"), "{all}");
+        assert!(!all.contains(texts::tui_header_quota()), "{all}");
+    }
+
+    #[test]
+    fn provider_quota_keeps_values_and_refresh_status_visible_on_narrow_terminals() {
+        let _lock = super::super::tests::lock_env();
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let mut data = current_official_claude_data();
+        let Some(ProviderUsageQuota::Subscription(mut quota)) =
+            data.quota.state_for("official").unwrap().quota.clone()
+        else {
+            panic!("expected subscription quota");
+        };
+        for tier in &mut quota.tiers {
+            tier.resets_at = Some((chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339());
+        }
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota
+            .finish(target.clone(), ProviderUsageQuota::Subscription(quota));
+        data.quota.mark_loading(target.clone(), true);
+
+        let mut baseline = current_official_claude_data();
+        baseline.quota.mark_loading(target, true);
+        let labels = ["5h 42%  7d 70%", "s ago", texts::tui_quota_loading()];
+        let mut compared = [0; 3];
+        for width in [120, 140, 160, 180, 200, 220] {
+            let before = all_text(&super::super::tests::render_with_size(
+                &app, &baseline, width, 40,
+            ));
+            let all = all_text(&super::super::tests::render_with_size(
+                &app, &data, width, 40,
+            ));
+            let Some(before_row) = before
+                .lines()
+                .find(|line| line.contains("Claude Official") && line.contains("5h 42%"))
+            else {
+                continue;
+            };
+            let after_row = all
+                .lines()
+                .find(|line| line.contains("Claude Official") && line.contains("5h 42%"))
+                .unwrap();
+            for (index, label) in labels.iter().enumerate() {
+                if before_row.contains(label) {
+                    compared[index] += 1;
+                    assert!(
+                        after_row.contains(label),
+                        "width={width}, label={label}\n{all}"
+                    );
+                }
+            }
+        }
+        assert!(
+            compared.iter().all(|count| *count > 0),
+            "cover all quota/status fields: {compared:?}"
         );
     }
 
@@ -592,6 +734,24 @@ mod tests {
         assert!(all.contains("12 USD"), "{all}");
         assert!(all.contains("second ago"), "{all}");
         assert!(!all.contains("default"), "{all}");
+    }
+
+    #[test]
+    fn coding_plan_quota_uses_localized_window_labels() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = coding_plan_usage_data();
+        let all = all_text(&super::super::tests::render_with_size(&app, &data, 240, 40));
+
+        assert!(all.contains("5h 100 / 100 % left, 0 used"), "{all}");
+        assert!(all.contains("weekly 0 / 100 % left, 100 used"), "{all}");
+        assert!(!all.contains("five_hour"), "{all}");
+        assert!(!all.contains("weekly_limit"), "{all}");
     }
 
     #[cfg(not(unix))]

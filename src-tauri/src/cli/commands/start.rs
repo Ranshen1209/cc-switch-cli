@@ -29,6 +29,7 @@ Examples:
 const CODEX_START_AFTER_LONG_HELP: &str = "\
 Examples:
   cc-switch start codex demo
+  cc-switch start codex demo --shared-sessions
   cc-switch start codex demo --dry-run
   cc-switch start codex demo -- --model gpt-5.4";
 
@@ -54,6 +55,9 @@ pub enum StartCommand {
         /// Preview the resolved launch without starting Codex
         #[arg(long)]
         dry_run: bool,
+        /// Share persistent Codex history while keeping provider credentials isolated
+        #[arg(long)]
+        shared_sessions: bool,
         /// Native Codex CLI arguments to pass through after `--`
         #[arg(last = true, value_name = "NATIVE_ARGS")]
         native_args: Vec<OsString>,
@@ -70,8 +74,9 @@ pub fn execute(cmd: StartCommand) -> Result<(), AppError> {
         StartCommand::Codex {
             selector,
             dry_run,
+            shared_sessions,
             native_args,
-        } => start_codex(&selector, dry_run, &native_args),
+        } => start_codex(&selector, dry_run, shared_sessions, &native_args),
     }
 }
 
@@ -104,7 +109,12 @@ fn start_claude(selector: &str, dry_run: bool, native_args: &[OsString]) -> Resu
     handoff_claude_and_cleanup(&prepared, native_args)
 }
 
-fn start_codex(selector: &str, dry_run: bool, native_args: &[OsString]) -> Result<(), AppError> {
+fn start_codex(
+    selector: &str,
+    dry_run: bool,
+    shared_sessions: bool,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
     start_with(
         selector,
         "Codex",
@@ -114,6 +124,12 @@ fn start_codex(selector: &str, dry_run: bool, native_args: &[OsString]) -> Resul
         },
         |provider| {
             ensure_codex_temp_launch_supported()?;
+            #[cfg(unix)]
+            if shared_sessions {
+                return crate::cli::codex_shared_launch::launch(provider, native_args, dry_run);
+            }
+            #[cfg(not(unix))]
+            let _ = shared_sessions;
             if dry_run {
                 let prepared = preview_codex_launch_with(
                     provider,
@@ -594,7 +610,19 @@ mod tests {
     }
 
     #[test]
-    fn prepare_claude_launch_with_writes_effective_snapshot_from_state() {
+    #[serial_test::serial]
+    fn prepare_claude_launch_preserves_live_globals_without_replaying_saved_snapshots() {
+        let home = TempDir::new().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let live_path = crate::config::get_claude_settings_path();
+        let live = json!({
+            "env":{"ANTHROPIC_AUTH_TOKEN":"old", "USER_ENV":"keep"},
+            "permissions":{"allow":["Read"]},
+            "hooks":{"UserPromptSubmit":[]},
+            "includeCoAuthoredBy":false
+        });
+        crate::config::write_json_file(&live_path, &live).unwrap();
+        let live_before = std::fs::read(&live_path).unwrap();
         let temp_dir = TempDir::new().expect("create temp dir");
         let mut config = crate::app_config::MultiAppConfig::default();
         config.ensure_app(&AppType::Claude);
@@ -627,17 +655,19 @@ mod tests {
             &std::fs::read_to_string(&prepared.settings_path).expect("read temp settings"),
         )
         .expect("parse temp settings");
-        let expected = ProviderService::build_effective_live_snapshot_from_state(
-            &state,
-            AppType::Claude,
-            &provider,
-        )
-        .expect("build effective snapshot");
-
+        assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-demo");
         assert_eq!(
-            written, expected,
-            "CLI temp launch should write the canonical effective snapshot"
+            written["env"]["ANTHROPIC_BASE_URL"],
+            "https://provider.example"
         );
+        assert_eq!(written["env"]["USER_ENV"], "keep");
+        assert!(written["env"]
+            .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+            .is_none());
+        assert_eq!(written["permissions"], live["permissions"]);
+        assert_eq!(written["hooks"], live["hooks"]);
+        assert_eq!(written["includeCoAuthoredBy"], false);
+        assert_eq!(std::fs::read(&live_path).unwrap(), live_before);
     }
 
     #[test]
@@ -658,7 +688,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn preview_claude_launch_with_does_not_write_temp_settings() {
+        let home = TempDir::new().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
         let temp_dir = TempDir::new().expect("create temp dir");
         let mut config = crate::app_config::MultiAppConfig::default();
         config.ensure_app(&AppType::Claude);

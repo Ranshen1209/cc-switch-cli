@@ -1,5 +1,6 @@
 use super::super::theme;
 use super::super::*;
+use super::action_dialog::{render_action_dialog, ActionDialogSpec};
 use super::frame::{overlay_frame, overlay_frame_at, OverlaySize};
 
 pub(super) fn render_help_overlay(
@@ -44,18 +45,19 @@ pub(super) fn render_confirm_overlay(
     confirm: &crate::cli::tui::app::ConfirmOverlay,
 ) {
     let keys: &[(&str, &str)] = match &confirm.action {
+        ConfirmAction::ClaudeEditorConflict { .. } => &[
+            ("M", crate::t!("Keep mine", "保留我的修改")),
+            ("T", crate::t!("Keep external", "保留外部修改")),
+            ("Esc", texts::tui_key_cancel()),
+        ],
         ConfirmAction::EditorSaveBeforeClose | ConfirmAction::FormSaveBeforeClose => &[
             ("Enter", texts::tui_key_save_and_exit()),
             ("N", texts::tui_key_exit_without_save()),
             ("Esc", texts::tui_key_cancel()),
         ],
-        ConfirmAction::ProviderApiFormatProxyNotice => &[
-            ("Enter", texts::tui_key_close()),
-            ("Esc", texts::tui_key_close()),
-        ],
+        ConfirmAction::ProviderApiFormatProxyNotice => &[("Enter", texts::tui_key_close())],
         ConfirmAction::VisibleAppsAutoDetection => &[
             ("Enter", texts::tui_key_use_auto()),
-            ("N", texts::tui_key_keep_current()),
             ("Esc", texts::tui_key_keep_current()),
         ],
         ConfirmAction::VisibleAppsSwitchToManual { .. } => &[
@@ -68,6 +70,10 @@ pub(super) fn render_confirm_overlay(
         ConfirmAction::ManagedAuthCancelLogin => &[
             ("Enter", texts::tui_key_cancel_login()),
             ("Esc", texts::tui_key_keep_waiting()),
+        ],
+        ConfirmAction::RebuildCodexUsage => &[
+            ("Enter", texts::tui_key_backup_and_rebuild()),
+            ("Esc", texts::tui_key_cancel()),
         ],
         _ => &[
             ("Enter", texts::tui_key_yes()),
@@ -88,6 +94,78 @@ pub(super) fn render_confirm_overlay(
     frame.render_widget(
         Paragraph::new(centered_message_lines(
             &confirm.message,
+            body_area.width,
+            body_area.height,
+        ))
+        .alignment(alignment),
+        body_area,
+    );
+}
+
+pub(super) fn render_codex_history_confirm_overlay(
+    frame: &mut Frame<'_>,
+    content_area: Rect,
+    theme: &theme::Theme,
+    confirm: &crate::cli::tui::app::CodexHistoryConfirmState,
+) {
+    if let Some(actions) = confirm.enable_action_rows() {
+        render_action_dialog(
+            frame,
+            content_area,
+            theme,
+            ActionDialogSpec {
+                title: confirm.title(),
+                message: confirm.message(),
+                actions: &actions,
+                min_size: (OVERLAY_FIXED_LG.0, OVERLAY_FIXED_MD.1),
+                border: overlay_border_style(theme, true),
+            },
+        );
+        return;
+    }
+
+    let checkbox = confirm.restore_checkbox_label().map(|label| {
+        format!(
+            "[{}] {label}",
+            if confirm.restore_checked { "x" } else { " " }
+        )
+    });
+    let display = if let Some(checkbox) = checkbox.as_ref() {
+        format!("{}\n\n{checkbox}", confirm.message())
+    } else {
+        confirm.message().to_string()
+    };
+    let keys: &[(&str, &str)] = if checkbox.is_some() {
+        &[
+            ("Space", texts::tui_key_toggle()),
+            (
+                "Enter",
+                texts::codex_unified_history_disable_confirm_label(),
+            ),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    } else {
+        &[
+            (
+                "Enter",
+                texts::codex_unified_history_disable_confirm_label(),
+            ),
+            ("Esc", texts::tui_key_cancel()),
+        ]
+    };
+
+    let body_area = overlay_frame_at(
+        frame,
+        confirm_overlay_rect(content_area, &display),
+        theme,
+        confirm.title(),
+        keys,
+        overlay_border_style(theme, true),
+    );
+    let alignment = message_block_alignment(&display, body_area.width);
+    frame.render_widget(
+        Paragraph::new(centered_message_lines(
+            &display,
             body_area.width,
             body_area.height,
         ))
@@ -124,9 +202,14 @@ pub(super) fn render_text_input_overlay(
         ])
         .split(body);
 
+    let prompt_lines = input
+        .prompt
+        .lines()
+        .map(|line| Line::raw(line.to_string()))
+        .chain(std::iter::once(Line::raw("")))
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(vec![Line::raw(input.prompt.clone()), Line::raw("")])
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(prompt_lines).wrap(Wrap { trim: false }),
         chunks[0],
     );
 
@@ -138,14 +221,7 @@ pub(super) fn render_text_input_overlay(
     let input_inner = input_block.inner(chunks[1]);
     frame.render_widget(input_block, chunks[1]);
 
-    let available = input_inner.width as usize;
-    let full = if input.secret {
-        "•".repeat(input.input.value.chars().count())
-    } else {
-        input.input.value.clone()
-    };
-    let cursor = input.input.cursor.min(full.chars().count());
-    let (visible, cursor_x) = visible_text_window(&full, cursor, available);
+    let (visible, cursor_x) = inline_input_window(&input.input, input_inner.width);
     frame.render_widget(
         Paragraph::new(Line::from(Span::raw(visible)))
             .wrap(Wrap { trim: false })
@@ -236,7 +312,6 @@ pub(super) fn render_common_snippet_picker_overlay(
         &[
             ("↑↓", texts::tui_key_select()),
             ("Enter", texts::tui_key_edit()),
-            ("e", texts::tui_key_edit()),
             ("Esc", texts::tui_key_close()),
         ],
         OverlaySize::FitRows {

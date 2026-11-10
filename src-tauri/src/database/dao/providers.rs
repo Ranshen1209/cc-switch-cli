@@ -2,15 +2,104 @@
 //!
 //! 提供供应商（Provider）的 CRUD 操作。
 
+use crate::app_config::AppType;
 use crate::database::dao::providers_seed::{is_official_seed_id, OFFICIAL_SEEDS};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 impl Database {
+    pub(crate) fn unbind_codex_managed_accounts(
+        &self,
+        account_ids: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        if account_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, meta, settings_config, category,
+                        trim(json_extract(meta, '$.authBinding.accountId')) FROM providers
+                 WHERE app_type = 'codex'
+                   AND json_extract(meta, '$.authBinding.source') = 'managed_account'
+                   AND json_extract(meta, '$.authBinding.authProvider') = 'codex_oauth'
+                 ORDER BY id",
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Database(e.to_string()))?
+        };
+        let mut affected = Vec::new();
+        for (id, meta_text, settings_text, category, bound) in rows {
+            if !bound.is_some_and(|bound| account_ids.iter().any(|id| id.trim() == bound)) {
+                continue;
+            }
+            let parse_error = |error: serde_json::Error| {
+                AppError::Database(format!("供应商 {id} 配置无效: {error}"))
+            };
+            let mut meta: serde_json::Value =
+                serde_json::from_str(&meta_text).map_err(parse_error)?;
+            let mut settings: serde_json::Value =
+                serde_json::from_str(&settings_text).map_err(parse_error)?;
+            let mut provider = Provider::with_id(id.clone(), String::new(), settings.clone(), None);
+            provider.category = category;
+            provider.meta = Some(serde_json::from_value(meta.clone()).map_err(parse_error)?);
+            if provider.category.is_none() && provider.is_codex_official() {
+                provider.category = Some("official".to_string());
+            }
+            meta.as_object_mut()
+                .ok_or_else(|| AppError::Config(format!("供应商 {id} 的 meta 必须是对象")))?
+                .remove("authBinding");
+            // The CLI uses providerType to opt into managed quota queries. An
+            // unbound official row must not start querying the default account.
+            if meta.get("providerType").and_then(serde_json::Value::as_str) == Some("codex_oauth") {
+                meta.as_object_mut()
+                    .expect("validated metadata")
+                    .remove("providerType");
+            }
+            settings
+                .as_object_mut()
+                .ok_or_else(|| {
+                    AppError::Config(format!("供应商 {id} 的 settings_config 必须是对象"))
+                })?
+                .insert("auth".to_string(), serde_json::json!({}));
+            tx.execute(
+                "UPDATE providers SET meta = ?1, settings_config = ?2, category = ?3
+                 WHERE app_type = 'codex' AND id = ?4",
+                params![
+                    meta.to_string(),
+                    settings.to_string(),
+                    provider.category,
+                    id
+                ],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+            affected.push(id);
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(affected)
+    }
+
     /// 获取指定应用类型的所有供应商
     pub fn get_all_providers(
         &self,
@@ -19,8 +108,8 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare(
             "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
- FROM providers WHERE app_type = ?1
- ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
+             FROM providers WHERE app_type = ?1
+             ORDER BY COALESCE(sort_index, 999999), created_at ASC, id ASC"
         ).map_err(|e| AppError::Database(e.to_string()))?;
 
         let provider_iter = stmt
@@ -133,7 +222,7 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let result = conn.query_row(
             "SELECT name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, in_failover_queue
- FROM providers WHERE id = ?1 AND app_type = ?2",
+             FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
             |row| {
                 let name: String = row.get(0)?;
@@ -223,14 +312,14 @@ impl Database {
 
     /// 启动时补齐上游官方预设供应商（Claude / Codex / Gemini）。
     pub fn init_default_official_providers(&self) -> Result<usize, AppError> {
+        let mut inserted = 0usize;
         if self
             .get_bool_flag("official_providers_seeded")
             .unwrap_or(false)
         {
-            return Ok(0);
+            return self.ensure_claude_desktop_official_provider();
         }
 
-        let mut inserted = 0usize;
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         for seed in OFFICIAL_SEEDS {
@@ -258,11 +347,51 @@ impl Database {
 
             self.save_provider(app_type, &provider)?;
             inserted += 1;
-            log::info!("OK Seeded official provider: {} ({})", seed.name, app_type);
+            log::info!("✓ Seeded official provider: {} ({})", seed.name, app_type);
         }
 
         self.set_setting("official_providers_seeded", "true")?;
+        inserted += self.ensure_claude_desktop_official_provider()?;
         Ok(inserted)
+    }
+
+    /// Existing databases already have `official_providers_seeded` set, so the
+    /// one-time seed loop will not pick up Claude Desktop after an upgrade.
+    fn ensure_claude_desktop_official_provider(&self) -> Result<usize, AppError> {
+        use crate::database::dao::providers_seed::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID;
+
+        let app_type = AppType::ClaudeDesktop.as_str();
+        if self
+            .get_provider_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, app_type)?
+            .is_some()
+        {
+            return Ok(0);
+        }
+
+        let Some(seed) = OFFICIAL_SEEDS
+            .iter()
+            .find(|seed| seed.id == CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID)
+        else {
+            return Ok(0);
+        };
+
+        let settings_config: serde_json::Value = serde_json::from_str(seed.settings_config_json)
+            .map_err(|err| {
+                AppError::Database(format!("Seed JSON parse failed for {}: {err}", seed.id))
+            })?;
+        let mut provider = Provider::with_id(
+            seed.id.to_string(),
+            seed.name.to_string(),
+            settings_config,
+            Some(seed.website_url.to_string()),
+        );
+        provider.category = Some("official".to_string());
+        provider.icon = Some(seed.icon.to_string());
+        provider.icon_color = Some(seed.icon_color.to_string());
+        provider.sort_index = Some(self.next_sort_index_for_app(app_type)?);
+        provider.created_at = Some(chrono::Utc::now().timestamp_millis());
+        self.save_provider(app_type, &provider)?;
+        Ok(1)
     }
 
     /// 保存供应商（新增或更新）
@@ -296,19 +425,19 @@ impl Database {
             // 更新模式：使用 UPDATE 避免触发 ON DELETE CASCADE
             tx.execute(
                 "UPDATE providers SET
- name = ?1,
- settings_config = ?2,
- website_url = ?3,
- category = ?4,
- created_at = ?5,
- sort_index = ?6,
- notes = ?7,
- icon = ?8,
- icon_color = ?9,
- meta = ?10,
- is_current = ?11,
- in_failover_queue = ?12
- WHERE id = ?13 AND app_type = ?14",
+                    name = ?1,
+                    settings_config = ?2,
+                    website_url = ?3,
+                    category = ?4,
+                    created_at = ?5,
+                    sort_index = ?6,
+                    notes = ?7,
+                    icon = ?8,
+                    icon_color = ?9,
+                    meta = ?10,
+                    is_current = ?11,
+                    in_failover_queue = ?12
+                WHERE id = ?13 AND app_type = ?14",
                 params![
                     provider.name,
                     serde_json::to_string(&provider.settings_config).map_err(|e| {
@@ -335,16 +464,15 @@ impl Database {
             // 新增模式：使用 INSERT
             tx.execute(
                 "INSERT INTO providers (
- id, app_type, name, settings_config, website_url, category,
- created_at, sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue
- ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    id, app_type, name, settings_config, website_url, category,
+                    created_at, sort_index, notes, icon, icon_color, meta, is_current, in_failover_queue
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     provider.id,
                     app_type,
                     provider.name,
-                    serde_json::to_string(&provider.settings_config).map_err(|e| {
-                        AppError::Database(format!("Failed to serialize settings_config: {e}"))
-                    })?,
+                    serde_json::to_string(&provider.settings_config)
+                        .map_err(|e| AppError::Database(format!("Failed to serialize settings_config: {e}")))?,
                     provider.website_url,
                     provider.category,
                     provider.created_at,
@@ -352,9 +480,8 @@ impl Database {
                     provider.notes,
                     provider.icon,
                     provider.icon_color,
-                    serde_json::to_string(&meta_clone).map_err(|e| AppError::Database(format!(
-                        "Failed to serialize meta: {e}"
-                    )))?,
+                    serde_json::to_string(&meta_clone)
+                        .map_err(|e| AppError::Database(format!("Failed to serialize meta: {e}")))?,
                     is_current,
                     in_failover_queue,
                 ],
@@ -365,7 +492,7 @@ impl Database {
             for (url, endpoint) in endpoints {
                 tx.execute(
                     "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
- VALUES (?1, ?2, ?3, ?4)",
+                     VALUES (?1, ?2, ?3, ?4)",
                     params![provider.id, app_type, url, endpoint.added_at],
                 )
                 .map_err(|e| AppError::Database(e.to_string()))?;
@@ -387,10 +514,10 @@ impl Database {
         ) = conn
             .query_row(
                 "SELECT
- COALESCE((SELECT enabled FROM proxy_config WHERE app_type = ?1), 0),
- COALESCE((SELECT auto_failover_enabled FROM proxy_config WHERE app_type = ?1), 0),
- (SELECT COUNT(*) FROM providers WHERE app_type = ?1 AND in_failover_queue = 1),
- COALESCE((SELECT in_failover_queue FROM providers WHERE app_type = ?1 AND id = ?2), 0)",
+                     COALESCE((SELECT enabled FROM proxy_config WHERE app_type = ?1), 0),
+                     COALESCE((SELECT auto_failover_enabled FROM proxy_config WHERE app_type = ?1), 0),
+                     (SELECT COUNT(*) FROM providers WHERE app_type = ?1 AND in_failover_queue = 1),
+                     COALESCE((SELECT in_failover_queue FROM providers WHERE app_type = ?1 AND id = ?2), 0)",
                 params![app_type, id],
                 |row| {
                     Ok((
@@ -462,6 +589,47 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// Shared Codex launches must not overwrite configuration edits or another
+    /// provider's login refresh when they capture credentials on exit.
+    pub(crate) fn update_codex_provider_auth(
+        &self,
+        provider_id: &str,
+        auth: &serde_json::Value,
+        expected_auth_source: &str,
+    ) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| AppError::Database(err.to_string()))?;
+        let settings: String = tx
+            .query_row(
+                "SELECT settings_config FROM providers WHERE id = ?1 AND app_type = 'codex'",
+                [provider_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| AppError::Database(err.to_string()))?;
+        let settings: serde_json::Value =
+            serde_json::from_str(&settings).map_err(|err| AppError::Database(err.to_string()))?;
+        let current_auth = settings
+            .get("auth")
+            .filter(|auth| auth.is_object())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if format!("{:x}", Sha256::digest(current_auth.to_string().as_bytes()))
+            != expected_auth_source
+        {
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE providers SET settings_config = json_set(settings_config, '$.auth', json(?1))
+                 WHERE id = ?2 AND app_type = 'codex'",
+            params![auth.to_string(), provider_id],
+        )
+        .map_err(|err| AppError::Database(err.to_string()))?;
+        tx.commit()
+            .map_err(|err| AppError::Database(err.to_string()))
     }
 
     /// 添加自定义端点

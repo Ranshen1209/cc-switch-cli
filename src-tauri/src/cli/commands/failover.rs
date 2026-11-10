@@ -409,7 +409,11 @@ fn takeover_enabled_for(takeovers: &ProxyTakeoverStatus, app_type: &AppType) -> 
         AppType::Claude => takeovers.claude,
         AppType::Codex => takeovers.codex,
         AppType::Gemini => takeovers.gemini,
-        AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => false,
+        AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => false,
     }
 }
 

@@ -3,11 +3,13 @@ use clap_complete::Shell;
 use std::io::Write;
 
 mod claude_temp_launch;
+#[cfg(unix)]
+mod codex_shared_launch;
 mod codex_temp_launch;
 pub mod commands;
 pub mod editor;
 pub(crate) mod failover_policy;
-pub mod i18n;
+pub use crate::i18n;
 pub mod interactive;
 pub(crate) mod openclaw_form_normalization;
 pub(crate) mod provider_quota;
@@ -402,6 +404,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_settings_codex_auth_preservation_subcommands() {
+        let show = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-auth-preservation",
+            "show",
+            "--json",
+        ]);
+        assert!(matches!(
+            show.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Show { json: true },
+                ),
+            ))
+        ));
+
+        let enable =
+            Cli::parse_from(["cc-switch", "settings", "codex-auth-preservation", "enable"]);
+        assert!(matches!(
+            enable.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Enable,
+                ),
+            ))
+        ));
+
+        let disable = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "codex-auth-preservation",
+            "disable",
+        ]);
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::CodexAuthPreservation(
+                    super::commands::settings::CodexAuthPreservationCommand::Disable,
+                ),
+            ))
+        ));
+    }
+
+    #[test]
     fn parses_settings_codex_history_disable_restore_subcommand() {
         let cli = Cli::parse_from([
             "cc-switch",
@@ -655,11 +702,19 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "auth", "login", "--json"]);
 
         match cli.command {
-            Some(Commands::Auth(super::commands::auth::AuthCommand::Login { json })) => {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::Login { json, .. })) => {
                 assert!(json);
             }
             _ => panic!("expected auth login command"),
         }
+    }
+
+    #[test]
+    fn parses_auth_targeted_reauthentication() {
+        let cli = Cli::parse_from(["cc-switch", "auth", "login", "--account-id", "local-user"]);
+        assert!(
+            matches!(cli.command, Some(Commands::Auth(super::commands::auth::AuthCommand::Login { account_id: Some(id), .. })) if id == "local-user")
+        );
     }
 
     #[test]
@@ -706,6 +761,34 @@ mod tests {
                 assert!(yes);
             }
             _ => panic!("expected auth logout command"),
+        }
+    }
+
+    #[test]
+    fn parses_auth_reset_quota_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "auth",
+            "reset-quota",
+            "--confirm",
+            "--credit-id",
+            "RateLimitResetCredit_456",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Auth(super::commands::auth::AuthCommand::ResetQuota {
+                account_id,
+                credit_id,
+                confirm,
+                json,
+            })) => {
+                assert!(confirm);
+                assert!(json);
+                assert_eq!(credit_id.as_deref(), Some("RateLimitResetCredit_456"));
+                assert_eq!(account_id, None);
+            }
+            _ => panic!("expected auth reset-quota command"),
         }
     }
 
@@ -803,10 +886,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(!dry_run);
+                assert!(!shared_sessions);
                 assert!(native_args.is_empty());
             }
             _ => panic!("expected start codex command"),
@@ -831,10 +916,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(dry_run);
+                assert!(!shared_sessions);
                 assert_eq!(
                     native_args,
                     vec![OsString::from("--model"), OsString::from("gpt-5.4")]
@@ -863,10 +950,12 @@ mod tests {
             Some(Commands::Start(super::commands::start::StartCommand::Codex {
                 selector,
                 dry_run,
+                shared_sessions,
                 native_args,
             })) => {
                 assert_eq!(selector, "demo");
                 assert!(!dry_run);
+                assert!(!shared_sessions);
                 assert_eq!(
                     native_args,
                     vec![
@@ -956,13 +1045,47 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "provider", "add", "--template", "codex-oauth"]);
 
         match cli.command {
-            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add(command))) => {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
+                template,
+                ..
+            })) => {
                 assert_eq!(
-                    command.template,
+                    template,
                     Some(super::commands::provider_input::ProviderAddTemplate::CodexOauth)
                 );
             }
             _ => panic!("expected provider add command with template"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_add_claude_role_model_options() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "add",
+            "--name",
+            "roles",
+            "--base-url",
+            "https://api.example.com",
+            "--api-key",
+            "sk-test",
+            "--fable-model",
+            "fable[1M]",
+            "--subagent-model",
+            "subagent[1M]",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Add {
+                fable_model,
+                subagent_model,
+                ..
+            })) => {
+                assert_eq!(fable_model.as_deref(), Some("fable[1M]"));
+                assert_eq!(subagent_model.as_deref(), Some("subagent[1M]"));
+            }
+            _ => panic!("expected provider add command with Claude role models"),
         }
     }
 
@@ -1089,6 +1212,7 @@ mod tests {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
                 id,
                 json,
+                ..
             })) => {
                 assert_eq!(id, "demo");
                 assert!(!json);
@@ -1105,11 +1229,43 @@ mod tests {
             Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
                 id,
                 json,
+                ..
             })) => {
                 assert_eq!(id, "demo");
                 assert!(json);
             }
             _ => panic!("expected provider quota json command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_quota_reset_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "quota",
+            "demo",
+            "--reset",
+            "--confirm",
+            "--credit-id",
+            "RateLimitResetCredit_123",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::Quota {
+                id,
+                json,
+                reset,
+                credit_id,
+                confirm,
+            })) => {
+                assert_eq!(id, "demo");
+                assert!(!json);
+                assert!(reset);
+                assert!(confirm);
+                assert_eq!(credit_id.as_deref(), Some("RateLimitResetCredit_123"));
+            }
+            _ => panic!("expected provider quota reset command"),
         }
     }
 
@@ -1178,6 +1334,34 @@ mod tests {
                 assert_eq!(command.user_id.as_deref(), Some("user-demo"));
             }
             _ => panic!("expected provider usage-query set command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_usage_query_official_subscription_template() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "usage-query",
+            "set",
+            "official",
+            "--enabled",
+            "--template",
+            "official-subscription",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::UsageQuery(
+                super::commands::provider_usage_query::ProviderUsageQueryCommand::Set(command),
+            ))) => {
+                assert_eq!(
+                    command.template,
+                    Some(
+                        super::commands::provider_usage_query::UsageQueryTemplate::OfficialSubscription
+                    )
+                );
+            }
+            _ => panic!("expected official subscription usage-query command"),
         }
     }
 
@@ -1356,6 +1540,76 @@ mod tests {
                 super::commands::config_webdav::WebDavCommand::CheckConnection,
             ))) => {}
             _ => panic!("expected config webdav check-connection command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_s3_show_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "config", "s3", "show"]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
+                super::commands::config_s3::S3Command::Show,
+            ))) => {}
+            _ => panic!("expected config s3 show command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_s3_set_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "config",
+            "s3",
+            "set",
+            "--region",
+            "auto",
+            "--bucket",
+            "demo",
+            "--access-key-id",
+            "AKID",
+            "--secret-access-key",
+            "SECRET",
+            "--endpoint",
+            "https://example.r2.cloudflarestorage.com",
+            "--enable",
+        ]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
+                super::commands::config_s3::S3Command::Set {
+                    region,
+                    bucket,
+                    access_key_id,
+                    secret_access_key,
+                    endpoint,
+                    enable,
+                    ..
+                },
+            ))) => {
+                assert_eq!(region.as_deref(), Some("auto"));
+                assert_eq!(bucket.as_deref(), Some("demo"));
+                assert_eq!(access_key_id.as_deref(), Some("AKID"));
+                assert_eq!(secret_access_key.as_deref(), Some("SECRET"));
+                assert_eq!(
+                    endpoint.as_deref(),
+                    Some("https://example.r2.cloudflarestorage.com")
+                );
+                assert!(enable);
+            }
+            _ => panic!("expected config s3 set command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_s3_check_connection_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "config", "s3", "check-connection"]);
+
+        match cli.command {
+            Some(Commands::Config(super::commands::config::ConfigCommand::S3(
+                super::commands::config_s3::S3Command::CheckConnection,
+            ))) => {}
+            _ => panic!("expected config s3 check-connection command"),
         }
     }
 
@@ -1679,6 +1933,76 @@ mod tests {
     }
 
     #[test]
+    fn parses_skills_storage_location_query_and_values() {
+        let query = Cli::parse_from(["cc-switch", "skills", "storage-location"]);
+        assert!(matches!(
+            query.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::StorageLocation { location: None }
+            ))
+        ));
+
+        let unified = Cli::parse_from(["cc-switch", "skills", "storage-location", "unified"]);
+        assert!(matches!(
+            unified.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::StorageLocation {
+                    location: Some(crate::services::skill::SkillStorageLocation::Unified)
+                }
+            ))
+        ));
+
+        let cc_switch = Cli::parse_from(["cc-switch", "skills", "storage-location", "cc_switch"]);
+        assert!(matches!(
+            cc_switch.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::StorageLocation {
+                    location: Some(crate::services::skill::SkillStorageLocation::CcSwitch)
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn parses_manual_skill_update_commands() {
+        let check = Cli::parse_from(["cc-switch", "skills", "check-updates"]);
+        assert!(matches!(
+            check.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::CheckUpdates
+            ))
+        ));
+
+        let one = Cli::parse_from(["cc-switch", "skills", "update", "hello"]);
+        assert!(matches!(
+            one.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::Update {
+                    spec: Some(spec),
+                    all: false,
+                }
+            )) if spec == "hello"
+        ));
+
+        let all = Cli::parse_from(["cc-switch", "skills", "update", "--all"]);
+        assert!(matches!(
+            all.command,
+            Some(Commands::Skills(
+                super::commands::skills::SkillsCommand::Update {
+                    spec: None,
+                    all: true,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn manual_skill_update_requires_exactly_one_target() {
+        assert!(Cli::try_parse_from(["cc-switch", "skills", "update"]).is_err());
+        assert!(Cli::try_parse_from(["cc-switch", "skills", "update", "hello", "--all"]).is_err());
+    }
+
+    #[test]
     fn parses_skills_set_apps_repeated_flags() {
         let cli = Cli::parse_from([
             "cc-switch",
@@ -1859,5 +2183,51 @@ mod tests {
 
         assert!(rendered.contains("--activate"));
         assert!(rendered.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn parses_outbound_proxy_set_with_credentials() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "settings",
+            "outbound-proxy",
+            "set",
+            "socks5://127.0.0.1:1080",
+            "--username",
+            "alice",
+            "--password",
+            "secret",
+        ]);
+
+        match cli.command {
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::OutboundProxy(
+                    super::commands::settings::OutboundProxyCommand::Set {
+                        url,
+                        username,
+                        password,
+                    },
+                ),
+            )) => {
+                assert_eq!(url, "socks5://127.0.0.1:1080");
+                assert_eq!(username.as_deref(), Some("alice"));
+                assert_eq!(password.as_deref(), Some("secret"));
+            }
+            _ => panic!("expected outbound proxy set command"),
+        }
+    }
+
+    #[test]
+    fn parses_outbound_proxy_show_json() {
+        let cli = Cli::parse_from(["cc-switch", "settings", "outbound-proxy", "show", "--json"]);
+
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Settings(
+                super::commands::settings::SettingsCommand::OutboundProxy(
+                    super::commands::settings::OutboundProxyCommand::Show { json: true },
+                ),
+            ))
+        ));
     }
 }

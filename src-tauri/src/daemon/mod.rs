@@ -7,6 +7,7 @@
 
 pub mod ipc;
 pub mod logging;
+pub(crate) mod migration;
 pub mod paths;
 pub mod pidfile;
 pub mod restart;
@@ -38,11 +39,7 @@ pub fn notify_global_switch(enabled: bool) -> Result<(), String> {
     if !socket.exists() {
         return Ok(());
     }
-    let expected_database = Database::current_runtime_key().map_err(|err| err.to_string())?;
-    let response = client::connect_verified(&socket, &expected_database).and_then(|mut stream| {
-        client::exchange(&mut stream, &Request::SetGlobalEnabled { enabled })
-    });
-    match response {
+    match client::round_trip(&socket, &Request::SetGlobalEnabled { enabled }) {
         Ok(Response::Ok) => Ok(()),
         Ok(Response::Error { message }) => Err(message),
         Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
@@ -59,31 +56,59 @@ pub fn notify_global_switch(enabled: bool) -> Result<(), String> {
     }
 }
 
-/// Run the daemon to completion. Acquires the pidfile, installs the file
-/// logger, runs startup recovery, binds the IPC socket, and dispatches
-/// requests until shutdown is signalled.
-pub async fn run(binary_path: PathBuf) -> Result<(), String> {
-    let pidfile_path = paths::pidfile_path();
-    let socket_path = paths::socket_path();
-    let log_path = paths::log_path();
+/// Ask a live daemon and all active workers to reload the persisted outbound
+/// proxy. A missing daemon is not an error because there is no long-lived
+/// process to update.
+pub fn notify_outbound_proxy_reload() -> Result<(), String> {
+    use std::io::ErrorKind;
+    let socket = paths::socket_path();
+    if !socket.exists() {
+        return Ok(());
+    }
+    match client::round_trip(&socket, &Request::ReloadOutboundProxy) {
+        Ok(Response::Ok) => Ok(()),
+        Ok(Response::Error { message }) => Err(message),
+        Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
+        Err(client::ClientError::Io(error))
+            if matches!(
+                error.kind(),
+                ErrorKind::ConnectionRefused | ErrorKind::NotFound
+            ) =>
+        {
+            let _ = std::fs::remove_file(&socket);
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
 
-    let _pidfile = match PidFile::acquire(&pidfile_path) {
-        Ok(p) => p,
+/// Acquire the daemon lifetime lease before the Tokio runtime is created.
+/// Keeping this value outside the runtime ensures its flock is released only
+/// after every blocking database task has finished during runtime shutdown.
+pub fn acquire_lifetime_pidfile() -> Result<Option<PidFile>, String> {
+    let pidfile_path = paths::pidfile_path();
+    match PidFile::acquire(&pidfile_path) {
+        Ok(pidfile) => Ok(Some(pidfile)),
         Err(AcquireError::AlreadyHeld { pid }) => {
-            // Another daemon is already running — exit cleanly.
             log::info!(
                 "another cc-switch daemon is already running (pid {})",
                 pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into())
             );
-            return Ok(());
+            Ok(None)
         }
-        Err(AcquireError::Io(err)) => {
-            return Err(format!(
-                "acquire pidfile {} failed: {err}",
-                pidfile_path.display()
-            ));
-        }
-    };
+        Err(AcquireError::Io(err)) => Err(format!(
+            "acquire pidfile {} failed: {err}",
+            pidfile_path.display()
+        )),
+    }
+}
+
+/// Run the daemon to completion while the caller holds its lifetime pidfile.
+/// Installs the file logger, runs startup recovery, binds the IPC socket, and
+/// dispatches requests until shutdown is signalled.
+pub async fn run(binary_path: PathBuf, pidfile: &PidFile) -> Result<(), String> {
+    let socket_path = paths::socket_path();
+    let log_path = paths::log_path();
 
     logging::install(&log_path, LevelFilter::Info)?;
     log::info!(
@@ -94,15 +119,11 @@ pub async fn run(binary_path: PathBuf) -> Result<(), String> {
     );
 
     let db = Arc::new(
-        Database::init_for_runtime()
+        Database::init_for_daemon(pidfile)
             .map_err(|err| format!("daemon: open database failed: {err}"))?,
     );
-    log::info!("[daemon] database={}", db.runtime_key());
-    crate::services::session_usage::spawn_periodic_session_usage_sync_after(
-        db.clone(),
-        "daemon",
-        std::time::Duration::from_secs(30),
-    );
+    crate::services::global_proxy::initialize_http_client(&db);
+    crate::services::session_usage::spawn_periodic_session_usage_sync(db.clone(), "daemon");
     Database::spawn_periodic_usage_maintenance(db.clone(), "daemon");
     let supervisor = Supervisor::new(db, socket_path.clone(), binary_path);
 

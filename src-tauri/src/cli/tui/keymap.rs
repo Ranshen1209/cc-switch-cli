@@ -55,7 +55,18 @@ pub(crate) fn key_bar_items<I: Copy>(
 /// (hidden aliases, e.g. a reverse-direction key already covered by another
 /// chip). The help-sheet generator skips these by function identity — so use
 /// this named function rather than an inline `|_, _| false` closure.
+#[inline(never)]
 pub(crate) fn never(_: &super::app::App, _: &super::data::UiData) -> bool {
+    // `help_items` distinguishes this sentinel from `help_only` by function
+    // address. Keep the bodies observably distinct so optimized builds cannot
+    // fold the two functions together.
+    std::hint::black_box(false)
+}
+
+/// Hide a secondary binding from the compact key bar while retaining it in
+/// the full help sheet. This differs from `never`, which hides the binding
+/// from both surfaces.
+pub(crate) fn help_only(_: &super::app::App, _: &super::data::UiData) -> bool {
     false
 }
 
@@ -110,14 +121,14 @@ pub(crate) mod providers {
             keys: &[KeyCode::Enter],
             intent: Intent::Primary,
             label: primary_label,
-            shown: import_shown,
+            shown: primary_shown,
         },
         Binding {
             display: "Space",
             keys: &[KeyCode::Char(' '), KeyCode::Char('s')],
             intent: Intent::Switch,
             label: switch_label,
-            shown: any_visible,
+            shown: switch_shown,
         },
         Binding {
             display: "a",
@@ -138,7 +149,7 @@ pub(crate) mod providers {
             keys: &[KeyCode::Char('e')],
             intent: Intent::Edit,
             label: |_, _| texts::tui_key_edit(),
-            shown: selected_editable,
+            shown: super::help_only,
         },
         Binding {
             display: "d",
@@ -202,12 +213,21 @@ pub(crate) mod providers {
         selected_row(app, data).is_some()
     }
 
+    fn switch_shown(app: &App, data: &UiData) -> bool {
+        any_visible(app, data)
+            && (!supports_failover_controls(&app.app_type) || !data.proxy.auto_failover_enabled)
+    }
+
     fn selected_editable(app: &App, data: &UiData) -> bool {
         selected_row(app, data).is_some_and(|row| !data::provider_is_read_only(&app.app_type, row))
     }
 
     fn import_shown(_app: &App, data: &UiData) -> bool {
         data.providers.rows.is_empty() && !data.providers.loading
+    }
+
+    fn primary_shown(app: &App, data: &UiData) -> bool {
+        import_shown(app, data) || selected_editable(app, data)
     }
 
     fn primary_label(_app: &App, data: &UiData) -> &'static str {
@@ -440,6 +460,9 @@ pub(crate) mod skills_installed {
         Apps,
         Discover,
         Import,
+        CheckUpdates,
+        Update,
+        UpdateAll,
         Uninstall,
     }
 
@@ -480,6 +503,27 @@ pub(crate) mod skills_installed {
             shown: |_, _| true,
         },
         Binding {
+            display: "r",
+            keys: &[KeyCode::Char('r')],
+            intent: Intent::CheckUpdates,
+            label: |_, _| texts::tui_key_check_updates(),
+            shown: has_repository_skill,
+        },
+        Binding {
+            display: "u",
+            keys: &[KeyCode::Char('u')],
+            intent: Intent::Update,
+            label: |_, _| texts::tui_key_update(),
+            shown: selected_has_update,
+        },
+        Binding {
+            display: "U",
+            keys: &[KeyCode::Char('U')],
+            intent: Intent::UpdateAll,
+            label: |_, _| texts::tui_key_update_all(),
+            shown: |app, _| !app.skill_updates.is_empty(),
+        },
+        Binding {
             display: "d",
             keys: &[KeyCode::Char('d')],
             intent: Intent::Uninstall,
@@ -506,12 +550,26 @@ pub(crate) mod skills_installed {
             .copied()
             .is_some()
     }
+
+    fn has_repository_skill(_: &App, data: &UiData) -> bool {
+        data.skills
+            .installed
+            .iter()
+            .any(|skill| skill.repo_owner.is_some() && skill.repo_name.is_some())
+    }
+
+    fn selected_has_update(app: &App, data: &UiData) -> bool {
+        visible_skills_installed(&app.filter, data)
+            .get(app.skills_idx)
+            .is_some_and(|skill| app.skill_updates.contains_key(&skill.id))
+    }
 }
 
 pub(crate) mod usage {
     use crossterm::event::KeyCode;
 
     use super::Binding;
+    use crate::app_config::AppType;
     use crate::cli::i18n::texts;
     use crate::cli::tui::app::App;
     use crate::cli::tui::data::UiData;
@@ -527,6 +585,7 @@ pub(crate) mod usage {
         OpenLogs,
         OpenPricing,
         Reload,
+        RebuildCodex,
     }
 
     pub(crate) const BINDINGS: &[Binding<Intent>] = &[
@@ -596,6 +655,13 @@ pub(crate) mod usage {
             label: |_, _| texts::tui_key_refresh(),
             shown: |_, _| true,
         },
+        Binding {
+            display: "R",
+            keys: &[KeyCode::Char('R')],
+            intent: Intent::RebuildCodex,
+            label: |_, _| texts::tui_key_rebuild_codex_usage(),
+            shown: super::help_only,
+        },
     ];
 
     pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
@@ -608,6 +674,9 @@ pub(crate) mod usage {
 
     pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
         super::help_items(BINDINGS, app, data)
+            .into_iter()
+            .filter(|(display, _)| *display != "R" || matches!(app.app_type, AppType::Codex))
+            .collect()
     }
 }
 
@@ -630,7 +699,7 @@ pub(crate) mod sessions {
         Restore,
         Delete,
         Refresh,
-        ShowAll,
+        Project,
     }
 
     pub(crate) const BINDINGS: &[Binding<Intent>] = &[
@@ -663,10 +732,10 @@ pub(crate) mod sessions {
             shown: |_, _| true,
         },
         Binding {
-            display: "a",
-            keys: &[KeyCode::Char('a')],
-            intent: Intent::ShowAll,
-            label: show_all_label,
+            display: "p",
+            keys: &[KeyCode::Char('p')],
+            intent: Intent::Project,
+            label: |_, _| texts::tui_key_sessions_project(),
             shown: |_, _| true,
         },
     ];
@@ -682,19 +751,12 @@ pub(crate) mod sessions {
     pub(crate) fn help_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
         super::help_items(BINDINGS, app, data)
     }
-
-    fn show_all_label(app: &App, _: &UiData) -> &'static str {
-        if app.sessions.show_all_providers {
-            texts::tui_key_sessions_all_active()
-        } else {
-            texts::tui_key_sessions_all()
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::providers::{self, Intent};
+    use super::sessions;
     use crossterm::event::KeyCode;
 
     #[test]
@@ -756,5 +818,14 @@ mod tests {
             );
             seen.push(binding.intent);
         }
+    }
+
+    #[test]
+    fn sessions_a_is_not_a_registered_action() {
+        assert_eq!(sessions::intent_for(KeyCode::Char('a')), None);
+        assert_eq!(
+            sessions::intent_for(KeyCode::Char('p')),
+            Some(sessions::Intent::Project)
+        );
     }
 }

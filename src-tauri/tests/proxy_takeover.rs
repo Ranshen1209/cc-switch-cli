@@ -353,8 +353,8 @@ async fn app_state_try_new_recovers_stale_takeover_from_backup() {
     let restored: Value =
         read_json_file(&get_claude_settings_path()).expect("read recovered claude live config");
     assert_eq!(
-        restored, original_live,
-        "startup recovery should restore the saved Claude live backup"
+        restored["env"], original_live["env"],
+        "startup recovery restores saved provider fields"
     );
     assert!(
         recovered
@@ -512,8 +512,8 @@ async fn startup_recovery_guard_ignores_stale_external_session_marker() {
     let restored: Value =
         read_json_file(&get_claude_settings_path()).expect("read recovered claude live config");
     assert_eq!(
-        restored, original_live,
-        "startup recovery should ignore stale external session markers and restore the saved Claude live backup"
+        restored["env"], original_live["env"],
+        "startup recovery ignores stale session markers and restores provider fields"
     );
     assert!(
         seeded
@@ -688,8 +688,8 @@ async fn app_state_try_new_restores_claude_from_current_provider_with_common_sni
             .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
-        Some("1"),
-        "startup recovery should preserve Claude common snippet semantics on current-provider restore"
+        None,
+        "startup recovery must not replay saved global common settings"
     );
     assert_eq!(
         restored
@@ -975,17 +975,19 @@ async fn disabling_one_managed_app_restores_only_that_app_while_shared_runtime_k
     let codex_auth: Value =
         read_json_file(&get_codex_auth_path()).expect("read active codex auth after claude stop");
     assert_eq!(
-        codex_auth
-            .get("OPENAI_API_KEY")
-            .and_then(|value| value.as_str()),
-        Some("PROXY_MANAGED"),
-        "Codex should stay in takeover mode while its managed session remains attached"
+        codex_auth, original_codex_auth,
+        "Codex takeover should preserve its native auth while the managed session remains attached"
     );
     let codex_config =
         std::fs::read_to_string(get_codex_config_path()).expect("read active codex config");
     assert!(
         codex_config.contains("127.0.0.1") && codex_config.contains("/v1"),
         "Codex should keep routing through the shared proxy while still attached"
+    );
+    assert!(
+        codex_config.contains("experimental_bearer_token")
+            && codex_config.contains("PROXY_MANAGED"),
+        "Codex should keep its proxy takeover marker in config.toml while still attached"
     );
     assert!(
         state.proxy_service.is_running().await,
@@ -1170,16 +1172,19 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_auth_json() 
     let restored_config =
         std::fs::read_to_string(get_codex_config_path()).expect("read restored codex config.toml");
     assert!(
-        restored_config.contains("https://api.openai.com/v1"),
-        "startup recovery should restore the current Codex provider config"
+        !restored_config.contains("model_provider ="),
+        "official recovery should use the built-in OpenAI route"
     );
     assert!(
         restored_config.contains("disable_response_storage = true"),
         "startup recovery should reapply the Codex common snippet when restoring from the current provider"
     );
     assert!(
-        !restored_config.contains("127.0.0.1"),
-        "startup recovery should clear stale Codex localhost proxy routing"
+        toml::from_str::<toml::Value>(&restored_config)
+            .unwrap()
+            .get("openai_base_url")
+            .is_none(),
+        "startup recovery must not redirect the built-in OpenAI route to the proxy"
     );
     assert!(
         !recovered

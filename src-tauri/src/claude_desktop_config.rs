@@ -153,6 +153,34 @@ pub fn apply_provider(db: &Database, provider: &Provider) -> Result<(), AppError
     apply_provider_to_paths(db, provider, &paths)
 }
 
+/// Apply a provider when no database is available.
+///
+/// Official restore and direct-mode writes do not read the database. Proxy mode
+/// needs the gateway token stored there, so callers with a database should use
+/// [`apply_provider`] instead.
+pub fn apply_provider_without_database(provider: &Provider) -> Result<(), AppError> {
+    if !is_official_provider(provider)
+        && matches!(provider_mode(provider), ClaudeDesktopMode::Proxy)
+    {
+        return Err(AppError::localized(
+            "claude_desktop.proxy_requires_database",
+            "Claude Desktop 代理模式需要数据库才能写入网关令牌",
+            "Claude Desktop proxy mode requires the database to write the gateway token",
+        ));
+    }
+
+    let paths = current_platform_paths()?;
+    if is_official_provider(provider) {
+        return restore_official_at_paths(&paths);
+    }
+
+    validate_provider(provider)?;
+    // Direct mode does not read the database; reuse the shared writer with an
+    // in-memory database so the signature stays uniform.
+    let db = Database::memory()?;
+    apply_provider_to_paths(&db, provider, &paths)
+}
+
 pub fn get_status(db: &Database, proxy_running: bool) -> Result<ClaudeDesktopStatus, AppError> {
     if !is_supported_platform() {
         return Ok(ClaudeDesktopStatus {

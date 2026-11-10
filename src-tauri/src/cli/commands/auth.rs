@@ -2,7 +2,7 @@ use clap::Subcommand;
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
-use crate::cli::ui::{create_table, info, success, to_json};
+use crate::cli::ui::{create_table, highlight, info, success, to_json, warning};
 use crate::error::AppError;
 use crate::services::{AuthService, ManagedAuthAccount, ManagedAuthDeviceCodeResponse};
 
@@ -24,6 +24,9 @@ pub enum AuthCommand {
     },
     /// Sign in to ChatGPT with the Codex OAuth device flow
     Login {
+        /// Reauthenticate this local account while preserving provider bindings
+        #[arg(long)]
+        account_id: Option<String>,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -47,6 +50,21 @@ pub enum AuthCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Reset Codex rate limit quota using a banked reset credit
+    ResetQuota {
+        /// Account ID (defaults to active account)
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Specific credit ID to consume (defaults to earliest expiring)
+        #[arg(long)]
+        credit_id: Option<String>,
+        /// Confirm consumption (safety gate; without this, runs in dry-run mode)
+        #[arg(long)]
+        confirm: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -57,14 +75,21 @@ struct LoginCompleted {
 }
 
 pub fn execute(cmd: AuthCommand) -> Result<(), AppError> {
+    crate::services::global_proxy::initialize_http_client_from_disk_best_effort();
     let runtime = create_runtime()?;
     match cmd {
         AuthCommand::Status { json } => status(&runtime, json),
         AuthCommand::List { json } => list_accounts(&runtime, json),
-        AuthCommand::Login { json } => login(&runtime, json),
+        AuthCommand::Login { json, account_id } => login(&runtime, json, account_id.as_deref()),
         AuthCommand::Default { account_id } => set_default(&runtime, &account_id),
         AuthCommand::Remove { account_id, yes } => remove_account(&runtime, &account_id, yes),
         AuthCommand::Logout { yes } => logout(&runtime, yes),
+        AuthCommand::ResetQuota {
+            account_id,
+            credit_id,
+            confirm,
+            json,
+        } => reset_quota(&runtime, account_id, credit_id, confirm, json),
     }
 }
 
@@ -136,9 +161,16 @@ fn list_accounts(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), Ap
     Ok(())
 }
 
-fn login(runtime: &tokio::runtime::Runtime, json: bool) -> Result<(), AppError> {
+fn login(
+    runtime: &tokio::runtime::Runtime,
+    json: bool,
+    account_id: Option<&str>,
+) -> Result<(), AppError> {
     let device = runtime
-        .block_on(AuthService::start_login(AUTH_PROVIDER_CODEX_OAUTH))
+        .block_on(AuthService::start_login_for_account(
+            AUTH_PROVIDER_CODEX_OAUTH,
+            account_id,
+        ))
         .map_err(AppError::Message)?;
 
     if json {
@@ -288,13 +320,25 @@ fn print_device_instructions(device: &ManagedAuthDeviceCodeResponse) {
 
 fn print_accounts(accounts: &[ManagedAuthAccount]) {
     let mut table = create_table();
-    table.set_header(vec!["Default", "Login", "Account ID", "Authenticated At"]);
+    table.set_header(vec![
+        "Default",
+        "Login",
+        "Account ID",
+        "Authenticated At",
+        "Status",
+    ]);
     for account in accounts {
         table.add_row(vec![
             if account.is_default { "yes" } else { "" }.to_string(),
             account.login.clone(),
             account.id.clone(),
             account.authenticated_at.to_string(),
+            if account.reauth_required {
+                "Reauthentication required"
+            } else {
+                "Ready"
+            }
+            .to_string(),
         ]);
     }
     println!("{table}");
@@ -323,4 +367,124 @@ mod tests {
         assert!(normalize_account_id("  \n").is_err());
         assert_eq!(normalize_account_id(" acc-123 ").unwrap(), "acc-123");
     }
+}
+
+fn reset_quota(
+    runtime: &tokio::runtime::Runtime,
+    account_id: Option<String>,
+    credit_id: Option<String>,
+    confirm: bool,
+    json: bool,
+) -> Result<(), AppError> {
+    // Resolve the default exactly once: inspection and consumption must target the same account.
+    let account_id = match account_id {
+        Some(id) => normalize_account_id(&id)?.to_string(),
+        None => runtime
+            .block_on(AuthService::get_status(AUTH_PROVIDER_CODEX_OAUTH))
+            .map_err(AppError::Message)?
+            .default_account_id
+            .ok_or_else(|| {
+                AppError::localized(
+                    "quota.reset.no_account",
+                    "没有可用的 ChatGPT 账号",
+                    "No ChatGPT account available",
+                )
+            })?,
+    };
+    let quota = runtime
+        .block_on(AuthService::get_quota(
+            AUTH_PROVIDER_CODEX_OAUTH,
+            Some(&account_id),
+        ))
+        .map_err(AppError::Message)?;
+    let selected_credit = super::quota_reset::select_credit(&quota, credit_id.as_deref())?;
+    let available_count = quota
+        .reset_credits
+        .as_ref()
+        .map(|s| s.available_count)
+        .unwrap_or(0);
+    let command = super::quota_reset::auth_confirmation(&account_id, &selected_credit.id)?;
+
+    if !confirm {
+        if json {
+            let dry_run = serde_json::json!({
+                "dryRun": true,
+                "accountId": account_id,
+                "confirmationCommand": command,
+                "targetCredit": selected_credit,
+                "availableCount": available_count,
+                "message": "To redeem this credit and reset rate limits, run again with --confirm.",
+            });
+            println!(
+                "{}",
+                to_json(&dry_run).map_err(|source| AppError::JsonSerialize { source })?
+            );
+            return Ok(());
+        }
+
+        println!("{}", highlight("=== Rate Limit Reset Credit (Dry Run) ==="));
+        println!(
+            "{}: {}",
+            if crate::cli::i18n::is_chinese() {
+                "账号 ID"
+            } else {
+                "Account ID"
+            },
+            account_id
+        );
+        println!("Credit ID:       {}", selected_credit.id);
+        if let Some(title) = &selected_credit.title {
+            println!("Title:           {}", title);
+        }
+        if let Some(expires) = &selected_credit.expires_at {
+            println!("Expires at:      {}", expires);
+        }
+        println!("Available Cards: {}", available_count);
+        println!();
+        println!(
+            "{}",
+            warning("⚠ Consuming a reset credit is permanent and cannot be undone.")
+        );
+        println!(
+            "{}",
+            info(&format!(
+                "{}\n  {command}",
+                if crate::cli::i18n::is_chinese() {
+                    "确认兑换此卡，请执行："
+                } else {
+                    "To consume this credit, run:"
+                }
+            ))
+        );
+        return Ok(());
+    }
+
+    let result = runtime
+        .block_on(AuthService::reset_quota(
+            AUTH_PROVIDER_CODEX_OAUTH,
+            Some(&account_id),
+            Some(&selected_credit.id),
+        ))
+        .map_err(AppError::Message)?;
+
+    if json {
+        println!(
+            "{}",
+            to_json(&result).map_err(|source| AppError::JsonSerialize { source })?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        success("✓ Rate limit reset credit successfully redeemed!")
+    );
+    println!("Credit ID:         {}", result.credit_id);
+    println!("Redeem Request ID: {}", result.redeem_request_id);
+    println!("Upstream Code:     {}", result.code);
+    if let Some(win) = result.windows_reset {
+        println!("Windows Reset:     {}", win);
+    }
+    super::quota_reset::print_updated_quota(result.new_quota.as_ref());
+    Ok(())
 }

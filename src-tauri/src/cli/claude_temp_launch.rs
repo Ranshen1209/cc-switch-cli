@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::AppError;
 #[cfg(test)]
 use crate::provider::Provider;
-use crate::services::provider::ProviderService;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -101,9 +100,7 @@ fn normalize_launch_settings(provider_id: &str, settings: &Value) -> Result<Valu
         ));
     }
 
-    let mut normalized_settings = settings.clone();
-    let _ = ProviderService::normalize_claude_models_in_value(&mut normalized_settings);
-    Ok(normalized_settings)
+    Ok(settings.clone())
 }
 
 pub(crate) fn resolve_claude_binary() -> Result<PathBuf, AppError> {
@@ -299,6 +296,8 @@ mod tests {
     use super::*;
     use crate::app_config::AppType;
     use crate::provider::Provider;
+    #[cfg(test)]
+    use crate::services::provider::ProviderService;
     use serde_json::{json, Value};
     #[cfg(unix)]
     use std::ffi::OsString;
@@ -582,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_launch_migrates_legacy_small_fast_model_key() {
+    fn prepare_launch_preserves_projected_model_fields() {
         let temp_dir = TempDir::new().expect("create temp dir");
         let provider = Provider::with_id(
             "legacy".to_string(),
@@ -608,11 +607,8 @@ mod tests {
         .expect("parse temp settings");
 
         let env = written.get("env").expect("env exists");
-        assert!(
-            env.get("ANTHROPIC_SMALL_FAST_MODEL").is_none(),
-            "legacy key should be removed"
-        );
-        assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "my-fast-model");
+        assert_eq!(env["ANTHROPIC_SMALL_FAST_MODEL"], "my-fast-model");
+        assert!(env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none());
     }
 
     #[test]

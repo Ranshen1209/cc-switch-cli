@@ -1,0 +1,717 @@
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PiProviderPreset {
+    pub(crate) label: &'static str,
+    pub(crate) provider_key: &'static str,
+    pub(crate) website_url: &'static str,
+    pub(crate) category: &'static str,
+    pub(crate) icon: &'static str,
+    pub(crate) icon_color: Option<&'static str>,
+    pub(crate) partner_promotion_key: Option<&'static str>,
+    pub(crate) sponsor_id: Option<&'static str>,
+    settings: fn() -> Value,
+}
+
+impl PiProviderPreset {
+    pub(crate) fn settings_config(&self) -> Value {
+        (self.settings)()
+    }
+}
+
+pub(crate) static PI_BUILTIN_PROVIDER_PRESETS: [PiProviderPreset; 9] = [
+    PiProviderPreset {
+        label: "DeepSeek",
+        provider_key: "cc-switch-deep-seek",
+        website_url: "https://platform.deepseek.com",
+        category: "cn_official",
+        icon: "deepseek",
+        icon_color: Some("#1E88E5"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: deepseek_settings,
+    },
+    PiProviderPreset {
+        label: "Zhipu GLM",
+        provider_key: "cc-switch-zhipu-glm",
+        website_url: "https://open.bigmodel.cn",
+        category: "cn_official",
+        icon: "zhipu",
+        icon_color: Some("#0F62FE"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: zhipu_glm_settings,
+    },
+    PiProviderPreset {
+        label: "Zhipu GLM en",
+        provider_key: "cc-switch-zhipu-glm-en",
+        website_url: "https://z.ai",
+        category: "cn_official",
+        icon: "zhipu",
+        icon_color: Some("#0F62FE"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: zhipu_glm_en_settings,
+    },
+    PiProviderPreset {
+        label: "ModelScope",
+        provider_key: "cc-switch-model-scope",
+        website_url: "https://modelscope.cn",
+        category: "aggregator",
+        icon: "modelscope",
+        icon_color: Some("#624AFF"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: modelscope_settings,
+    },
+    PiProviderPreset {
+        label: "MiniMax",
+        provider_key: "cc-switch-mini-max",
+        website_url: "https://platform.minimaxi.com",
+        category: "cn_official",
+        icon: "minimax",
+        icon_color: Some("#FF6B6B"),
+        partner_promotion_key: Some("minimax_cn"),
+        sponsor_id: None,
+        settings: minimax_settings,
+    },
+    PiProviderPreset {
+        label: "Xiaomi MiMo",
+        provider_key: "cc-switch-xiaomi-mi-mo",
+        website_url: "https://platform.xiaomimimo.com",
+        category: "cn_official",
+        icon: "xiaomimimo",
+        icon_color: Some("#000000"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: xiaomi_mimo_settings,
+    },
+    PiProviderPreset {
+        label: "Xiaomi MiMo Token Plan (China)",
+        provider_key: "cc-switch-xiaomi-mi-mo-token-plan-china",
+        website_url: "https://platform.xiaomimimo.com/#/token-plan",
+        category: "cn_official",
+        icon: "xiaomimimo",
+        icon_color: Some("#000000"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: xiaomi_mimo_token_plan_settings,
+    },
+    PiProviderPreset {
+        label: "OpenCode Go",
+        provider_key: "cc-switch-open-code-go",
+        website_url: "https://opencode.ai/go",
+        category: "third_party",
+        icon: "opencode",
+        icon_color: Some("#211E1E"),
+        partner_promotion_key: Some("opencode_go"),
+        sponsor_id: None,
+        settings: opencode_go_settings,
+    },
+    PiProviderPreset {
+        label: "OpenRouter",
+        provider_key: "cc-switch-open-router",
+        website_url: "https://openrouter.ai",
+        category: "aggregator",
+        icon: "openrouter",
+        icon_color: Some("#6566F1"),
+        partner_promotion_key: None,
+        sponsor_id: None,
+        settings: openrouter_settings,
+    },
+];
+
+pub(crate) static PI_SPONSOR_PROVIDER_PRESETS: [PiProviderPreset; 8] = [
+    PiProviderPreset {
+        label: "88API",
+        provider_key: "cc-switch-88api",
+        website_url: "https://88api.ai",
+        category: "aggregator",
+        icon: "88api",
+        icon_color: None,
+        partner_promotion_key: Some("88api"),
+        sponsor_id: Some("88api"),
+        settings: api88_settings,
+    },
+    PiProviderPreset {
+        label: "APIMart",
+        provider_key: "cc-switch-apimart",
+        website_url: "https://apimart.ai",
+        category: "aggregator",
+        icon: "apimart",
+        icon_color: None,
+        partner_promotion_key: Some("apimart"),
+        sponsor_id: Some("apimart"),
+        settings: apimart_settings,
+    },
+    PiProviderPreset {
+        label: "Cubence",
+        provider_key: "cc-switch-cubence",
+        website_url: "https://cubence.com",
+        category: "third_party",
+        icon: "cubence",
+        icon_color: Some("#000000"),
+        partner_promotion_key: None,
+        sponsor_id: Some("cubence"),
+        settings: cubence_settings,
+    },
+    PiProviderPreset {
+        label: "PackyCode",
+        provider_key: "cc-switch-packy-code",
+        website_url: "https://www.packyapi.ai",
+        category: "third_party",
+        icon: "packycode",
+        icon_color: None,
+        partner_promotion_key: None,
+        sponsor_id: Some("packycode"),
+        settings: packycode_settings,
+    },
+    PiProviderPreset {
+        label: "RunAPI",
+        provider_key: "cc-switch-run-api",
+        website_url: "https://runapi.co",
+        category: "aggregator",
+        icon: "runapi",
+        icon_color: None,
+        partner_promotion_key: None,
+        sponsor_id: Some("runapi"),
+        settings: runapi_settings,
+    },
+    PiProviderPreset {
+        label: "AICodeMirror",
+        provider_key: "cc-switch-aicode-mirror",
+        website_url: "https://www.aicodemirror.ai",
+        category: "third_party",
+        icon: "aicodemirror",
+        icon_color: Some("#000000"),
+        partner_promotion_key: None,
+        sponsor_id: Some("aicodemirror"),
+        settings: aicodemirror_settings,
+    },
+    PiProviderPreset {
+        label: "Qiniu",
+        provider_key: "cc-switch-qiniu",
+        website_url: "https://s.qiniu.com/nMvAvy",
+        category: "aggregator",
+        icon: "qiniu",
+        icon_color: None,
+        partner_promotion_key: None,
+        sponsor_id: Some("qiniu"),
+        settings: qiniu_settings,
+    },
+    PiProviderPreset {
+        label: "FennoAI",
+        provider_key: "cc-switch-fenno-ai",
+        website_url: "https://api.fenno.ai",
+        category: "aggregator",
+        icon: "fenno",
+        icon_color: None,
+        partner_promotion_key: None,
+        sponsor_id: Some("fenno"),
+        settings: fenno_settings,
+    },
+];
+
+fn claude_model(name: &str, id: &str) -> Value {
+    json!({
+        "name": name,
+        "reasoning": true,
+        "input": ["text", "image"],
+        "contextWindow": 1_000_000,
+        "maxTokens": 128_000,
+        "id": id,
+        "thinkingLevelMap": {},
+    })
+}
+
+/// Opus and Fable run adaptive thinking with no "off" level; Sonnet and Haiku
+/// keep Pi's defaults. Mirrors the upstream pi thinking bindings.
+fn claude_adaptive(name: &str, id: &str) -> Value {
+    let mut model = claude_model(name, id);
+    model["thinkingLevelMap"] = json!({ "off": null, "xhigh": "xhigh", "max": "max" });
+    model["compat"] = json!({ "forceAdaptiveThinking": true });
+    model
+}
+
+fn claude_sonnet(id: &str) -> Value {
+    claude_model("Claude Sonnet 5.5", id)
+}
+
+fn claude_opus(id: &str) -> Value {
+    claude_adaptive("Claude Opus 5.5", id)
+}
+
+fn gpt_6_1_sol() -> Value {
+    json!({
+        "name": "GPT-6.1 Sol",
+        "reasoning": true,
+        "input": ["text", "image"],
+        "contextWindow": 272_000,
+        "maxTokens": 128_000,
+        "id": "gpt-6.1-sol",
+        "thinkingLevelMap": {},
+    })
+}
+
+fn glm_5_3() -> Value {
+    json!({
+        "name": "GLM-5.3",
+        "reasoning": true,
+        "input": ["text"],
+        "contextWindow": 1_000_000,
+        "maxTokens": 131_072,
+        "id": "glm-5.3",
+        "thinkingLevelMap": {},
+    })
+}
+
+fn anthropic_settings(name: &str, base_url: &str) -> Value {
+    json!({
+        "name": name,
+        "baseUrl": base_url,
+        "api": "anthropic-messages",
+        "apiKey": "",
+        "models": [
+            claude_sonnet("claude-sonnet-5-5"),
+            claude_opus("claude-opus-5-5"),
+        ],
+    })
+}
+
+fn openai_gpt_settings(name: &str, base_url: &str) -> Value {
+    json!({
+        "name": name,
+        "baseUrl": base_url,
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [gpt_6_1_sol()],
+    })
+}
+
+fn packycode_settings() -> Value {
+    anthropic_settings("PackyCode", "https://www.packyapi.ai")
+}
+
+fn aicodemirror_settings() -> Value {
+    anthropic_settings("AICodeMirror", "https://api.aicodemirror.ai/api/claudecode")
+}
+
+fn fenno_settings() -> Value {
+    openai_gpt_settings("FennoAI", "https://api.fenno.ai/v1")
+}
+
+fn runapi_settings() -> Value {
+    let mut settings = anthropic_settings("RunAPI", "https://runapi.co");
+    settings["models"]
+        .as_array_mut()
+        .expect("Pi RunAPI models are an array")
+        .push(claude_model("Claude Haiku 5.5", "claude-haiku-5-5"));
+    settings
+}
+
+fn qiniu_settings() -> Value {
+    json!({
+        "name": "Qiniu",
+        "baseUrl": "https://api.qnaigc.com/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [
+            {
+                "name": "GPT-6 Astra",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 272_000,
+                "maxTokens": 128_000,
+                "id": "gpt-6-astra",
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "Kimi K3",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "moonshotai/kimi-k3",
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "GLM-5.3",
+                "reasoning": true,
+                "input": ["text"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "z-ai/glm-5.3",
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "GLM-5.3 Flash",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "z-ai/glm-5.3-flash",
+                "thinkingLevelMap": {},
+            },
+        ],
+    })
+}
+
+fn cubence_settings() -> Value {
+    anthropic_settings("Cubence", "https://api.cubence.com")
+}
+
+fn deepseek_model(name: &str, id: &str) -> Value {
+    json!({
+        "name": name,
+        "reasoning": true,
+        "input": ["text", "image"],
+        "contextWindow": 1_000_000,
+        "maxTokens": 384_000,
+        "id": id,
+        "thinkingLevelMap": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "max": "max",
+        },
+    })
+}
+
+fn deepseek_settings() -> Value {
+    json!({
+        "name": "DeepSeek",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [deepseek_model("DeepSeek V4.1 Flash", "deepseek-flash")],
+    })
+}
+
+fn zhipu_glm_settings() -> Value {
+    json!({
+        "name": "Zhipu GLM",
+        "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [glm_5_3()],
+    })
+}
+
+fn zhipu_glm_en_settings() -> Value {
+    json!({
+        "name": "Zhipu GLM en",
+        "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [glm_5_3()],
+    })
+}
+
+fn modelscope_settings() -> Value {
+    json!({
+        "name": "ModelScope",
+        "baseUrl": "https://api-inference.modelscope.cn/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [{
+            "name": "GLM-5.2",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 1_000_000,
+            "maxTokens": 131_072,
+            "id": "ZhipuAI/GLM-5.2",
+            "thinkingLevelMap": {},
+        }],
+    })
+}
+
+fn minimax_settings() -> Value {
+    json!({
+        "name": "MiniMax",
+        "baseUrl": "https://api.minimaxi.com/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [{
+            "name": "MiniMax-M3.1-Flash",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 1_000_000,
+            "maxTokens": 131_072,
+            "id": "MiniMax-M3.1-Flash",
+            "thinkingLevelMap": {
+                "off": null,
+                "minimal": null,
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "xhigh": "xhigh",
+                "max": "max",
+            },
+        }],
+    })
+}
+
+fn xiaomi_model(name: &str, id: &str, input: &[&str], compat: bool) -> Value {
+    let mut model = json!({
+        "name": name,
+        "reasoning": true,
+        "input": input,
+        "contextWindow": 1_048_576,
+        "maxTokens": 131_072,
+        "id": id,
+        "thinkingLevelMap": {},
+    });
+    if compat {
+        model["compat"] = json!({
+            "requiresReasoningContentOnAssistantMessages": true,
+            "thinkingFormat": "deepseek",
+        });
+    }
+    model
+}
+
+fn xiaomi_mimo_settings() -> Value {
+    json!({
+        "name": "Xiaomi MiMo",
+        "baseUrl": "https://api.xiaomimimo.com/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [
+            xiaomi_model(
+                "MiMo V2.6 Pro",
+                "mimo-v2.6-pro",
+                &["text", "image"],
+                true,
+            ),
+            xiaomi_model(
+                "MiMo V2.6 Flash",
+                "mimo-v2.6-flash",
+                &["text", "image"],
+                true,
+            ),
+            xiaomi_model(
+                "MiMo V2.6 Pro UltraSpeed",
+                "mimo-v2.6-pro-ultraspeed",
+                &["text", "image"],
+                true,
+            ),
+        ],
+    })
+}
+
+fn xiaomi_mimo_token_plan_settings() -> Value {
+    json!({
+        "name": "Xiaomi MiMo Token Plan (China)",
+        "baseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [
+            xiaomi_model("MiMo V2.6 Pro", "mimo-v2.6-pro", &["text", "image"], true),
+            xiaomi_model("MiMo V2.6 Flash", "mimo-v2.6-flash", &["text", "image"], true),
+        ],
+    })
+}
+
+fn opencode_compat(extra: Value) -> Value {
+    let mut compat = json!({
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "maxTokensField": "max_tokens",
+    });
+    if let (Some(compat), Some(extra)) = (compat.as_object_mut(), extra.as_object()) {
+        compat.extend(extra.clone());
+    }
+    compat
+}
+
+fn opencode_go_settings() -> Value {
+    let thinking_levels = json!({
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "max": "max",
+    });
+    json!({
+        "name": "OpenCode Go",
+        "baseUrl": "https://opencode.ai/zen/go/v1",
+        "api": "openai-completions",
+        "apiKey": "",
+        "models": [
+            {
+                "name": "GLM-5.3",
+                "reasoning": true,
+                "input": ["text"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "glm-5.3",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {
+                    "off": null,
+                    "minimal": null,
+                    "low": null,
+                    "medium": null,
+                    "high": "high",
+                    "xhigh": null,
+                    "max": "max",
+                },
+            },
+            {
+                "name": "GLM-5.3 Flash",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "glm-5.3-flash",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "Kimi K3.1 Pro",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "kimi-k3.1-pro",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "DeepSeek V4.1 Flash",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_000_000,
+                "maxTokens": 384_000,
+                "id": "deepseek-v4.1-flash",
+                "compat": opencode_compat(json!({
+                    "requiresReasoningContentOnAssistantMessages": true,
+                    "thinkingFormat": "deepseek",
+                })),
+                "thinkingLevelMap": thinking_levels,
+            },
+            {
+                "name": "MiMo V2.6 Pro",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_048_576,
+                "maxTokens": 131_072,
+                "id": "mimo-v2.6-pro",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "Qwen3.8 Max",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 983_616,
+                "maxTokens": 131_072,
+                "id": "qwen3.8-max",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+            {
+                "name": "MiniMax-M3.1-Flash",
+                "reasoning": true,
+                "input": ["text", "image"],
+                "contextWindow": 1_000_000,
+                "maxTokens": 128_000,
+                "id": "minimax-m3.1-flash",
+                "compat": opencode_compat(json!({})),
+                "thinkingLevelMap": {},
+            },
+        ],
+    })
+}
+
+fn openrouter_settings() -> Value {
+    json!({
+        "name": "OpenRouter",
+        "baseUrl": "https://openrouter.ai/api",
+        "api": "anthropic-messages",
+        "apiKey": "",
+        "models": [
+            claude_opus("anthropic/claude-opus-5.5"),
+            claude_sonnet("anthropic/claude-sonnet-5.5"),
+            claude_model("Claude Haiku 5.5", "anthropic/claude-haiku-5.5"),
+            claude_adaptive("Claude Fable 5.1", "anthropic/claude-fable-5.1"),
+        ],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn pi_preset_scope_is_the_selected_upstream_subset() {
+        assert_eq!(
+            PI_BUILTIN_PROVIDER_PRESETS
+                .iter()
+                .map(|preset| preset.label)
+                .collect::<Vec<_>>(),
+            [
+                "DeepSeek",
+                "Zhipu GLM",
+                "Zhipu GLM en",
+                "ModelScope",
+                "MiniMax",
+                "Xiaomi MiMo",
+                "Xiaomi MiMo Token Plan (China)",
+                "OpenCode Go",
+                "OpenRouter",
+            ]
+        );
+        assert_eq!(
+            PI_SPONSOR_PROVIDER_PRESETS
+                .iter()
+                .map(|preset| preset.sponsor_id.expect("sponsor id"))
+                .collect::<Vec<_>>(),
+            [
+                "88api",
+                "apimart",
+                "cubence",
+                "packycode",
+                "runapi",
+                "aicodemirror",
+                "qiniu",
+                "fenno"
+            ]
+        );
+    }
+
+    #[test]
+    fn pi_preset_keys_are_unique_and_native_settings_are_complete() {
+        let presets = PI_BUILTIN_PROVIDER_PRESETS
+            .iter()
+            .chain(PI_SPONSOR_PROVIDER_PRESETS.iter());
+        let mut keys = HashSet::new();
+        for preset in presets {
+            assert!(keys.insert(preset.provider_key), "duplicate provider key");
+            let settings = preset.settings_config();
+            assert_eq!(settings["name"], preset.label);
+            assert!(settings["baseUrl"].is_string());
+            assert!(settings["api"].is_string());
+            assert_eq!(settings["apiKey"], "");
+            assert!(settings["models"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()));
+        }
+    }
+}
+
+fn api88_settings() -> Value {
+    crate::provider_preset_sponsors::api88_settings(&crate::app_config::AppType::Pi)
+}
+
+// OpenAI-compatible endpoint and model from APIMart's Responses examples.
+fn apimart_settings() -> Value {
+    json!({
+        "name": "APIMart",
+        "baseUrl": "https://api.apimart.ai/v1",
+        "api": "openai-responses",
+        "apiKey": "",
+        "models": [{ "id": "gpt-5.2-pro", "name": "GPT-5.2 Pro" }],
+    })
+}

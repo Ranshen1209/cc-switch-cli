@@ -36,9 +36,12 @@ pub(crate) struct TestEnvGuard {
     home: PathBuf,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
+    old_test_home: Option<OsString>,
     old_cc_switch_config_dir: Option<OsString>,
     old_claude_config_dir: Option<OsString>,
     old_codex_home: Option<OsString>,
+    old_hermes_home: Option<OsString>,
+    old_localappdata: Option<OsString>,
     old_xdg_runtime_dir: Option<OsString>,
 }
 
@@ -47,16 +50,22 @@ impl TestEnvGuard {
         let lock = lock_test_home_and_settings();
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
+        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let old_cc_switch_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
         let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
         let old_codex_home = std::env::var_os("CODEX_HOME");
+        let old_hermes_home = std::env::var_os("HERMES_HOME");
+        let old_localappdata = std::env::var_os("LOCALAPPDATA");
         let old_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
 
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var("CC_SWITCH_TEST_HOME", home);
         std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
         std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
         std::env::set_var("CODEX_HOME", home.join(".codex"));
+        std::env::remove_var("HERMES_HOME");
+        std::env::set_var("LOCALAPPDATA", home.join("AppData").join("Local"));
         std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
         set_test_home_override(Some(home));
         crate::settings::reload_test_settings();
@@ -66,9 +75,12 @@ impl TestEnvGuard {
             home: home.to_path_buf(),
             old_home,
             old_userprofile,
+            old_test_home,
             old_cc_switch_config_dir,
             old_claude_config_dir,
             old_codex_home,
+            old_hermes_home,
+            old_localappdata,
             old_xdg_runtime_dir,
         }
     }
@@ -83,9 +95,12 @@ impl Drop for TestEnvGuard {
         cleanup_test_processes_under(&self.home);
         restore_env("HOME", &self.old_home);
         restore_env("USERPROFILE", &self.old_userprofile);
+        restore_env("CC_SWITCH_TEST_HOME", &self.old_test_home);
         restore_env("CC_SWITCH_CONFIG_DIR", &self.old_cc_switch_config_dir);
         restore_env("CLAUDE_CONFIG_DIR", &self.old_claude_config_dir);
         restore_env("CODEX_HOME", &self.old_codex_home);
+        restore_env("HERMES_HOME", &self.old_hermes_home);
+        restore_env("LOCALAPPDATA", &self.old_localappdata);
         restore_env("XDG_RUNTIME_DIR", &self.old_xdg_runtime_dir);
         set_test_home_override(self.old_home.as_deref().map(Path::new));
         crate::settings::reload_test_settings();

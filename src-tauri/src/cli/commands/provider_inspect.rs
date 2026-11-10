@@ -1,11 +1,13 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
 use crate::cli::provider_quota::{
-    display_usage_plan_name, provider_display_name, query_quota, quota_target_for_provider,
-    usage_value_summary, ProviderUsageQuota, QuotaTarget,
+    display_usage_plan_name, provider_display_name, query_quota, quota_reset_display,
+    quota_target_for_provider, reset_provider_quota, usage_value_summary, ProviderUsageQuota,
+    QuotaTarget, QuotaTargetKind,
 };
 use crate::cli::ui::{create_table, error, highlight, info, success, to_json, warning};
 use crate::error::AppError;
@@ -33,7 +35,10 @@ enum ModelFetchSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelFetchTarget {
     base_url: String,
+    is_full_url: bool,
     auth_value: Option<String>,
+    custom_user_agent: Option<String>,
+    request_headers: Option<BTreeMap<String, String>>,
     strategy: ProviderModelFetchStrategy,
 }
 
@@ -46,6 +51,7 @@ struct ClaudeConfig {
     sonnet_model: Option<String>,
     opus_model: Option<String>,
     fable_model: Option<String>,
+    subagent_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +76,22 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     let app_str = app_type.as_str().to_string();
     let providers = ProviderService::list(&state, app_type.clone())?;
     let current_id = ProviderService::current(&state, app_type.clone())?;
+    let pi_state = if matches!(app_type, AppType::Pi) {
+        match crate::services::pi_state::PiStateService::current(&state) {
+            Ok(current) => Some(current),
+            Err(error) => {
+                println!(
+                    "{}",
+                    warning(&format!(
+                        "Pi models.json could not be read; enabled state is unavailable: {error}"
+                    ))
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     if providers.is_empty() {
         println!("{}", info("No providers found."));
@@ -89,20 +111,40 @@ pub(crate) fn list_providers(app_type: AppType) -> Result<(), AppError> {
     });
 
     for (id, provider) in provider_list {
-        let current_marker = if id == current_id { "OK" } else { "" };
+        let current_marker = if pi_state.as_ref().is_some_and(|state| {
+            state
+                .enabled_provider_ids
+                .iter()
+                .any(|enabled| enabled == &id)
+        }) || (!matches!(app_type, AppType::Pi) && id == current_id)
+        {
+            "✓"
+        } else {
+            " "
+        };
         let api_url = extract_api_url(&provider, &app_type).unwrap_or_else(|| "N/A".to_string());
 
         table.add_row(vec![current_marker.to_string(), id, provider.name, api_url]);
     }
 
     println!("{}", table);
-    println!("\n{} Application: {}", info("i"), app_str);
-    println!("{} Current: {}", info("→"), highlight(&current_id));
+    println!("\n{} Application: {}", info("ℹ"), app_str);
+    if matches!(app_type, AppType::Pi) {
+        println!("{} ✓ = present in Pi models.json", info("→"));
+    } else {
+        println!("{} Current: {}", info("→"), highlight(&current_id));
+    }
 
     Ok(())
 }
 
 pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
+    if matches!(app_type, AppType::Pi) {
+        return Err(AppError::InvalidInput(
+            "Pi owns the current/default provider; CC Switch only manages explicit models.json entries"
+                .to_string(),
+        ));
+    }
     let state = get_state()?;
     let current_id = ProviderService::current(&state, app_type.clone())?;
     let providers = ProviderService::list(&state, app_type.clone())?;
@@ -115,49 +157,69 @@ pub(crate) fn show_current(app_type: AppType) -> Result<(), AppError> {
     println!("{}", "═".repeat(60));
 
     println!("\n{}", highlight(texts::basic_info_section_header()));
-    println!("ID: {}", current_id);
-    println!("{}: {}", texts::name_label_with_colon(), provider.name);
-    println!("{}: {}", texts::app_label_with_colon(), app_type.as_str());
+    println!("  ID:       {}", current_id);
+    println!(
+        "  {}:     {}",
+        texts::name_label_with_colon(),
+        provider.name
+    );
+    println!(
+        "  {}:     {}",
+        texts::app_label_with_colon(),
+        app_type.as_str()
+    );
 
     if matches!(app_type, AppType::Claude) {
-        let config = extract_claude_config(&provider.settings_config);
+        let config = extract_claude_config(provider);
 
         println!("\n{}", highlight(texts::api_config_section_header()));
         println!(
-            "Base URL: {}",
+            "  Base URL: {}",
             config.base_url.unwrap_or_else(|| "N/A".to_string())
         );
         println!(
-            "API Key: {}",
+            "  API Key:  {}",
             config.api_key.unwrap_or_else(|| "N/A".to_string())
         );
 
         println!("\n{}", highlight(texts::model_config_section_header()));
         println!(
-            "{}: {}",
+            "  {}:   {}",
             texts::main_model_label_with_colon(),
             config.model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "Haiku: {}",
+            "  Haiku:    {}",
             config.haiku_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "Sonnet: {}",
+            "  Sonnet:   {}",
             config.sonnet_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "Opus: {}",
+            "  Opus:     {}",
             config.opus_model.unwrap_or_else(|| "default".to_string())
         );
         println!(
-            "Fable: {}",
+            "  Fable:    {}",
             config.fable_model.unwrap_or_else(|| "default".to_string())
+        );
+        println!(
+            "  Subagent: {}",
+            config
+                .subagent_model
+                .unwrap_or_else(|| "default".to_string())
         );
     } else {
         println!("\n{}", highlight("API 配置 / API Configuration"));
         let api_url = extract_api_url(provider, &app_type).unwrap_or_else(|| "N/A".to_string());
-        println!("API URL: {}", api_url);
+        println!("  API URL:  {}", api_url);
+        println!(
+            "  API Key:  {}",
+            provider
+                .configured_api_key(&app_type)
+                .unwrap_or_else(|| "N/A".to_string())
+        );
     }
 
     println!("\n{}", "─".repeat(60));
@@ -212,7 +274,7 @@ pub(crate) fn speedtest_provider(app_type: AppType, id: &str) -> Result<(), AppE
         if let Some(err) = &result.error {
             println!("\n{}", error(&format!("Error: {}", err)));
         } else if result.latency.is_some() {
-            println!("\n{}", success("OK Speedtest completed successfully"));
+            println!("\n{}", success("✓ Speedtest completed successfully"));
         }
     }
 
@@ -251,7 +313,7 @@ pub(crate) fn stream_check_provider(app_type: AppType, id: &str) -> Result<(), A
     }
     println!();
     if result.success {
-        println!("{}", success("OK Stream check completed successfully"));
+        println!("{}", success("✓ Stream check completed successfully"));
     } else {
         println!("{}", warning("Stream check finished with errors."));
     }
@@ -325,8 +387,11 @@ fn fetch_models_from_source(source: &ModelFetchSource) -> Result<Vec<String>, Ap
         ModelFetchSource::Http(target) => runtime.block_on(async {
             crate::cli::tui::fetch_provider_models_for_tui(
                 &target.base_url,
+                target.is_full_url,
                 target.auth_value.as_deref(),
+                target.custom_user_agent.as_deref(),
                 to_tui_strategy(target.strategy),
+                target.request_headers.as_ref(),
             )
             .await
             .map_err(AppError::Message)
@@ -356,11 +421,18 @@ fn print_fetched_models(models: &[String]) {
     println!();
     println!(
         "{}",
-        success(&format!("OK Fetched {} model(s)", models.len()))
+        success(&format!("✓ Fetched {} model(s)", models.len()))
     );
 }
 
-pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<(), AppError> {
+pub(crate) fn quota_provider(
+    app_type: AppType,
+    id: &str,
+    json: bool,
+    reset: bool,
+    credit_id: Option<String>,
+    confirm: bool,
+) -> Result<(), AppError> {
     let state = get_state()?;
     let providers = ProviderService::list(&state, app_type.clone())?;
     let provider = providers
@@ -370,9 +442,154 @@ pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<
     let target = quota_target_for_provider(&app_type, id, provider);
     let queried_at = chrono::Utc::now().timestamp_millis();
 
-    let output = if let Some(target) = target {
+    let output = if let Some(mut target) = target {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| AppError::Message(format!("Failed to create async runtime: {}", e)))?;
+
+        if reset {
+            let is_codex = matches!(&target.kind, QuotaTargetKind::CodexOAuth { .. })
+                || matches!(&target.kind, QuotaTargetKind::SubscriptionTool { tool } if tool == "codex");
+            if !is_codex {
+                return Err(AppError::Message(
+                    "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                        .to_string(),
+                ));
+            }
+
+            if let QuotaTargetKind::CodexOAuth { account_id } = &mut target.kind {
+                if account_id.is_none() {
+                    *account_id = Some(
+                        runtime
+                            .block_on(CodexOAuthService::get_status())
+                            .default_account_id
+                            .ok_or_else(|| {
+                                AppError::localized(
+                                    "quota.reset.no_account",
+                                    "没有可用的 ChatGPT 账号",
+                                    "No ChatGPT account available",
+                                )
+                            })?,
+                    );
+                }
+            }
+
+            let current_quota = match runtime.block_on(query_quota(&target)) {
+                Ok(ProviderUsageQuota::Subscription(q)) => q,
+                Ok(_) => {
+                    return Err(AppError::Message(
+                        "Unexpected quota response format".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    return Err(AppError::Message(format!(
+                        "Failed to query current quota: {e}"
+                    )));
+                }
+            };
+
+            let selected_credit =
+                super::quota_reset::select_credit(&current_quota, credit_id.as_deref())?;
+            let available_count = current_quota
+                .reset_credits
+                .as_ref()
+                .map(|s| s.available_count)
+                .unwrap_or(0);
+            let account_id = match &target.kind {
+                QuotaTargetKind::CodexOAuth { account_id } => account_id.as_deref(),
+                _ => None,
+            };
+            let command = super::quota_reset::provider_confirmation(
+                app_type.as_str(),
+                id,
+                &selected_credit.id,
+                account_id,
+            )?;
+
+            if !confirm {
+                if json {
+                    let dry_run = serde_json::json!({
+                        "dryRun": true,
+                        "providerId": id,
+                        "app": app_type,
+                        "accountId": account_id,
+                        "confirmationCommand": command,
+                        "targetCredit": selected_credit,
+                        "availableCount": available_count,
+                        "message": "To redeem this credit and reset rate limits, run again with --confirm.",
+                    });
+                    println!(
+                        "{}",
+                        to_json(&dry_run).map_err(|source| AppError::JsonSerialize { source })?
+                    );
+                    return Ok(());
+                }
+
+                println!("{}", highlight("=== Rate Limit Reset Credit (Dry Run) ==="));
+                println!("Provider:        {} ({})", provider_name, id);
+                if let Some(account_id) = account_id {
+                    println!(
+                        "{}: {}",
+                        if crate::cli::i18n::is_chinese() {
+                            "账号 ID"
+                        } else {
+                            "Account ID"
+                        },
+                        account_id
+                    );
+                }
+                println!("Credit ID:       {}", selected_credit.id);
+                if let Some(title) = &selected_credit.title {
+                    println!("Title:           {}", title);
+                }
+                if let Some(expires) = &selected_credit.expires_at {
+                    println!("Expires at:      {}", expires);
+                }
+                println!("Available Cards: {}", available_count);
+                println!();
+                println!(
+                    "{}",
+                    warning("⚠ Consuming a reset credit is permanent and cannot be undone.")
+                );
+                println!(
+                    "{}",
+                    info(&format!(
+                        "{}\n  {command}",
+                        if crate::cli::i18n::is_chinese() {
+                            "确认兑换此卡，请执行："
+                        } else {
+                            "To consume this credit, run:"
+                        }
+                    ))
+                );
+                return Ok(());
+            }
+
+            let result = runtime
+                .block_on(reset_provider_quota(&target, Some(&selected_credit.id)))
+                .map_err(AppError::Message)?;
+
+            if json {
+                println!(
+                    "{}",
+                    to_json(&result).map_err(|source| AppError::JsonSerialize { source })?
+                );
+                return Ok(());
+            }
+
+            println!(
+                "{}",
+                success("✓ Rate limit reset credit successfully redeemed!")
+            );
+            println!("Credit ID:         {}", result.credit_id);
+            println!("Redeem Request ID: {}", result.redeem_request_id);
+            println!("Upstream Code:     {}", result.code);
+            if let Some(win) = result.windows_reset {
+                println!("Windows Reset:     {}", win);
+            }
+            super::quota_reset::print_updated_quota(result.new_quota.as_ref());
+            return Ok(());
+        }
+
         match runtime.block_on(query_quota(&target)) {
             Ok(result) => quota_output_from_result(
                 app_type,
@@ -395,6 +612,12 @@ pub(crate) fn quota_provider(app_type: AppType, id: &str, json: bool) -> Result<
             },
         }
     } else {
+        if reset {
+            return Err(AppError::Message(
+                "Rate limit reset credits are only supported for Codex / OpenAI accounts."
+                    .to_string(),
+            ));
+        }
         ProviderQuotaOutput {
             app: app_type,
             provider_id: id.to_string(),
@@ -615,12 +838,50 @@ fn push_subscription_quota_lines(
             queried_at
         ));
     }
+    let now = chrono::Utc::now();
     for tier in &quota.tiers {
-        lines.push(format!(
+        let mut line = format!(
             "{}: {}",
             quota_tier_label(&tier.name),
             quota_percent_text(tier.utilization)
-        ));
+        );
+        if let Some(reset) = quota_reset_display(tier.resets_at.as_deref(), now) {
+            let local_time = reset
+                .at
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M %:z")
+                .to_string();
+            line.push_str(&format!("  {}", texts::tui_quota_resets_at(&local_time)));
+            if let Some(remaining) = reset.remaining {
+                line.push_str(&format!("  {}", texts::tui_quota_resets_in(&remaining)));
+            }
+        }
+        lines.push(line);
+    }
+    if let Some(reset_credits) = &quota.reset_credits {
+        if reset_credits.inspection_error.is_some() {
+            lines.push(
+                if crate::cli::i18n::is_chinese() {
+                    "重置卡查询失败，请重试查询。"
+                } else {
+                    "Reset credit inspection failed; retry the query."
+                }
+                .to_string(),
+            );
+        } else if reset_credits.available_count > 0 {
+            lines.push(format!(
+                "Reset Credits: {} available",
+                reset_credits.available_count
+            ));
+            for credit in &reset_credits.credits {
+                let expires = credit.expires_at.as_deref().unwrap_or("never");
+                let title = credit.title.as_deref().unwrap_or("Rate Limit Reset");
+                lines.push(format!(
+                    "  - {} (expires: {}) [{}]",
+                    title, expires, credit.id
+                ));
+            }
+        }
     }
     if let Some(extra) = quota.extra_usage.as_ref().filter(|extra| extra.is_enabled) {
         let mut parts = Vec::new();
@@ -681,8 +942,13 @@ fn push_script_usage_lines(lines: &mut Vec<String>, result: &UsageResult) {
         texts::tui_quota_ok()
     ));
     for (idx, item) in items.iter().enumerate() {
-        let label = display_usage_plan_name(item)
-            .map_or_else(|| format!("Usage {}", idx + 1), str::to_string);
+        let label = display_usage_plan_name(item).map_or_else(
+            || format!("Usage {}", idx + 1),
+            |name| match name.trim() {
+                "five_hour" | "weekly_limit" => quota_tier_label(name.trim()),
+                other => other.to_string(),
+            },
+        );
         lines.push(format!("{label}: {}", script_usage_item_text(item)));
     }
 }
@@ -705,7 +971,7 @@ fn script_usage_item_text(item: &UsageData) -> String {
     {
         parts.push(extra.to_string());
     }
-    parts.join("")
+    parts.join("  ")
 }
 
 fn push_optional_error(lines: &mut Vec<String>, message: Option<&String>) {
@@ -728,7 +994,7 @@ fn quota_tier_label(name: &str) -> String {
         "gemini_pro" => texts::tui_quota_tier_gemini_pro().to_string(),
         "gemini_flash" => texts::tui_quota_tier_gemini_flash().to_string(),
         "gemini_flash_lite" => texts::tui_quota_tier_gemini_flash_lite().to_string(),
-        other => other.replace('_', ""),
+        other => other.replace('_', " "),
     }
 }
 
@@ -748,9 +1014,20 @@ fn model_fetch_target(
             provider.id
         )));
     }
+    let custom_user_agent = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.custom_user_agent.clone());
+    let is_full_url = matches!(app_type, AppType::Claude | AppType::Codex)
+        && !provider.is_codex_oauth()
+        && provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.is_full_url)
+            .unwrap_or(false);
 
     match app_type {
-        AppType::Claude | AppType::ClaudeDesktop => {
+        AppType::Claude => {
             let auth_value = StreamCheckService::extract_claude_key(provider).ok_or_else(|| {
                 AppError::Message(format!("Missing API key for provider '{}'", provider.id))
             })?;
@@ -762,16 +1039,22 @@ fn model_fetch_target(
 
             Ok(ModelFetchTarget {
                 base_url,
+                is_full_url,
                 auth_value: Some(auth_value),
+                custom_user_agent,
+                request_headers: None,
                 strategy,
             })
         }
         AppType::Codex => {
             Ok(ModelFetchTarget {
                 base_url,
+                is_full_url,
                 auth_value: Some(StreamCheckService::extract_codex_key(provider).ok_or_else(
                     || AppError::Message(format!("Missing API key for provider '{}'", provider.id)),
                 )?),
+                custom_user_agent,
+                request_headers: None,
                 strategy: ProviderModelFetchStrategy::Bearer,
             })
         }
@@ -779,12 +1062,16 @@ fn model_fetch_target(
             let (auth_value, strategy) = extract_gemini_model_fetch_auth(provider)?;
             Ok(ModelFetchTarget {
                 base_url,
+                is_full_url,
                 auth_value: Some(auth_value),
+                custom_user_agent,
+                request_headers: None,
                 strategy,
             })
         }
         AppType::OpenCode => Ok(ModelFetchTarget {
             base_url,
+            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -798,10 +1085,13 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
+            custom_user_agent,
+            request_headers: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::Hermes => Ok(ModelFetchTarget {
             base_url,
+            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -815,10 +1105,13 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
+            custom_user_agent,
+            request_headers: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
         AppType::OpenClaw => Ok(ModelFetchTarget {
             base_url,
+            is_full_url,
             auth_value: Some(
                 provider
                     .settings_config
@@ -831,8 +1124,59 @@ fn model_fetch_target(
                         AppError::Message(format!("Missing API key for provider '{}'", provider.id))
                     })?,
             ),
+            custom_user_agent,
+            request_headers: None,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
+        AppType::ClaudeDesktop | AppType::Pi => {
+            let api = provider.settings_config.get("api").and_then(Value::as_str);
+            let strategy = match api {
+                Some("anthropic-messages") => ProviderModelFetchStrategy::Anthropic,
+                Some("google-generative-ai") => ProviderModelFetchStrategy::GoogleApiKey,
+                _ => ProviderModelFetchStrategy::Bearer,
+            };
+            let mut request_headers = provider
+                .settings_config
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value
+                                .as_str()
+                                .map(|value| (name.clone(), value.to_string()))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+                .filter(|headers| !headers.is_empty());
+            let api_key = provider
+                .settings_config
+                .get("apiKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let auth_value = if matches!(api, Some("anthropic-messages")) {
+                if let Some(api_key) = api_key.as_ref() {
+                    request_headers
+                        .get_or_insert_with(BTreeMap::new)
+                        .entry("x-api-key".to_string())
+                        .or_insert_with(|| api_key.clone());
+                }
+                None
+            } else {
+                api_key
+            };
+            Ok(ModelFetchTarget {
+                base_url,
+                is_full_url,
+                auth_value,
+                custom_user_agent,
+                request_headers,
+                strategy,
+            })
+        }
     }
 }
 
@@ -856,18 +1200,24 @@ fn one_off_model_fetch_target(
 
     Ok(ModelFetchTarget {
         base_url,
+        is_full_url: false,
         auth_value,
+        custom_user_agent: None,
+        request_headers: None,
         strategy,
     })
 }
 
 fn default_one_off_model_fetch_strategy(app_type: &AppType) -> ProviderModelFetchStrategy {
     match app_type {
-        AppType::Claude | AppType::ClaudeDesktop => ProviderModelFetchStrategy::Anthropic,
+        AppType::Claude => ProviderModelFetchStrategy::Anthropic,
         AppType::Gemini => ProviderModelFetchStrategy::GoogleApiKey,
-        AppType::Codex | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
-            ProviderModelFetchStrategy::Bearer
-        }
+        AppType::Codex
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => ProviderModelFetchStrategy::Bearer,
     }
 }
 
@@ -974,18 +1324,15 @@ fn extract_api_url(provider: &Provider, app_type: &AppType) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
-    let env = settings_config
+fn extract_claude_config(provider: &Provider) -> ClaudeConfig {
+    let env = provider
+        .settings_config
         .get("env")
         .and_then(|value| value.as_object());
 
     if let Some(env) = env {
         ClaudeConfig {
-            api_key: env
-                .get("ANTHROPIC_AUTH_TOKEN")
-                .or_else(|| env.get("ANTHROPIC_API_KEY"))
-                .and_then(|value| value.as_str())
-                .map(mask_api_key),
+            api_key: provider.configured_api_key(&AppType::Claude),
             base_url: env
                 .get("ANTHROPIC_BASE_URL")
                 .and_then(|value| value.as_str())
@@ -1010,17 +1357,13 @@ fn extract_claude_config(settings_config: &Value) -> ClaudeConfig {
                 .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
                 .and_then(|value| value.as_str())
                 .map(simplify_model_name),
+            subagent_model: env
+                .get("CLAUDE_CODE_SUBAGENT_MODEL")
+                .and_then(|value| value.as_str())
+                .map(simplify_model_name),
         }
     } else {
         ClaudeConfig::default()
-    }
-}
-
-fn mask_api_key(key: &str) -> String {
-    if key.len() > 8 {
-        format!("{}...", &key[..8])
-    } else {
-        key.to_string()
     }
 }
 
@@ -1079,7 +1422,32 @@ mod tests {
             extra_usage: None,
             error: None,
             queried_at: Some(1_700_000_000_000),
+            reset_credits: None,
         }
+    }
+
+    #[test]
+    fn cli_api_url_uses_active_codex_model_provider() {
+        let provider = Provider::with_id(
+            "current".to_string(),
+            "Current".to_string(),
+            json!({
+                "config": r#"model_provider = "current"
+
+# [model_providers.old]
+# base_url = "https://old.example.com/v1"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+"#
+            }),
+            None,
+        );
+
+        assert_eq!(
+            extract_api_url(&provider, &AppType::Codex).as_deref(),
+            Some("https://current.example.com/v1")
+        );
     }
 
     #[test]
@@ -1138,6 +1506,26 @@ mod tests {
     }
 
     #[test]
+    fn provider_quota_text_localizes_token_plan_tier_names() {
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        let output = quota_output(ProviderUsageQuota::Script(UsageResult {
+            success: true,
+            data: Some(vec![
+                usage_item(Some("five_hour"), Some(100.0)),
+                usage_item(Some("weekly_limit"), Some(0.0)),
+            ]),
+            error: None,
+        }));
+
+        let joined = provider_quota_text_lines(&output).join("\n");
+
+        assert!(joined.contains("5h: 100 USD"), "{joined}");
+        assert!(joined.contains("weekly: 0 USD"), "{joined}");
+        assert!(!joined.contains("five_hour"), "{joined}");
+        assert!(!joined.contains("weekly_limit"), "{joined}");
+    }
+
+    #[test]
     fn provider_quota_text_shows_script_failure_error() {
         let output = quota_output(ProviderUsageQuota::Script(UsageResult {
             success: false,
@@ -1179,6 +1567,69 @@ mod tests {
         .join("\n");
         assert!(expired.contains(texts::tui_quota_expired()));
         assert!(expired.contains("Error: expired"));
+    }
+
+    #[test]
+    fn provider_quota_text_shows_local_reset_time_without_changing_json() {
+        for language in [
+            crate::cli::i18n::Language::English,
+            crate::cli::i18n::Language::Chinese,
+        ] {
+            let _lang = crate::cli::i18n::use_test_language(language);
+            let resets_at = "2099-06-01T20:43:00+08:00";
+            let output = quota_output(ProviderUsageQuota::Subscription(subscription_quota(
+                CredentialStatus::Valid,
+                true,
+                vec![QuotaTier {
+                    name: "five_hour".to_string(),
+                    utilization: 0.0,
+                    resets_at: Some(resets_at.to_string()),
+                }],
+            )));
+            let local_time = chrono::DateTime::parse_from_rfc3339(resets_at)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M %:z")
+                .to_string();
+            let remaining = quota_reset_display(Some(resets_at), chrono::Utc::now())
+                .unwrap()
+                .remaining
+                .unwrap();
+            let joined = provider_quota_text_lines(&output).join("\n");
+            assert!(joined.contains(&format!(
+                "{}: 0%  {}  {}",
+                texts::tui_quota_tier_five_hour(),
+                texts::tui_quota_resets_at(&local_time),
+                texts::tui_quota_resets_in(&remaining),
+            )));
+            let json = serde_json::to_value(&output).unwrap();
+            assert_eq!(json["result"]["quota"]["tiers"][0]["resetsAt"], resets_at);
+        }
+    }
+
+    #[test]
+    fn provider_quota_text_omits_invalid_resets_and_elapsed_countdowns() {
+        let _lang = crate::cli::i18n::use_test_language(crate::cli::i18n::Language::English);
+        for resets_at in [None, Some("invalid"), Some("2000-01-01T00:00:00Z")] {
+            let output = quota_output(ProviderUsageQuota::Subscription(subscription_quota(
+                CredentialStatus::Valid,
+                true,
+                vec![QuotaTier {
+                    name: "seven_day".to_string(),
+                    utilization: 100.0,
+                    resets_at: resets_at.map(str::to_string),
+                }],
+            )));
+            let lines = provider_quota_text_lines(&output);
+            let tier = lines.iter().find(|line| line.starts_with("7d:")).unwrap();
+            assert!(tier.starts_with("7d: 100%"));
+            assert!(!tier.contains("resets in"));
+            if resets_at == Some("2000-01-01T00:00:00Z") {
+                assert!(tier.contains("reset:"));
+            } else {
+                assert_eq!(tier, "7d: 100%");
+            }
+        }
     }
 
     #[test]
@@ -1236,6 +1687,63 @@ mod tests {
         assert_eq!(target.base_url, "https://claude.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-claude"));
         assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+    }
+
+    #[test]
+    fn saved_provider_model_fetch_target_keeps_custom_user_agent() {
+        let mut provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://claude.example.com",
+                    "ANTHROPIC_API_KEY": "sk-claude"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            custom_user_agent: Some("cc-switch-model-fetch/test".to_string()),
+            is_full_url: Some(true),
+            ..Default::default()
+        });
+
+        let target = model_fetch_target(&provider, &AppType::Claude)
+            .expect("saved provider should resolve fetch target");
+
+        assert_eq!(
+            target.custom_user_agent.as_deref(),
+            Some("cc-switch-model-fetch/test")
+        );
+        assert!(target.is_full_url);
+    }
+
+    #[test]
+    fn pi_model_fetch_uses_native_api_auth_and_headers() {
+        let provider = Provider::with_id(
+            "pi-demo".to_string(),
+            "Pi Demo".to_string(),
+            json!({
+                "baseUrl": "https://pi.example.com/v1",
+                "api": "anthropic-messages",
+                "apiKey": "pi-secret",
+                "headers": { "x-client": "cc-switch" },
+                "models": [{ "id": "model-a" }]
+            }),
+            None,
+        );
+
+        let target = model_fetch_target(&provider, &AppType::Pi)
+            .expect("Pi provider should resolve fetch target");
+        assert_eq!(target.strategy, ProviderModelFetchStrategy::Anthropic);
+        assert_eq!(target.auth_value, None);
+        assert_eq!(
+            target.request_headers,
+            Some(BTreeMap::from([
+                ("x-api-key".to_string(), "pi-secret".to_string()),
+                ("x-client".to_string(), "cc-switch".to_string()),
+            ]))
+        );
     }
 
     #[test]
@@ -1354,14 +1862,15 @@ mod tests {
     fn one_off_model_fetch_target_defaults_strategy_by_app_and_trims_input() {
         let target = one_off_model_fetch_target(
             &AppType::Gemini,
-            Some("https://gemini.example.com/ "),
-            Some("sk-gemini "),
+            Some(" https://gemini.example.com/ "),
+            Some(" sk-gemini "),
             None,
         )
         .expect("one-off target should be built");
 
         assert_eq!(target.base_url, "https://gemini.example.com");
         assert_eq!(target.auth_value.as_deref(), Some("sk-gemini"));
+        assert_eq!(target.custom_user_agent, None);
         assert_eq!(target.strategy, ProviderModelFetchStrategy::GoogleApiKey);
     }
 

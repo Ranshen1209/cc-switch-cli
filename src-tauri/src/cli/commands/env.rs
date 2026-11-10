@@ -44,14 +44,14 @@ fn check_conflicts(app_type: AppType) -> Result<(), AppError> {
     if conflicts.is_empty() {
         println!(
             "\n{}",
-            success("OK No environment variable conflicts detected")
+            success("✓ No environment variable conflicts detected")
         );
     } else {
         // 显示冲突
         println!(
             "\n{}",
             error(&format!(
-                "WARN Found {} environment variable(s) that may conflict:",
+                "⚠ Found {} environment variable(s) that may conflict:",
                 conflicts.len()
             ))
         );
@@ -96,7 +96,11 @@ fn run_app_doctor(app_type: &AppType) -> Result<(), AppError> {
         AppType::Claude => check_claude_doctor(),
         AppType::Codex => check_codex_doctor(),
         AppType::Gemini => check_gemini_doctor(),
-        AppType::ClaudeDesktop | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
+        AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => {
             println!(
                 "{}",
                 info(&format!(
@@ -380,7 +384,9 @@ fn tool_status_summary(status: &ToolCheckStatus) -> String {
     match status {
         ToolCheckStatus::Ok { version } => format!("ok ({version})"),
         ToolCheckStatus::NotInstalledOrNotExecutable => "not installed".to_string(),
-        ToolCheckStatus::Error { message } => format!("error ({message})"),
+        ToolCheckStatus::VersionUnavailable { reason } => {
+            format!("installed; version unavailable ({reason})")
+        }
     }
 }
 
@@ -403,6 +409,18 @@ mod tests {
         let summary = tool_status_summary(&ToolCheckStatus::NotInstalledOrNotExecutable);
 
         assert_eq!(summary, "not installed");
+    }
+
+    #[test]
+    fn tool_status_summary_keeps_unavailable_version_distinct_from_missing_tool() {
+        let summary = tool_status_summary(&ToolCheckStatus::VersionUnavailable {
+            reason: "version check timed out after 10s".to_string(),
+        });
+
+        assert_eq!(
+            summary,
+            "installed; version unavailable (version check timed out after 10s)"
+        );
     }
 
     #[test]

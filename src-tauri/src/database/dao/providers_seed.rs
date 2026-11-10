@@ -28,15 +28,6 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         settings_config_json: r#"{"env":{}}"#,
     },
     OfficialProviderSeed {
-        id: CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
-        app_type: AppType::ClaudeDesktop,
-        name: "Claude Desktop Official",
-        website_url: "https://claude.ai/download",
-        icon: "anthropic",
-        icon_color: "#D4915D",
-        settings_config_json: r#"{"env":{}}"#,
-    },
-    OfficialProviderSeed {
         id: "codex-official",
         app_type: AppType::Codex,
         name: "OpenAI Official",
@@ -53,6 +44,15 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         icon: "gemini",
         icon_color: "#4285F4",
         settings_config_json: r#"{"env":{},"config":{}}"#,
+    },
+    OfficialProviderSeed {
+        id: CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
+        app_type: AppType::ClaudeDesktop,
+        name: "Claude Desktop Official",
+        website_url: "https://claude.ai/download",
+        icon: "anthropic",
+        icon_color: "#D4915D",
+        settings_config_json: r#"{"env":{}}"#,
     },
 ];
 
