@@ -25,7 +25,7 @@ pub(crate) fn sse_event(event: &str, data: Value) -> Bytes {
 }
 
 // ---------------------------------------------------------------------------
-// Response lifecycle (created / in_progress / completed / failed)
+// Response lifecycle (created / in_progress / completed or incomplete / failed)
 // ---------------------------------------------------------------------------
 
 /// `response.created`, wrapping a caller-built `response` object (usage/created_at differ
@@ -45,12 +45,16 @@ pub(crate) fn response_in_progress(response: &Value) -> Bytes {
     )
 }
 
-/// `response.completed`.
-pub(crate) fn response_completed(response: &Value) -> Bytes {
-    sse_event(
-        "response.completed",
-        json!({ "type": "response.completed", "response": response }),
-    )
+/// Terminal event for a finished response: `response.incomplete` when its `status` is
+/// `incomplete`, otherwise `response.completed`. Codex reads `incomplete_details` only
+/// from a `response.incomplete` event and treats `response.completed` as success.
+pub(crate) fn response_terminal(response: &Value) -> Bytes {
+    let event = if response.get("status").and_then(Value::as_str) == Some("incomplete") {
+        "response.incomplete"
+    } else {
+        "response.completed"
+    };
+    sse_event(event, json!({ "type": event, "response": response }))
 }
 
 /// `response.failed`.
@@ -223,7 +227,6 @@ pub(crate) fn reasoning_summary_text_delta(output_index: u32, item_id: &str, del
 }
 
 /// The completed reasoning item value (note: no `status` field, matching both converters).
-#[allow(dead_code)]
 pub(crate) fn reasoning_item(item_id: &str, text: &str) -> Value {
     json!({
         "id": item_id,
@@ -234,7 +237,6 @@ pub(crate) fn reasoning_item(item_id: &str, text: &str) -> Value {
 
 /// Close a reasoning item: emits `reasoning_summary_text.done` →
 /// `reasoning_summary_part.done` → `output_item.done`, and returns the completed item.
-#[allow(dead_code)]
 pub(crate) fn reasoning_close(output_index: u32, item_id: &str, text: &str) -> (Vec<Bytes>, Value) {
     let item = reasoning_item(item_id, text);
     let events = reasoning_close_with_item(output_index, item_id, text, &item, true);
@@ -319,7 +321,6 @@ pub(crate) fn function_call_arguments_done(
 }
 
 /// `response.custom_tool_call_input.delta` (Chat freeform tools only).
-#[allow(dead_code)]
 pub(crate) fn custom_tool_call_input_delta(output_index: u32, item_id: &str, delta: &str) -> Bytes {
     sse_event(
         "response.custom_tool_call_input.delta",

@@ -2,6 +2,212 @@ use super::*;
 use serde_json::json;
 use std::collections::BTreeSet;
 
+// The regular provider preview reuses the save-shape serializer so the preview
+// cannot drift from what Ctrl+S persists. That serializer is intentionally
+// allowed to clone its inputs, so rendering must prove the complete source is
+// small before calling it. These limits make redraw work independent of an
+// imported provider's total size; oversized data remains fully editable and is
+// only omitted from the passive preview.
+const PROVIDER_JSON_PREVIEW_MAX_SOURCE_BYTES: usize = 64 * 1024;
+const PROVIDER_JSON_PREVIEW_MAX_COLLECTION_ITEMS: usize = 128;
+const PROVIDER_JSON_PREVIEW_MAX_NODES: usize = 2_048;
+const PROVIDER_JSON_PREVIEW_MAX_DEPTH: usize = 16;
+const PROVIDER_PASSIVE_PARSE_MAX_BYTES: usize = 8 * 1024;
+
+struct ProviderJsonPreviewBudget {
+    bytes_left: usize,
+    nodes_left: usize,
+}
+
+impl ProviderJsonPreviewBudget {
+    fn new() -> Self {
+        Self {
+            bytes_left: PROVIDER_JSON_PREVIEW_MAX_SOURCE_BYTES,
+            nodes_left: PROVIDER_JSON_PREVIEW_MAX_NODES,
+        }
+    }
+
+    fn take_node(&mut self) -> bool {
+        if self.nodes_left == 0 {
+            return false;
+        }
+        self.nodes_left -= 1;
+        true
+    }
+
+    fn take_text(&mut self, text: &str) -> bool {
+        if !self.take_node() || text.len() > self.bytes_left {
+            return false;
+        }
+        self.bytes_left -= text.len();
+        true
+    }
+
+    fn take_json(&mut self, value: &Value) -> bool {
+        self.take_json_at_depth(value, 0)
+    }
+
+    fn take_json_at_depth(&mut self, value: &Value, depth: usize) -> bool {
+        if depth >= PROVIDER_JSON_PREVIEW_MAX_DEPTH {
+            return false;
+        }
+        if !self.take_node() {
+            return false;
+        }
+
+        match value {
+            Value::Object(map) => {
+                if map.len() > PROVIDER_JSON_PREVIEW_MAX_COLLECTION_ITEMS {
+                    return false;
+                }
+                map.iter().all(|(key, value)| {
+                    self.take_text(key) && self.take_json_at_depth(value, depth.saturating_add(1))
+                })
+            }
+            Value::Array(items) => {
+                if items.len() > PROVIDER_JSON_PREVIEW_MAX_COLLECTION_ITEMS {
+                    return false;
+                }
+                items
+                    .iter()
+                    .all(|value| self.take_json_at_depth(value, depth.saturating_add(1)))
+            }
+            Value::String(text) => {
+                if text.len() > self.bytes_left {
+                    return false;
+                }
+                self.bytes_left -= text.len();
+                true
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        }
+    }
+
+    fn take_json_collection(&mut self, values: &[Value]) -> bool {
+        values.len() <= PROVIDER_JSON_PREVIEW_MAX_COLLECTION_ITEMS
+            && values.iter().all(|value| self.take_json(value))
+    }
+}
+
+fn provider_json_preview_source_fits(
+    provider: &super::form::ProviderAddFormState,
+    common_snippet: &str,
+) -> bool {
+    let mut budget = ProviderJsonPreviewBudget::new();
+
+    // Keep this list deliberately exhaustive for string data read by
+    // `to_provider_json_value*`. Length checks are O(1); once the aggregate
+    // budget is exceeded we return before any trim, clone, parse, or merge.
+    let scalar_text = [
+        provider.id.value.as_str(),
+        provider.name.value.as_str(),
+        provider.website_url.value.as_str(),
+        provider.notes.value.as_str(),
+        provider.claude_api_key.value.as_str(),
+        provider.claude_base_url.value.as_str(),
+        provider.claude_model.value.as_str(),
+        provider.claude_haiku_model.value.as_str(),
+        provider.claude_sonnet_model.value.as_str(),
+        provider.claude_opus_model.value.as_str(),
+        provider.claude_fable_model.value.as_str(),
+        provider.claude_subagent_model.value.as_str(),
+        provider.codex_base_url.value.as_str(),
+        provider.codex_model.value.as_str(),
+        provider.codex_env_key.value.as_str(),
+        provider.codex_api_key.value.as_str(),
+        provider.custom_user_agent.value.as_str(),
+        provider.gemini_api_key.value.as_str(),
+        provider.gemini_base_url.value.as_str(),
+        provider.gemini_model.value.as_str(),
+        provider.usage_query_api_key.value.as_str(),
+        provider.usage_query_base_url.value.as_str(),
+        provider.usage_query_access_token.value.as_str(),
+        provider.usage_query_user_id.value.as_str(),
+        provider.usage_query_timeout.value.as_str(),
+        provider.usage_query_auto_interval.value.as_str(),
+        provider.usage_query_code.as_str(),
+        provider.usage_query_coding_plan_provider.value.as_str(),
+        provider.opencode_npm_package.value.as_str(),
+        provider.opencode_api_key.value.as_str(),
+        provider.opencode_base_url.value.as_str(),
+        provider.opencode_model_id.value.as_str(),
+        provider.opencode_model_name.value.as_str(),
+        provider.opencode_model_context_limit.value.as_str(),
+        provider.opencode_model_output_limit.value.as_str(),
+        provider.hermes_api_mode.as_str(),
+        provider.hermes_api_key.value.as_str(),
+        provider.hermes_base_url.value.as_str(),
+        provider.hermes_model_input.value.as_str(),
+        provider.hermes_rate_limit_delay.value.as_str(),
+    ];
+    if !scalar_text.into_iter().all(|text| budget.take_text(text)) {
+        return false;
+    }
+
+    for text in [
+        provider.copy_source_id.as_deref(),
+        provider.codex_oauth_account_id.as_deref(),
+        provider.opencode_model_original_id(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !budget.take_text(text) {
+            return false;
+        }
+    }
+
+    for text in [
+        provider.codex_chat_reasoning.thinking_param.as_deref(),
+        provider.codex_chat_reasoning.effort_param.as_deref(),
+        provider.codex_chat_reasoning.effort_value_mode.as_deref(),
+        provider.codex_chat_reasoning.output_format.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !budget.take_text(text) {
+            return false;
+        }
+    }
+
+    if provider.codex_model_catalog.len() > PROVIDER_JSON_PREVIEW_MAX_COLLECTION_ITEMS {
+        return false;
+    }
+    for row in &provider.codex_model_catalog {
+        if !budget.take_text(&row.model)
+            || !budget.take_text(&row.display_name)
+            || !budget.take_text(&row.context_window)
+        {
+            return false;
+        }
+    }
+
+    if provider.local_proxy_header_overrides.len() > PROVIDER_JSON_PREVIEW_MAX_COLLECTION_ITEMS {
+        return false;
+    }
+    for (key, value) in &provider.local_proxy_header_overrides {
+        if !budget.take_text(key) || !budget.take_text(value) {
+            return false;
+        }
+    }
+
+    if !budget.take_json(&provider.extra)
+        || provider
+            .local_proxy_body_override
+            .as_ref()
+            .is_some_and(|value| !budget.take_json(value))
+        || !budget.take_json_collection(&provider.openclaw_models)
+        || !budget.take_json_collection(&provider.hermes_models)
+    {
+        return false;
+    }
+
+    // The save projection trims the snippet before it checks app support or
+    // the form toggle, so the render guard must always account for it too.
+    budget.take_text(common_snippet)
+}
+
 fn provider_api_format_label(provider: &super::form::ProviderAddFormState) -> String {
     let api_format = provider.claude_api_format.as_str();
     if matches!(provider.app_type, AppType::Codex) {
@@ -11,12 +217,19 @@ fn provider_api_format_label(provider: &super::form::ProviderAddFormState) -> St
     }
 }
 
-fn should_redact_provider_field(
-    provider: &super::form::ProviderAddFormState,
-    field: ProviderAddField,
-) -> bool {
-    matches!(provider.app_type, AppType::OpenClaw)
-        && matches!(field, ProviderAddField::OpenCodeApiKey)
+fn codex_oauth_account_for_display(provider: &super::form::ProviderAddFormState) -> String {
+    provider
+        .codex_oauth_account_id
+        .as_deref()
+        .map(bounded_trimmed_text_for_display)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if provider.is_codex_official_provider() {
+                texts::tui_codex_native_login().to_string()
+            } else {
+                texts::tui_managed_accounts_follow_default().to_string()
+            }
+        })
 }
 
 fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option<Value> {
@@ -25,15 +238,16 @@ fn common_json_preview_value(app_type: &AppType, common_snippet: &str) -> Option
     }
 
     match app_type {
-        AppType::Claude => serde_json::from_str::<Value>(common_snippet).ok(),
         AppType::Gemini => serde_json::from_str::<Value>(common_snippet)
             .ok()
             .map(|env| json!({ "env": env })),
-        AppType::ClaudeDesktop
+        AppType::Claude
         | AppType::Codex
         | AppType::OpenCode
         | AppType::Hermes
-        | AppType::OpenClaw => None,
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => None,
     }
     .filter(Value::is_object)
 }
@@ -179,6 +393,14 @@ pub(crate) fn render_provider_add_form(
         return;
     }
 
+    if matches!(
+        provider.page,
+        super::form::ProviderFormPage::LocalProxySettings
+    ) {
+        render_local_proxy_settings_form(frame, app, provider, area, theme);
+        return;
+    }
+
     if matches!(provider.page, super::form::ProviderFormPage::UsageQuery) {
         render_usage_query_form(frame, app, provider, area, theme);
         return;
@@ -225,7 +447,8 @@ pub(crate) fn render_provider_add_form(
     let title = match &provider.mode {
         super::form::FormMode::Add => texts::tui_provider_add_title().to_string(),
         super::form::FormMode::Edit { .. } => {
-            texts::tui_provider_edit_title(provider.name.value.trim())
+            let name = bounded_trimmed_text_for_display(&provider.name.value);
+            texts::tui_provider_edit_title(&name)
         }
     };
     let outer = Block::default()
@@ -236,72 +459,34 @@ pub(crate) fn render_provider_add_form(
     frame.render_widget(outer.clone(), area);
     let inner = outer.inner(area);
 
-    let template_height = if matches!(provider.mode, super::form::FormMode::Add) {
-        3
-    } else {
-        0
-    };
+    // The template used to own a bordered row here; it is a field row inside
+    // the table now, so the body is just the key bar plus the fields/preview.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(template_height),
-            Constraint::Min(0),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
-    let selected_field_for_keys = provider
-        .fields()
-        .get(
-            provider
-                .field_idx
-                .min(provider.fields().len().saturating_sub(1)),
-        )
-        .copied();
+    let fields = provider.fields();
+    let selected_idx = match provider.text_edit_target() {
+        Some(super::form::ProviderTextField::Main(field)) => fields
+            .iter()
+            .position(|candidate| *candidate == field)
+            .unwrap_or(provider.field_idx.min(fields.len().saturating_sub(1))),
+        _ => provider.field_idx.min(fields.len().saturating_sub(1)),
+    };
+    let selected_field_for_keys = fields.get(selected_idx).copied();
 
     render_key_bar(
         frame,
         chunks[0],
         theme,
-        &add_form_key_items(provider.focus, provider.editing, selected_field_for_keys),
+        &add_form_key_items(
+            provider.focus,
+            provider.is_editing_main_text(),
+            selected_field_for_keys,
+        ),
     );
 
-    if matches!(provider.mode, super::form::FormMode::Add) {
-        let labels = provider.template_labels();
-        render_form_template_chips(
-            frame,
-            &labels,
-            provider.template_idx,
-            matches!(provider.focus, FormFocus::Templates),
-            chunks[1],
-            theme,
-        );
-    }
-
-    // Body: fields + JSON preview
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(chunks[2]);
-
-    // Fields
-    let fields_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(focus_block_style(
-            matches!(provider.focus, FormFocus::Fields),
-            theme,
-        ))
-        .title(format!(" {} ", texts::tui_form_fields_title()));
-    frame.render_widget(fields_block.clone(), body[0]);
-    let fields_inner = fields_block.inner(body[0]);
-
-    let fields_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![Constraint::Min(0), Constraint::Length(3)])
-        .split(fields_inner);
-
-    let fields = provider.fields();
     let rows_data = fields
         .iter()
         .map(|field| provider_field_label_and_value(provider, *field))
@@ -317,38 +502,152 @@ pub(crate) fn render_provider_add_form(
         1,
     );
 
+    let split = form_can_split(chunks[1].width, label_col_width, theme);
+    let panes = split.then(|| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(chunks[1])
+    });
+    let fields_area = if split {
+        Some(panes.as_ref().expect("split panes")[0])
+    } else if !matches!(provider.focus, FormFocus::JsonPreview) {
+        Some(chunks[1])
+    } else {
+        None
+    };
+    let preview_area = if split {
+        Some(panes.as_ref().expect("split panes")[1])
+    } else if matches!(provider.focus, FormFocus::JsonPreview) {
+        Some(chunks[1])
+    } else {
+        None
+    };
+
+    if let Some(fields_area) = fields_area {
+        render_provider_inline_fields(
+            frame,
+            provider,
+            &fields,
+            &rows_data,
+            selected_idx,
+            fields_area,
+            theme,
+        );
+    }
+    if let Some(preview_area) = preview_area {
+        render_provider_preview(frame, provider, data, preview_area, !split, theme);
+    }
+}
+
+fn render_provider_inline_fields(
+    frame: &mut Frame<'_>,
+    provider: &super::form::ProviderAddFormState,
+    fields: &[ProviderAddField],
+    rows_data: &[(String, String)],
+    selected_idx: usize,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let fields_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(focus_block_style(
+            matches!(provider.focus, FormFocus::Fields),
+            theme,
+        ))
+        .title(format!(" {} ", texts::tui_form_fields_title()));
+    frame.render_widget(fields_block.clone(), area);
+    let table_area = fields_block.inner(area);
+    let raw_label_width = field_label_column_width(
+        fields
+            .iter()
+            .zip(rows_data.iter())
+            .filter(|(field, _)| !provider_field_is_divider(**field))
+            .map(|(_, row)| row.0.as_str())
+            .chain(std::iter::once(texts::tui_header_field())),
+        1,
+    );
+    let label_col_width = raw_label_width.min(
+        table_area
+            .width
+            .saturating_sub(FORM_VALUE_MIN_WIDTH)
+            .saturating_sub(1),
+    );
+    let value_width = form_value_width(table_area.width, label_col_width, theme);
+    let editor_active = matches!(provider.focus, FormFocus::Fields);
+    let mut cursor_x = None;
+    let mut row_heights = Vec::with_capacity(fields.len());
+    let mut rows = Vec::with_capacity(fields.len());
+
+    for (idx, (field, (label, value))) in fields.iter().zip(rows_data.iter()).enumerate() {
+        if provider_field_is_divider(*field) {
+            row_heights.push(1);
+            rows.push(
+                Row::new(vec![
+                    Cell::from(cell_pad(&"┄".repeat(40))),
+                    Cell::from("┄".repeat(200)),
+                ])
+                .style(Style::default().fg(theme.dim)),
+            );
+            continue;
+        }
+
+        if matches!(*field, ProviderAddField::Template) {
+            let labels = provider.template_labels();
+            let spans = template_field_value_spans(
+                &labels,
+                provider.template_idx,
+                editor_active && idx == selected_idx,
+                value_width,
+                theme,
+            );
+            row_heights.push(1);
+            rows.push(Row::new(vec![
+                Cell::from(cell_pad(label)),
+                Cell::from(Line::from(spans)),
+            ]));
+            continue;
+        }
+
+        let editing = editor_active && provider.is_editing_main_field(*field);
+        let display = if editing {
+            provider.input(*field).map_or_else(
+                || truncated_value_cell(value, table_area.width, label_col_width, theme),
+                |input| {
+                    let prefix = provider_full_url_value_prefix(provider, *field);
+                    let prefix_width = prefix
+                        .as_deref()
+                        .map(unicode_width::UnicodeWidthStr::width)
+                        .unwrap_or(0) as u16;
+                    let (visible, x) =
+                        inline_input_window(input, value_width.saturating_sub(prefix_width));
+                    if idx == selected_idx {
+                        cursor_x = Some(prefix_width.saturating_add(x));
+                    }
+                    format!("{}{}", prefix.unwrap_or_default(), visible)
+                },
+            )
+        } else {
+            truncated_value_cell(value, table_area.width, label_col_width, theme)
+        };
+        let error = provider.main_field_error(*field);
+        let height = inline_row_height(error, value_width);
+        row_heights.push(height);
+        rows.push(
+            Row::new(vec![
+                Cell::from(cell_pad(label)),
+                inline_field_cell(display, error, value_width, theme),
+            ])
+            .height(height),
+        );
+    }
+
     let header = Row::new(vec![
         Cell::from(cell_pad(texts::tui_header_field())),
         Cell::from(texts::tui_header_value()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
-
-    let table_area = fields_chunks[0];
-    let rows = fields
-        .iter()
-        .zip(rows_data.iter())
-        .map(|(field, (label, value))| {
-            if provider_field_is_divider(*field) {
-                let dashes_left = "┄".repeat(40);
-                let dashes_right = "┄".repeat(200);
-                Row::new(vec![
-                    Cell::from(cell_pad(&dashes_left)),
-                    Cell::from(dashes_right),
-                ])
-                .style(Style::default().fg(theme.dim))
-            } else {
-                Row::new(vec![
-                    Cell::from(cell_pad(label)),
-                    Cell::from(truncated_value_cell(
-                        value,
-                        table_area.width,
-                        label_col_width,
-                        theme,
-                    )),
-                ])
-            }
-        });
-
     let table = Table::new(
         rows,
         [Constraint::Length(label_col_width), Constraint::Min(10)],
@@ -357,96 +656,72 @@ pub(crate) fn render_provider_add_form(
     .block(Block::default().borders(Borders::NONE))
     .row_highlight_style(selection_style(theme))
     .highlight_symbol(highlight_symbol(theme));
-
     let mut state = TableState::default();
     if !fields.is_empty() {
-        state.select(Some(provider.field_idx.min(fields.len() - 1)));
+        state.select(Some(selected_idx.min(fields.len() - 1)));
     }
-    let editor_area = fields_chunks[1];
     frame.render_stateful_widget(table, table_area, &mut state);
-
-    // Editor / help line
-    let editor_active = matches!(provider.focus, FormFocus::Fields) && provider.editing;
-    let editor_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(focus_block_style(editor_active, theme))
-        .title(if editor_active {
-            texts::tui_form_editing_title()
-        } else {
-            texts::tui_form_input_title()
-        });
-    frame.render_widget(editor_block.clone(), editor_area);
-    let editor_inner = editor_block.inner(editor_area);
-
-    let selected = fields
-        .get(provider.field_idx.min(fields.len().saturating_sub(1)))
-        .copied();
-    if let Some(field) = selected {
-        if let Some(input) = provider.input(field) {
-            if !editor_active && should_redact_provider_field(provider, field) {
-                frame.render_widget(
-                    Paragraph::new(Line::raw(redacted_secret_placeholder()))
-                        .wrap(Wrap { trim: false }),
-                    editor_inner,
-                );
-            } else {
-                let (visible, cursor_x) =
-                    visible_text_window(&input.value, input.cursor, editor_inner.width as usize);
-                frame.render_widget(
-                    Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
-                    editor_inner,
-                );
-
-                if editor_active && !app.overlay.is_active() {
-                    let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
-                    let y = editor_inner.y;
-                    frame.set_cursor_position((x, y));
-                }
-            }
-        } else {
-            let (line, _cursor_col) =
-                provider_field_editor_line(provider, selected, editor_inner.width as usize);
-            frame.render_widget(
-                Paragraph::new(line).wrap(Wrap { trim: false }),
-                editor_inner,
-            );
-        }
-    } else {
-        frame.render_widget(
-            Paragraph::new(Line::raw("")).wrap(Wrap { trim: false }),
-            editor_inner,
+    if let Some(cursor_x) = cursor_x {
+        set_inline_table_cursor(
+            frame,
+            table_area,
+            label_col_width,
+            selected_idx,
+            state.offset(),
+            &row_heights,
+            cursor_x,
+            theme,
         );
     }
+}
 
+fn render_provider_preview(
+    frame: &mut Frame<'_>,
+    provider: &super::form::ProviderAddFormState,
+    data: &UiData,
+    area: Rect,
+    compact: bool,
+    theme: &super::theme::Theme,
+) {
     if matches!(provider.app_type, AppType::Codex) {
-        let provider_json_value = provider.to_provider_json_value();
-        let settings_value = provider_json_value
-            .get("settingsConfig")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        if compact {
+            match provider.codex_preview_section {
+                CodexPreviewSection::Auth => {
+                    let auth_text = codex_auth_preview_text(provider);
+                    render_form_text_preview(
+                        frame,
+                        texts::tui_codex_auth_json_title(),
+                        &auth_text,
+                        provider.codex_auth_scroll,
+                        true,
+                        area,
+                        theme,
+                    );
+                }
+                CodexPreviewSection::Config => {
+                    let config_text =
+                        codex_config_preview_text(provider, &data.config.common_snippet);
+                    render_form_text_preview(
+                        frame,
+                        texts::tui_codex_config_toml_title(),
+                        &config_text,
+                        provider.codex_config_scroll,
+                        true,
+                        area,
+                        theme,
+                    );
+                }
+            }
+            return;
+        }
 
-        let auth_value = settings_value
-            .get("auth")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let auth_value = if auth_value.is_object() {
-            auth_value
-        } else {
-            Value::Object(serde_json::Map::new())
-        };
-        let auth_text =
-            serde_json::to_string_pretty(&auth_value).unwrap_or_else(|_| "{}".to_string());
-
-        let config_text = settings_value
-            .get("config")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
+        let auth_text = codex_auth_preview_text(provider);
+        let config_text = codex_config_preview_text(provider, &data.config.common_snippet);
 
         let preview = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(body[1]);
+            .split(area);
 
         let preview_active = matches!(provider.focus, FormFocus::JsonPreview);
         let auth_active =
@@ -466,7 +741,7 @@ pub(crate) fn render_provider_add_form(
         render_form_text_preview(
             frame,
             texts::tui_codex_config_toml_title(),
-            config_text,
+            &config_text,
             provider.codex_config_scroll,
             config_active,
             preview[1],
@@ -474,18 +749,30 @@ pub(crate) fn render_provider_add_form(
         );
     } else {
         // JSON Preview (settingsConfig only, matching upstream UI)
+        if !provider_json_preview_source_fits(provider, &data.config.common_snippet) {
+            render_form_json_preview_with_title(
+                frame,
+                texts::tui_provider_config_title(),
+                texts::tui_preview_omitted_too_large(),
+                0,
+                matches!(provider.focus, FormFocus::JsonPreview),
+                area,
+                theme,
+            );
+            return;
+        }
+
+        // Schema parity matters here, so reuse the save projection only after
+        // the complete source has passed the hard budget above. In particular,
+        // no unbounded secret, URL, nested object, or common snippet reaches
+        // this allocating path during a redraw.
         let provider_json_value = provider
             .to_provider_json_value_with_common_config(&data.config.common_snippet)
             .unwrap_or_else(|_| provider.to_provider_json_value());
         let json_value = provider_json_value
             .get("settingsConfig")
-            .cloned()
+            .map(bounded_json_preview)
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let json_value = if matches!(provider.app_type, AppType::OpenClaw) {
-            redact_sensitive_json(&json_value)
-        } else {
-            json_value
-        };
         let json_text =
             serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "{}".to_string());
         let highlighted_lines = common_json_preview_highlight_lines(
@@ -495,16 +782,79 @@ pub(crate) fn render_provider_add_form(
             &data.config.common_snippet,
             provider.include_common_config,
         );
-        render_form_json_preview_with_highlights(
+        render_form_json_preview_with_highlights_and_title(
             frame,
             &json_text,
             provider.json_scroll,
             matches!(provider.focus, FormFocus::JsonPreview),
-            body[1],
+            area,
             theme,
-            &highlighted_lines,
+            (texts::tui_provider_config_title(), &highlighted_lines),
         );
     }
+}
+
+pub(crate) fn codex_auth_preview_text(provider: &super::form::ProviderAddFormState) -> String {
+    let mut auth_value = provider
+        .extra
+        .get("settingsConfig")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("auth"))
+        .filter(|auth| auth.is_object())
+        .map(bounded_json_preview)
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+
+    if !provider.is_codex_official_provider() {
+        let api_key = bounded_trimmed_text_for_display(&provider.codex_api_key.value);
+        if let Value::Object(auth) = &mut auth_value {
+            if !api_key.is_empty() {
+                auth.insert("OPENAI_API_KEY".to_string(), Value::String(api_key));
+            } else {
+                auth.remove("OPENAI_API_KEY");
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&auth_value).unwrap_or_else(|_| "{}".to_string())
+}
+
+pub(crate) fn codex_config_preview_text(
+    provider: &super::form::ProviderAddFormState,
+    common_snippet: &str,
+) -> String {
+    const MAX_PREVIEW_CATALOG_ROWS: usize = 128;
+
+    let scalar_bytes = [
+        provider.existing_codex_config_text(),
+        provider.id.value.as_str(),
+        provider.name.value.as_str(),
+        provider.codex_base_url.value.as_str(),
+        provider.codex_model.value.as_str(),
+        provider.codex_env_key.value.as_str(),
+        if provider.include_common_config {
+            common_snippet
+        } else {
+            ""
+        },
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, text| total.checked_add(text.len()));
+    let catalog_is_too_large = provider.codex_local_routing_enabled()
+        && (provider.codex_model_catalog.len() > MAX_PREVIEW_CATALOG_ROWS
+            || provider
+                .codex_model_catalog
+                .iter()
+                .try_fold(0usize, |total, row| total.checked_add(row.model.len()))
+                .is_none_or(|bytes| bytes > TOML_PREVIEW_MAX_INPUT_BYTES));
+
+    if scalar_bytes.is_none_or(|bytes| bytes > TOML_PREVIEW_MAX_INPUT_BYTES) || catalog_is_too_large
+    {
+        return texts::tui_preview_omitted_too_large().to_string();
+    }
+    let config = provider
+        .effective_codex_config_text_with_common_config(common_snippet)
+        .unwrap_or_else(|_| provider.effective_codex_config_text());
+    bounded_toml_preview(&config)
 }
 
 struct QuickConfigPage<'a> {
@@ -596,6 +946,121 @@ fn render_quick_config_form(
     frame.render_stateful_widget(table, fields_inner, &mut state);
 }
 
+fn render_local_proxy_settings_form(
+    frame: &mut Frame<'_>,
+    app: &App,
+    provider: &super::form::ProviderAddFormState,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(format!(" {} ", texts::tui_label_local_proxy_settings()));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let fields = provider.local_proxy_settings_fields();
+    let selected = provider.selected_local_proxy_settings_field();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    render_key_bar(
+        frame,
+        chunks[0],
+        theme,
+        &local_proxy_settings_form_key_items(selected),
+    );
+
+    let fields_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(focus_block_style(true, theme))
+        .title(format!(" {} ", texts::tui_form_fields_title()));
+    frame.render_widget(fields_block.clone(), chunks[1]);
+    let fields_inner = fields_block.inner(chunks[1]);
+    let rows_data = fields
+        .iter()
+        .map(|field| local_proxy_settings_field_label_and_value(provider, *field))
+        .collect::<Vec<_>>();
+    let label_col_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .chain(std::iter::once(texts::tui_header_field())),
+        1,
+    );
+    let header = Row::new(vec![
+        Cell::from(cell_pad(texts::tui_header_field())),
+        Cell::from(texts::tui_header_value()),
+    ])
+    .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
+    let highlight_width = unicode_width::UnicodeWidthStr::width(highlight_symbol(theme)) as u16;
+    let value_width = fields_inner
+        .width
+        .saturating_sub(highlight_width)
+        .saturating_sub(label_col_width)
+        .saturating_sub(1);
+    let rows = fields.iter().zip(rows_data.iter()).map(|(field, row)| {
+        let value_style = if matches!(field, super::form::LocalProxySettingsField::UserAgent)
+            && !provider.custom_user_agent_is_valid()
+        {
+            Style::default().fg(theme.err)
+        } else {
+            Style::default()
+        };
+        let value = truncate_to_display_width(&row.1, value_width);
+        Row::new(vec![
+            Cell::from(cell_pad(&row.0)),
+            Cell::from(value).style(value_style),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [Constraint::Length(label_col_width), Constraint::Min(8)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::NONE))
+    .row_highlight_style(selection_style(theme))
+    .highlight_symbol(highlight_symbol(theme));
+    let mut state = TableState::default();
+    state.select(Some(
+        provider
+            .local_proxy_settings_field_idx
+            .min(fields.len().saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(table, fields_inner, &mut state);
+}
+
+pub(crate) fn local_proxy_settings_field_label_and_value(
+    provider: &super::form::ProviderAddFormState,
+    field: super::form::LocalProxySettingsField,
+) -> (String, String) {
+    match field {
+        super::form::LocalProxySettingsField::UserAgent => {
+            let value = bounded_trimmed_text_for_display(&provider.custom_user_agent.value);
+            (
+                texts::tui_label_custom_user_agent().to_string(),
+                if value.is_empty() {
+                    texts::tui_na().to_string()
+                } else {
+                    value
+                },
+            )
+        }
+        super::form::LocalProxySettingsField::HeaderOverrides => (
+            texts::tui_label_local_proxy_header_overrides().to_string(),
+            provider.local_proxy_header_overrides_summary(),
+        ),
+        super::form::LocalProxySettingsField::BodyOverrides => (
+            texts::tui_label_local_proxy_body_overrides().to_string(),
+            provider.local_proxy_body_override_summary(),
+        ),
+    }
+}
+
 fn render_codex_local_routing_form(
     frame: &mut Frame<'_>,
     app: &App,
@@ -603,7 +1068,8 @@ fn render_codex_local_routing_form(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let title = texts::tui_codex_local_routing_title(provider.name.value.trim());
+    let name = bounded_trimmed_text_for_display(&provider.name.value);
+    let title = texts::tui_codex_local_routing_title(&name);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -754,6 +1220,8 @@ fn render_codex_model_catalog_inline(
         Cell::from(cell_pad(texts::tui_codex_model_catalog_model_header())),
         Cell::from(cell_pad(texts::tui_codex_model_catalog_display_header())),
         Cell::from(cell_pad(texts::tui_codex_model_catalog_context_header())),
+        Cell::from(cell_pad(texts::tui_codex_reasoning_levels_header())),
+        Cell::from(cell_pad(texts::tui_codex_default_reasoning_header())),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -761,39 +1229,59 @@ fn render_codex_model_catalog_inline(
         .codex_model_catalog_idx
         .min(provider.codex_model_catalog.len().saturating_sub(1));
     let selected_field = provider.codex_model_catalog_field;
-    let rows = provider
-        .codex_model_catalog
-        .iter()
-        .enumerate()
-        .map(|(idx, row)| {
-            let context_window =
-                super::form::codex_model_catalog_context_window_label(&row.context_window);
-            let cell = |value: &str, field: super::form::CodexModelCatalogField| {
-                if active {
-                    codex_model_catalog_cell(value, idx, selected_idx, field, selected_field, theme)
-                } else {
-                    Cell::from(cell_pad(value))
-                }
-            };
-            Row::new(vec![
-                cell(&row.model, super::form::CodexModelCatalogField::Model),
-                cell(
-                    &row.display_name,
-                    super::form::CodexModelCatalogField::DisplayName,
-                ),
-                cell(
-                    &context_window,
-                    super::form::CodexModelCatalogField::ContextWindow,
-                ),
-            ])
-        });
+    let row_capacity = inner.height.saturating_sub(1) as usize;
+    let visible = visible_selection_window(
+        provider.codex_model_catalog.len(),
+        selected_idx,
+        row_capacity.max(1),
+    );
+    let rows = visible.map(|idx| {
+        let row = &provider.codex_model_catalog[idx];
+        let model = bounded_trimmed_text_for_display(&row.model);
+        let display_name = bounded_trimmed_text_for_display(&row.display_name);
+        let context_window = codex_model_catalog_context_for_display(&row.context_window);
+        let levels = codex_model_catalog_reasoning_for_display(row);
+        let default = if row.default_reasoning_level.is_empty() {
+            texts::tui_codex_reasoning_auto().to_string()
+        } else {
+            bounded_trimmed_text_for_display(&row.default_reasoning_level)
+        };
+        let cell = |value: &str, field: super::form::CodexModelCatalogField| {
+            if active {
+                codex_model_catalog_cell(value, idx, selected_idx, field, selected_field, theme)
+            } else {
+                Cell::from(cell_pad(value))
+            }
+        };
+        Row::new(vec![
+            cell(&model, super::form::CodexModelCatalogField::Model),
+            cell(
+                &display_name,
+                super::form::CodexModelCatalogField::DisplayName,
+            ),
+            cell(
+                &context_window,
+                super::form::CodexModelCatalogField::ContextWindow,
+            ),
+            cell(
+                &levels,
+                super::form::CodexModelCatalogField::ReasoningLevels,
+            ),
+            cell(
+                &default,
+                super::form::CodexModelCatalogField::DefaultReasoningLevel,
+            ),
+        ])
+    });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(45),
-            Constraint::Percentage(35),
+            Constraint::Percentage(24),
             Constraint::Percentage(20),
+            Constraint::Length(9),
+            Constraint::Fill(1),
+            Constraint::Length(8),
         ],
     )
     .header(header)
@@ -808,7 +1296,8 @@ fn render_codex_model_catalog_form(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let title = texts::tui_codex_model_catalog_title(provider.name.value.trim());
+    let name = bounded_trimmed_text_for_display(&provider.name.value);
+    let title = texts::tui_codex_model_catalog_title(&name);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -851,6 +1340,8 @@ fn render_codex_model_catalog_form(
         Cell::from(cell_pad(texts::tui_codex_model_catalog_model_header())),
         Cell::from(texts::tui_codex_model_catalog_display_header()),
         Cell::from(texts::tui_codex_model_catalog_context_header()),
+        Cell::from(cell_pad(texts::tui_codex_reasoning_levels_header())),
+        Cell::from(cell_pad(texts::tui_codex_default_reasoning_header())),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
@@ -858,53 +1349,100 @@ fn render_codex_model_catalog_form(
         .codex_model_catalog_idx
         .min(provider.codex_model_catalog.len().saturating_sub(1));
     let selected_field = provider.codex_model_catalog_field;
-    let rows = provider
-        .codex_model_catalog
-        .iter()
-        .enumerate()
-        .map(|(idx, row)| {
-            let context_window =
-                super::form::codex_model_catalog_context_window_label(&row.context_window);
-            Row::new(vec![
-                codex_model_catalog_cell(
-                    &row.model,
-                    idx,
-                    selected_idx,
-                    super::form::CodexModelCatalogField::Model,
-                    selected_field,
-                    theme,
-                ),
-                codex_model_catalog_cell(
-                    &row.display_name,
-                    idx,
-                    selected_idx,
-                    super::form::CodexModelCatalogField::DisplayName,
-                    selected_field,
-                    theme,
-                ),
-                codex_model_catalog_cell(
-                    &context_window,
-                    idx,
-                    selected_idx,
-                    super::form::CodexModelCatalogField::ContextWindow,
-                    selected_field,
-                    theme,
-                ),
-            ])
-        });
+    let row_capacity = table_area.height.saturating_sub(1) as usize;
+    let visible = visible_selection_window(
+        provider.codex_model_catalog.len(),
+        selected_idx,
+        row_capacity.max(1),
+    );
+    let rows = visible.map(|idx| {
+        let row = &provider.codex_model_catalog[idx];
+        let model = bounded_trimmed_text_for_display(&row.model);
+        let display_name = bounded_trimmed_text_for_display(&row.display_name);
+        let context_window = codex_model_catalog_context_for_display(&row.context_window);
+        let levels = codex_model_catalog_reasoning_for_display(row);
+        let default = if row.default_reasoning_level.is_empty() {
+            texts::tui_codex_reasoning_auto().to_string()
+        } else {
+            bounded_trimmed_text_for_display(&row.default_reasoning_level)
+        };
+        Row::new(vec![
+            codex_model_catalog_cell(
+                &model,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::Model,
+                selected_field,
+                theme,
+            ),
+            codex_model_catalog_cell(
+                &display_name,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::DisplayName,
+                selected_field,
+                theme,
+            ),
+            codex_model_catalog_cell(
+                &context_window,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::ContextWindow,
+                selected_field,
+                theme,
+            ),
+            codex_model_catalog_cell(
+                &levels,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::ReasoningLevels,
+                selected_field,
+                theme,
+            ),
+            codex_model_catalog_cell(
+                &default,
+                idx,
+                selected_idx,
+                super::form::CodexModelCatalogField::DefaultReasoningLevel,
+                selected_field,
+                theme,
+            ),
+        ])
+    });
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(45),
-            Constraint::Percentage(35),
+            Constraint::Percentage(24),
             Constraint::Percentage(20),
+            Constraint::Length(9),
+            Constraint::Fill(1),
+            Constraint::Length(8),
         ],
     )
     .header(header)
     .block(Block::default().borders(Borders::NONE));
 
     frame.render_widget(table, table_area);
+}
+
+fn codex_model_catalog_reasoning_for_display(row: &super::form::CodexModelCatalogRow) -> String {
+    if row.reasoning_levels.is_empty() {
+        return "-".to_string();
+    }
+    row.reasoning_levels
+        .iter()
+        .take(super::form::CODEX_REASONING_LEVELS.len())
+        .map(|level| bounded_trimmed_text_for_display(level))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn codex_model_catalog_context_for_display(raw: &str) -> String {
+    if raw.len() > PROVIDER_PASSIVE_PARSE_MAX_BYTES {
+        return bounded_trimmed_text_for_display(raw);
+    }
+    bounded_trimmed_text_for_display(&super::form::codex_model_catalog_context_window_label(raw))
 }
 
 fn codex_model_catalog_cell<'a>(
@@ -951,7 +1489,8 @@ fn render_usage_query_form(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let title = texts::tui_usage_query_title(provider.name.value.trim());
+    let name = bounded_trimmed_text_for_display(&provider.name.value);
+    let title = texts::tui_usage_query_title(&name);
     let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -961,21 +1500,24 @@ fn render_usage_query_form(
     let inner = outer.inner(area);
 
     let fields = provider.usage_query_table_fields();
-    let selected_field = fields
-        .get(
-            provider
-                .usage_query_field_idx
-                .min(fields.len().saturating_sub(1)),
-        )
-        .copied();
+    let selected_idx = match provider.text_edit_target() {
+        Some(super::form::ProviderTextField::UsageQuery(field)) => fields
+            .iter()
+            .position(|candidate| *candidate == field)
+            .unwrap_or(
+                provider
+                    .usage_query_field_idx
+                    .min(fields.len().saturating_sub(1)),
+            ),
+        _ => provider
+            .usage_query_field_idx
+            .min(fields.len().saturating_sub(1)),
+    };
+    let selected_field = fields.get(selected_idx).copied();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(inner);
 
     render_key_bar(
@@ -984,27 +1526,11 @@ fn render_usage_query_form(
         theme,
         &usage_query_form_key_items(
             provider.focus,
-            provider.usage_query_editing,
+            provider.is_editing_usage_query_text(),
             selected_field,
             provider.usage_query_extractor_available(),
         ),
     );
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(chunks[1]);
-
-    let fields_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(focus_block_style(
-            matches!(provider.focus, FormFocus::Fields),
-            theme,
-        ))
-        .title(format!(" {} ", texts::tui_form_fields_title()));
-    frame.render_widget(fields_block.clone(), body[0]);
-    let fields_inner = fields_block.inner(body[0]);
 
     let rows_data = fields
         .iter()
@@ -1019,24 +1545,118 @@ fn render_usage_query_form(
         1,
     );
 
+    let split = form_can_split(chunks[1].width, label_col_width, theme);
+    let panes = split.then(|| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(chunks[1])
+    });
+    if split || matches!(provider.focus, FormFocus::Fields) {
+        let fields_area = if split {
+            panes.as_ref().expect("split panes")[0]
+        } else {
+            chunks[1]
+        };
+        render_usage_query_inline_fields(
+            frame,
+            provider,
+            &fields,
+            &rows_data,
+            selected_idx,
+            fields_area,
+            theme,
+        );
+    }
+    if split {
+        render_usage_query_side_panel(
+            frame,
+            provider,
+            panes.as_ref().expect("split panes")[1],
+            theme,
+        );
+    } else {
+        match provider.focus {
+            FormFocus::JsonPreview => {
+                render_usage_query_script_preview(frame, provider, true, chunks[1], theme)
+            }
+            FormFocus::Content => render_usage_query_script_help(frame, true, chunks[1], theme),
+            FormFocus::Templates | FormFocus::Fields => {}
+        }
+    }
+}
+
+fn render_usage_query_inline_fields(
+    frame: &mut Frame<'_>,
+    provider: &super::form::ProviderAddFormState,
+    fields: &[super::form::UsageQueryField],
+    rows_data: &[(String, String)],
+    selected_idx: usize,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(focus_block_style(
+            matches!(provider.focus, FormFocus::Fields),
+            theme,
+        ))
+        .title(format!(" {} ", texts::tui_form_fields_title()));
+    frame.render_widget(block.clone(), area);
+    let table_area = block.inner(area);
+    let raw_label_width = field_label_column_width(
+        rows_data
+            .iter()
+            .map(|row| row.0.as_str())
+            .chain(std::iter::once(texts::tui_header_field())),
+        1,
+    );
+    let label_col_width = raw_label_width.min(
+        table_area
+            .width
+            .saturating_sub(FORM_VALUE_MIN_WIDTH)
+            .saturating_sub(1),
+    );
+    let value_width = form_value_width(table_area.width, label_col_width, theme);
+    let mut cursor_x = None;
+    let mut row_heights = Vec::with_capacity(fields.len());
+    let rows = fields
+        .iter()
+        .zip(rows_data.iter())
+        .enumerate()
+        .map(|(idx, (field, (label, value)))| {
+            let editing = matches!(provider.focus, FormFocus::Fields)
+                && provider.is_editing_usage_query_field(*field);
+            let display = if editing {
+                provider.usage_query_input(*field).map_or_else(
+                    || truncated_value_cell(value, table_area.width, label_col_width, theme),
+                    |input| {
+                        let (visible, x) = inline_input_window(input, value_width);
+                        if idx == selected_idx {
+                            cursor_x = Some(x);
+                        }
+                        visible
+                    },
+                )
+            } else {
+                truncated_value_cell(value, table_area.width, label_col_width, theme)
+            };
+            let error = provider.usage_query_field_error(*field);
+            let height = inline_row_height(error, value_width);
+            row_heights.push(height);
+            Row::new(vec![
+                Cell::from(cell_pad(label)),
+                inline_field_cell(display, error, value_width, theme),
+            ])
+            .height(height)
+        })
+        .collect::<Vec<_>>();
     let header = Row::new(vec![
         Cell::from(cell_pad(texts::tui_header_field())),
         Cell::from(texts::tui_header_value()),
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
-
-    let rows = rows_data.iter().map(|(label, value)| {
-        Row::new(vec![
-            Cell::from(cell_pad(label)),
-            Cell::from(truncated_value_cell(
-                value,
-                fields_inner.width,
-                label_col_width,
-                theme,
-            )),
-        ])
-    });
-
     let table = Table::new(
         rows,
         [Constraint::Length(label_col_width), Constraint::Min(10)],
@@ -1045,22 +1665,23 @@ fn render_usage_query_form(
     .block(Block::default().borders(Borders::NONE))
     .row_highlight_style(selection_style(theme))
     .highlight_symbol(highlight_symbol(theme));
-
     let mut state = TableState::default();
     if !fields.is_empty() {
-        state.select(Some(provider.usage_query_field_idx.min(fields.len() - 1)));
+        state.select(Some(selected_idx.min(fields.len() - 1)));
     }
-    frame.render_stateful_widget(table, fields_inner, &mut state);
-
-    render_usage_query_side_panel(frame, provider, body[1], theme);
-    render_usage_query_input(
-        frame,
-        provider,
-        selected_field,
-        chunks[2],
-        theme,
-        !app.overlay.is_active(),
-    );
+    frame.render_stateful_widget(table, table_area, &mut state);
+    if let Some(cursor_x) = cursor_x {
+        set_inline_table_cursor(
+            frame,
+            table_area,
+            label_col_width,
+            selected_idx,
+            state.offset(),
+            &row_heights,
+            cursor_x,
+            theme,
+        );
+    }
 }
 
 fn render_usage_query_side_panel(
@@ -1113,6 +1734,9 @@ fn render_usage_query_info_panel(
             texts::tui_usage_query_copilot_auto_auth()
         }
         super::form::UsageQueryTemplate::TokenPlan => texts::tui_usage_query_token_plan_hint(),
+        super::form::UsageQueryTemplate::OfficialSubscription => {
+            texts::tui_usage_query_official_subscription_hint()
+        }
         super::form::UsageQueryTemplate::Custom
         | super::form::UsageQueryTemplate::General
         | super::form::UsageQueryTemplate::NewApi
@@ -1147,8 +1771,18 @@ fn render_usage_query_script_preview(
     frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
 
-    let script_preview = provider.usage_query_code.trim();
+    let script = usage_query_script_preview(provider);
+    let script_preview = script.trim();
     let mut lines = Vec::new();
+    if let Some(error) = provider.usage_query_field_error(super::form::UsageQueryField::Script) {
+        lines.push(Line::styled(
+            format!("! {error}"),
+            Style::default().fg(theme.err),
+        ));
+        if !script_preview.is_empty() {
+            lines.push(Line::raw(""));
+        }
+    }
     if matches!(
         provider.usage_query_template,
         super::form::UsageQueryTemplate::Balance
@@ -1171,6 +1805,13 @@ fn render_usage_query_script_preview(
     }
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn usage_query_script_preview(provider: &super::form::ProviderAddFormState) -> String {
+    if provider.usage_query_code.len() > PROVIDER_PASSIVE_PARSE_MAX_BYTES {
+        return texts::tui_preview_omitted_too_large().to_string();
+    }
+    provider.usage_query_code.clone()
 }
 
 fn render_usage_query_script_help(
@@ -1200,47 +1841,6 @@ fn render_usage_query_script_help(
         .collect::<Vec<_>>();
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-fn render_usage_query_input(
-    frame: &mut Frame<'_>,
-    provider: &super::form::ProviderAddFormState,
-    selected: Option<super::form::UsageQueryField>,
-    area: Rect,
-    theme: &super::theme::Theme,
-    cursor_allowed: bool,
-) {
-    let editor_active = provider.usage_query_editing;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(focus_block_style(editor_active, theme))
-        .title(if editor_active {
-            texts::tui_form_editing_title()
-        } else {
-            texts::tui_form_input_title()
-        });
-    frame.render_widget(block.clone(), area);
-    let inner = block.inner(area);
-
-    if let Some(field) = selected {
-        if let Some(input) = provider.usage_query_input(field) {
-            let (visible, cursor_x) =
-                visible_text_window(&input.value, input.cursor, inner.width as usize);
-            frame.render_widget(
-                Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
-                inner,
-            );
-            if editor_active && cursor_allowed {
-                let x = inner.x + cursor_x.min(inner.width.saturating_sub(1));
-                frame.set_cursor_position((x, inner.y));
-            }
-        } else {
-            let (line, _cursor_col) =
-                usage_query_field_editor_line(provider, selected, inner.width as usize);
-            frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), inner);
-        }
-    }
 }
 
 pub(crate) fn usage_query_field_label_and_value(
@@ -1306,7 +1906,7 @@ pub(crate) fn usage_query_field_label_and_value(
         super::form::UsageQueryField::Script => texts::tui_key_open().to_string(),
         _ => provider
             .usage_query_input(field)
-            .map(|input| input.value.trim().to_string())
+            .map(|input| bounded_trimmed_text_for_display(&input.value))
             .unwrap_or_default(),
     };
 
@@ -1318,38 +1918,6 @@ pub(crate) fn usage_query_field_label_and_value(
             value
         },
     )
-}
-
-pub(crate) fn usage_query_field_editor_line(
-    provider: &super::form::ProviderAddFormState,
-    selected: Option<super::form::UsageQueryField>,
-    _width: usize,
-) -> (Line<'static>, usize) {
-    let Some(field) = selected else {
-        return (Line::raw(""), 0);
-    };
-
-    if let Some(input) = provider.usage_query_input(field) {
-        (Line::raw(input.value.clone()), input.cursor)
-    } else {
-        let text = match field {
-            super::form::UsageQueryField::Enabled => {
-                format!("enabled = {}", provider.usage_query_enabled)
-            }
-            super::form::UsageQueryField::Template => {
-                format!("templateType = {}", provider.usage_query_template_label())
-            }
-            super::form::UsageQueryField::Script => {
-                format!(
-                    "{} ({})",
-                    texts::tui_key_open(),
-                    provider.usage_query_template_value()
-                )
-            }
-            _ => String::new(),
-        };
-        (Line::raw(text), 0)
-    }
 }
 
 pub(crate) fn provider_field_label_and_value(
@@ -1376,11 +1944,11 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::ClaudeModelConfig => texts::tui_label_claude_model_config().to_string(),
-        ProviderAddField::ClaudeDesktopModelConfig => {
-            texts::tui_label_claude_desktop_model_config().to_string()
-        }
         ProviderAddField::ClaudeFallbackModel => {
             texts::tui_label_claude_fallback_model().to_string()
+        }
+        ProviderAddField::ClaudeFallbackOneM => {
+            texts::tui_label_claude_fallback_one_m().to_string()
         }
         ProviderAddField::ClaudeQuickConfig => texts::tui_label_claude_quick_config().to_string(),
         ProviderAddField::CodexQuickConfig => texts::tui_label_codex_quick_config().to_string(),
@@ -1393,13 +1961,26 @@ pub(crate) fn provider_field_label_and_value(
         }
         ProviderAddField::ClaudeTeammates => texts::tui_label_claude_teammates().to_string(),
         ProviderAddField::ClaudeToolSearch => texts::tui_label_claude_tool_search().to_string(),
+        ProviderAddField::ClaudeEffortMax => texts::tui_label_claude_effort_max().to_string(),
         ProviderAddField::ClaudeDisableAutoUpgrade => {
             texts::tui_label_claude_disable_auto_upgrade().to_string()
         }
         ProviderAddField::CodexOAuthAccount => texts::tui_label_chatgpt_account().to_string(),
         ProviderAddField::CodexFastMode => texts::tui_label_codex_fast_mode().to_string(),
         ProviderAddField::CodexBaseUrl => texts::tui_label_base_url().to_string(),
+        ProviderAddField::CodexAnthropicApiKeyField => {
+            texts::tui_label_codex_anthropic_auth_field().to_string()
+        }
+        ProviderAddField::CodexImpersonateClaudeCode => {
+            texts::tui_label_codex_impersonate_claude_code().to_string()
+        }
+        ProviderAddField::CodexMaxOutputTokens => {
+            texts::tui_label_codex_max_output_tokens().to_string()
+        }
         ProviderAddField::CodexModel => texts::model_label().to_string(),
+        ProviderAddField::CodexPromptCacheRouting => {
+            texts::tui_label_codex_prompt_cache_routing().to_string()
+        }
         ProviderAddField::CodexLocalRouting => texts::tui_label_codex_model_mapping().to_string(),
         ProviderAddField::CodexWireApi => {
             strip_trailing_colon(texts::codex_wire_api_label()).to_string()
@@ -1411,6 +1992,7 @@ pub(crate) fn provider_field_label_and_value(
             strip_trailing_colon(texts::codex_env_key_label()).to_string()
         }
         ProviderAddField::CodexApiKey => texts::tui_label_api_key().to_string(),
+        ProviderAddField::LocalProxySettings => texts::tui_label_local_proxy_settings().to_string(),
         ProviderAddField::GeminiAuthType => {
             strip_trailing_colon(texts::auth_type_label()).to_string()
         }
@@ -1444,14 +2026,30 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::CodexAdvancedDivider => "- - - - - - - - -".to_string(),
         ProviderAddField::HermesAdvancedDivider => "- - - - - - - - -".to_string(),
         ProviderAddField::CommonConfigDivider => "- - - - - - - - -".to_string(),
+        ProviderAddField::ClaudeInactiveFields => {
+            crate::t!("Inactive fields", "未应用字段").to_string()
+        }
         ProviderAddField::CommonSnippet => texts::tui_config_item_common_snippet().to_string(),
         ProviderAddField::IncludeCommonConfig => texts::tui_form_attach_common_config().to_string(),
         ProviderAddField::UsageQueryDivider => "- - - - - - - - -".to_string(),
         ProviderAddField::UsageQuery => texts::tui_config_item_usage_query().to_string(),
+        ProviderAddField::Template => texts::tui_label_provider_template().to_string(),
+        ProviderAddField::TemplateDivider => "- - - - - - - - -".to_string(),
     };
 
     let value = match field {
         ProviderAddField::ClaudeApiFormat => provider_api_format_label(provider),
+        ProviderAddField::CodexAnthropicApiKeyField => {
+            texts::tui_codex_anthropic_auth_field_value(provider.claude_api_key_field.as_env_key())
+                .to_string()
+        }
+        ProviderAddField::CodexImpersonateClaudeCode => {
+            if provider.codex_impersonate_claude_code {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
         ProviderAddField::CodexWireApi => provider.codex_wire_api.as_str().to_string(),
         ProviderAddField::CodexRequiresOpenaiAuth => {
             if provider.codex_requires_openai_auth {
@@ -1460,17 +2058,13 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
-        ProviderAddField::ClaudeModelConfig => texts::tui_claude_model_config_summary(
-            provider.claude_model_configured_count(),
-            provider.claude_model_row_count(),
-        ),
-        ProviderAddField::ClaudeDesktopModelConfig => texts::tui_claude_model_config_summary(
-            provider.claude_desktop_model_configured_count(),
-            provider.claude_model_row_count(),
-        ),
-        ProviderAddField::ClaudeQuickConfig => {
-            texts::tui_claude_quick_config_summary(provider.claude_quick_config_enabled_count())
+        ProviderAddField::ClaudeModelConfig => {
+            texts::tui_claude_model_config_summary(provider.claude_model_configured_count())
         }
+        ProviderAddField::ClaudeQuickConfig => texts::tui_claude_quick_config_summary(
+            provider.claude_quick_config_enabled_count(),
+            provider.claude_quick_config_fields().len(),
+        ),
         ProviderAddField::CodexQuickConfig => texts::tui_codex_quick_config_summary(
             provider.codex_quick_config_enabled_count(),
             provider.codex_quick_config_fields().len(),
@@ -1510,6 +2104,20 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
+        ProviderAddField::ClaudeFallbackOneM => {
+            if provider.claude_fallback_one_m {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::ClaudeEffortMax => {
+            if provider.claude_effort_max {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
         ProviderAddField::ClaudeDisableAutoUpgrade => {
             if provider.claude_disable_auto_upgrade {
                 format!("[{}]", texts::tui_marker_active())
@@ -1517,7 +2125,7 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
-        ProviderAddField::CodexOAuthAccount => provider.codex_oauth_account_display(),
+        ProviderAddField::CodexOAuthAccount => codex_oauth_account_for_display(provider),
         ProviderAddField::CodexFastMode => {
             if provider.codex_fast_mode {
                 format!("[{}]", texts::tui_marker_active())
@@ -1525,7 +2133,22 @@ pub(crate) fn provider_field_label_and_value(
                 "[ ]".to_string()
             }
         }
-        ProviderAddField::CodexLocalRouting => String::new(),
+        ProviderAddField::CodexPromptCacheRouting => texts::tui_codex_prompt_cache_routing_value(
+            provider.codex_prompt_cache_routing.as_str(),
+        )
+        .to_string(),
+        ProviderAddField::CodexLocalRouting => {
+            if provider.codex_local_routing_enabled {
+                format!(
+                    "{} · {} ›",
+                    texts::enabled(),
+                    provider.codex_model_catalog_summary()
+                )
+            } else {
+                texts::disabled().to_string()
+            }
+        }
+        ProviderAddField::LocalProxySettings => provider.local_proxy_settings_summary(),
         ProviderAddField::IncludeCommonConfig => {
             if provider.include_common_config {
                 format!("[{}]", texts::tui_marker_active())
@@ -1538,7 +2161,7 @@ pub(crate) fn provider_field_label_and_value(
             GeminiAuthType::ApiKey => "api_key".to_string(),
         },
         ProviderAddField::OpenClawApiProtocol => {
-            provider.opencode_npm_package.value.trim().to_string()
+            bounded_trimmed_text_for_display(&provider.opencode_npm_package.value)
         }
         ProviderAddField::OpenClawUserAgent => {
             if provider.openclaw_user_agent {
@@ -1552,169 +2175,61 @@ pub(crate) fn provider_field_label_and_value(
             texts::tui_hermes_api_mode_value(provider.hermes_api_mode_value()).to_string()
         }
         ProviderAddField::HermesModels => provider.hermes_models_summary(),
-        ProviderAddField::HermesRateLimitDelay => provider.hermes_rate_limit_delay.value.clone(),
+        ProviderAddField::HermesRateLimitDelay => {
+            bounded_trimmed_text_for_display(&provider.hermes_rate_limit_delay.value)
+        }
         ProviderAddField::HermesAdvancedDivider => "- - - - - - - - - -".to_string(),
         ProviderAddField::CommonConfigDivider => "- - - - - - - - - -".to_string(),
-        ProviderAddField::CommonSnippet => String::new(),
+        ProviderAddField::ClaudeInactiveFields | ProviderAddField::CommonSnippet => {
+            format!("{} ›", texts::tui_key_open())
+        }
         ProviderAddField::UsageQueryDivider => String::new(),
-        ProviderAddField::UsageQuery => String::new(),
+        ProviderAddField::TemplateDivider => String::new(),
+        // Plain-text fallback; the row itself renders chip-styled spans and
+        // this value only feeds column sizing and non-styled consumers.
+        ProviderAddField::Template => provider
+            .template_labels()
+            .get(provider.template_idx)
+            .copied()
+            .unwrap_or_default()
+            .to_string(),
+        ProviderAddField::UsageQuery => {
+            if provider.usage_query_enabled {
+                format!(
+                    "{} · {} ›",
+                    texts::enabled(),
+                    provider.usage_query_template_value()
+                )
+            } else {
+                texts::disabled().to_string()
+            }
+        }
         _ => provider
             .input(field)
-            .map(|v| {
-                if should_redact_provider_field(provider, field) && !v.value.trim().is_empty() {
-                    redacted_secret_placeholder().to_string()
-                } else {
-                    v.value.trim().to_string()
-                }
-            })
+            .map(|v| bounded_trimmed_text_for_display(&v.value))
             .unwrap_or_default(),
     };
 
-    // Sub-page rows expose their action through the help line, so their value
-    // column stays blank rather than falling back to the "N/A" placeholder.
-    let opens_subpage = matches!(
-        field,
-        ProviderAddField::CommonSnippet
-            | ProviderAddField::UsageQuery
-            | ProviderAddField::CodexLocalRouting
-    );
-
-    (
-        label,
-        if value.is_empty() && !opens_subpage {
-            texts::tui_na().to_string()
-        } else {
-            value
-        },
-    )
-}
-
-pub(crate) fn provider_field_editor_line(
-    provider: &super::form::ProviderAddFormState,
-    selected: Option<ProviderAddField>,
-    _width: usize,
-) -> (Line<'static>, usize) {
-    let Some(field) = selected else {
-        return (Line::raw(""), 0);
+    let value = if value.is_empty() {
+        texts::tui_na().to_string()
+    } else {
+        value
+    };
+    let value = match provider_full_url_value_prefix(provider, field) {
+        Some(prefix) => format!("{prefix}{value}"),
+        None => value,
     };
 
-    if let Some(input) = provider.input(field) {
-        (Line::raw(input.value.clone()), input.cursor)
-    } else {
-        let text = match field {
-            ProviderAddField::ClaudeApiFormat => {
-                let value = if matches!(provider.app_type, AppType::Codex) {
-                    texts::tui_codex_api_format_value(provider.claude_api_format.as_str())
-                } else {
-                    texts::tui_claude_api_format_value(provider.claude_api_format.as_str())
-                };
-                format!("api_format = {}", value)
-            }
-            ProviderAddField::CodexWireApi => {
-                format!("wire_api = {}", provider.codex_wire_api.as_str())
-            }
-            ProviderAddField::CodexRequiresOpenaiAuth => format!(
-                "requires_openai_auth = {}",
-                provider.codex_requires_openai_auth
-            ),
-            ProviderAddField::ClaudeModelConfig => {
-                texts::tui_claude_model_config_open_hint().to_string()
-            }
-            ProviderAddField::ClaudeDesktopModelConfig => {
-                texts::tui_claude_desktop_model_config_open_hint().to_string()
-            }
-            ProviderAddField::ClaudeQuickConfig => texts::tui_form_open_page_hint().to_string(),
-            ProviderAddField::CodexQuickConfig => texts::tui_form_open_page_hint().to_string(),
-            ProviderAddField::CodexGoalMode => {
-                format!(
-                    "features.goals = {}",
-                    if provider.codex_goal_mode {
-                        "true"
-                    } else {
-                        "<unset>"
-                    }
-                )
-            }
-            ProviderAddField::CodexRemoteCompaction => {
-                format!(
-                    "model_providers.<id>.name = {}",
-                    if provider.codex_remote_compaction {
-                        "\"OpenAI\""
-                    } else {
-                        "<provider>"
-                    }
-                )
-            }
-            ProviderAddField::ClaudeHideAttribution => {
-                format!(
-                    "attribution.commit/pr = {}",
-                    if provider.claude_hide_attribution {
-                        "\"\""
-                    } else {
-                        "<default>"
-                    }
-                )
-            }
-            ProviderAddField::ClaudeTeammates => {
-                format!(
-                    "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = {}",
-                    if provider.claude_teammates {
-                        "\"1\""
-                    } else {
-                        "<unset>"
-                    }
-                )
-            }
-            ProviderAddField::ClaudeToolSearch => {
-                format!(
-                    "env.ENABLE_TOOL_SEARCH = {}",
-                    if provider.claude_tool_search {
-                        "\"true\""
-                    } else {
-                        "<unset>"
-                    }
-                )
-            }
-            ProviderAddField::ClaudeDisableAutoUpgrade => {
-                format!(
-                    "env.DISABLE_AUTOUPDATER = {}",
-                    if provider.claude_disable_auto_upgrade {
-                        "\"1\""
-                    } else {
-                        "<unset>"
-                    }
-                )
-            }
-            ProviderAddField::CodexOAuthAccount => texts::tui_key_open().to_string(),
-            ProviderAddField::CodexFastMode => {
-                format!("codex_fast_mode = {}", provider.codex_fast_mode)
-            }
-            ProviderAddField::CodexLocalRouting => texts::tui_form_open_page_hint().to_string(),
-            ProviderAddField::CommonSnippet => texts::tui_form_open_editor_hint().to_string(),
-            ProviderAddField::UsageQuery => texts::tui_form_open_page_hint().to_string(),
-            ProviderAddField::CommonConfigDivider => String::new(),
-            ProviderAddField::IncludeCommonConfig => {
-                format!("apply_common_config = {}", provider.include_common_config)
-            }
-            ProviderAddField::GeminiAuthType => {
-                format!("auth_type = {}", provider.gemini_auth_type.as_str())
-            }
-            ProviderAddField::OpenClawApiProtocol => {
-                format!("api = {}", provider.opencode_npm_package.value.trim())
-            }
-            ProviderAddField::OpenClawUserAgent => {
-                format!("send_user_agent = {}", provider.openclaw_user_agent)
-            }
-            ProviderAddField::OpenClawModels => texts::tui_openclaw_models_open_hint().to_string(),
-            ProviderAddField::HermesApiMode => {
-                format!("api_mode = {}", provider.hermes_api_mode_value())
-            }
-            ProviderAddField::HermesModels => texts::tui_hermes_models_open_hint().to_string(),
-            ProviderAddField::HermesAdvancedDivider => String::new(),
-            _ => String::new(),
-        };
-        (Line::raw(text), 0)
-    }
+    (label, value)
+}
+
+fn provider_full_url_value_prefix(
+    provider: &super::form::ProviderAddFormState,
+    field: ProviderAddField,
+) -> Option<String> {
+    provider
+        .full_url_mode_enabled_for_field(field)
+        .then(|| format!("[{}] ", texts::tui_full_url_label()))
 }
 
 pub(crate) fn codex_local_routing_field_label_and_value(
@@ -1767,7 +2282,8 @@ pub(crate) fn codex_local_routing_field_label_and_value(
 fn provider_field_is_divider(field: ProviderAddField) -> bool {
     matches!(
         field,
-        ProviderAddField::ClaudeAdvancedDivider
+        ProviderAddField::TemplateDivider
+            | ProviderAddField::ClaudeAdvancedDivider
             | ProviderAddField::CodexAdvancedDivider
             | ProviderAddField::HermesAdvancedDivider
             | ProviderAddField::CommonConfigDivider

@@ -4,8 +4,10 @@ use serde_json::{json, Value};
 use crate::{provider::Provider, proxy::error::ProxyError};
 
 use super::{
-    gemini_shadow::GeminiShadowStore, transform_gemini::AnthropicToolSchemaHints, AuthInfo,
-    AuthStrategy, ProviderAdapter, ProviderType,
+    codex_oauth_auth::{CODEX_OAUTH_CLIENT_VERSION, CODEX_OAUTH_ORIGINATOR},
+    gemini_shadow::GeminiShadowStore,
+    transform_gemini::AnthropicToolSchemaHints,
+    AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
 };
 
 pub struct ClaudeAdapter;
@@ -440,6 +442,13 @@ impl ClaudeAdapter {
         }
         None
     }
+
+    fn api_format_auth_strategy(&self, provider: &Provider) -> Option<AuthStrategy> {
+        match self.get_api_format(provider) {
+            "openai_chat" | "openai_responses" => Some(AuthStrategy::Bearer),
+            _ => None,
+        }
+    }
 }
 
 impl Default for ClaudeAdapter {
@@ -540,12 +549,12 @@ impl ProviderAdapter for ClaudeAdapter {
         let strategy = match provider_type {
             ProviderType::OpenRouter => AuthStrategy::Bearer,
             ProviderType::ClaudeAuth => AuthStrategy::ClaudeAuth,
-            // Align with Anthropic SDK semantics: ANTHROPIC_AUTH_TOKEN → Bearer,
-            // ANTHROPIC_API_KEY → x-api-key. Emitting the wrong/extra header
-            // breaks strict Anthropic-protocol endpoints such as OpenCode Go
-            // (issue #330); a direct `apiKey` field keeps the x-api-key default.
+            // OpenAI-compatible formats use Bearer regardless of the stored env
+            // field. Anthropic format keeps the SDK field semantics:
+            // ANTHROPIC_AUTH_TOKEN → Bearer, ANTHROPIC_API_KEY → x-api-key.
             _ => self
-                .infer_anthropic_auth_strategy(provider)
+                .api_format_auth_strategy(provider)
+                .or_else(|| self.infer_anthropic_auth_strategy(provider))
                 .unwrap_or(AuthStrategy::Anthropic),
         };
         self.extract_key(provider)
@@ -614,7 +623,8 @@ impl ProviderAdapter for ClaudeAdapter {
             }
             AuthStrategy::CodexOAuth => request
                 .header("Authorization", format!("Bearer {}", auth.api_key))
-                .header("originator", "cc-switch"),
+                .header("originator", CODEX_OAUTH_ORIGINATOR)
+                .header("version", CODEX_OAUTH_CLIENT_VERSION),
             AuthStrategy::Google => request.header("x-goog-api-key", &auth.api_key),
             AuthStrategy::GoogleOAuth => {
                 let token = auth.access_token.as_ref().unwrap_or(&auth.api_key);
@@ -771,6 +781,34 @@ mod tests {
     }
 
     #[test]
+    fn openai_api_formats_use_bearer_even_with_anthropic_api_key() {
+        let adapter = ClaudeAdapter::new();
+
+        for api_format in ["openai_chat", "openai_responses"] {
+            let provider: Provider = serde_json::from_value(json!({
+                "id": format!("test-{api_format}"),
+                "name": "OpenAI-compatible",
+                "settingsConfig": {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://opencode.ai/zen/go",
+                        "ANTHROPIC_API_KEY": "sk-api-key"
+                    }
+                },
+                "meta": {
+                    "apiFormat": api_format
+                }
+            }))
+            .expect("provider should deserialize");
+
+            let auth = adapter
+                .extract_auth(&provider)
+                .expect("auth should resolve");
+            assert_eq!(auth.api_key, "sk-api-key");
+            assert_eq!(auth.strategy, AuthStrategy::Bearer);
+        }
+    }
+
+    #[test]
     fn anthropic_both_env_vars_prefer_auth_token() {
         // extract_key prefers AUTH_TOKEN; the inferred strategy must stay aligned.
         let adapter = ClaudeAdapter::new();
@@ -870,6 +908,30 @@ mod tests {
             .expect("codex oauth should resolve auth");
         assert_eq!(format!("{:?}", auth.strategy), "CodexOAuth");
         assert!(adapter.needs_transform(&provider));
+    }
+
+    #[test]
+    fn codex_oauth_generation_uses_gpt6_compatible_identity() {
+        let request = ClaudeAdapter::new()
+            .add_auth_headers(
+                reqwest::Client::new().get("https://example.com"),
+                &AuthInfo::new("test-token".into(), AuthStrategy::CodexOAuth),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer test-token");
+        assert_eq!(request.headers()["originator"], "codex_cli_rs");
+        let version: Vec<u32> = request.headers()["version"]
+            .to_str()
+            .unwrap()
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        // Official rust-v0.153.4 catalog: gpt-6-astra requires 0.153.0.
+        assert!(
+            version.as_slice() >= [0, 153, 0].as_slice(),
+            "gpt-6-astra requires Codex >= 0.153.0; sent {version:?}"
+        );
     }
 
     #[test]

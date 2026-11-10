@@ -1,10 +1,14 @@
-//! 国产 Token Plan 额度查询服务
+//! Token Plan / 编程套餐额度查询服务
 //!
-//! 支持 Kimi For Coding、智谱 GLM、MiniMax 的 Token Plan 额度查询。
+//! 支持 Kimi For Coding、智谱 GLM、MiniMax、OpenCode Go 的套餐额度查询。
 //! 复用 subscription 模块的 SubscriptionQuota / QuotaTier 类型。
 
 use super::subscription::{CredentialStatus, QuotaTier, SubscriptionQuota};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const TIER_FIVE_HOUR: &str = "five_hour";
+const TIER_WEEKLY_LIMIT: &str = "weekly_limit";
+const TIER_MONTHLY: &str = "monthly";
 
 // ── 供应商检测 ──────────────────────────────────────────────
 
@@ -14,6 +18,10 @@ enum CodingPlanProvider {
     ZhipuEn,
     MiniMaxCn,
     MiniMaxEn,
+    /// OpenCode Go（$10/月订阅，美元额度三时间窗口）。base_url 分两档：
+    /// `https://opencode.ai/zen/go`（Claude 直连 /messages）与
+    /// `https://opencode.ai/zen/go/v1`（Codex/Pi 走 Chat）。
+    OpencodeGo,
 }
 
 fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
@@ -28,6 +36,10 @@ fn detect_provider(base_url: &str) -> Option<CodingPlanProvider> {
         Some(CodingPlanProvider::MiniMaxCn)
     } else if url.contains("api.minimax.io") {
         Some(CodingPlanProvider::MiniMaxEn)
+    } else if url.contains("opencode.ai/zen/go") {
+        // 同时覆盖 /zen/go 与 /zen/go/v1；Zen 按量版（/zen/v1）
+        // 没有任何用量/余额 API，刻意不命中。
+        Some(CodingPlanProvider::OpencodeGo)
     } else {
         None
     }
@@ -78,25 +90,13 @@ fn make_error(msg: String) -> SubscriptionQuota {
         extra_usage: None,
         error: Some(msg),
         queried_at: Some(now_millis()),
-    }
-}
-
-fn coding_plan_not_found(error: Option<String>) -> SubscriptionQuota {
-    SubscriptionQuota {
-        tool: "coding_plan".to_string(),
-        credential_status: CredentialStatus::NotFound,
-        credential_message: None,
-        success: false,
-        tiers: vec![],
-        extra_usage: None,
-        error,
-        queried_at: None,
+        reset_credits: None,
     }
 }
 
 // ── Kimi For Coding ─────────────────────────────────────────
 
-async fn query_kimi(api_key: &str) -> Result<SubscriptionQuota, String> {
+async fn query_kimi(api_key: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
     let resp = client
@@ -109,12 +109,12 @@ async fn query_kimi(api_key: &str) -> Result<SubscriptionQuota, String> {
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error: {e}")),
+        Err(e) => return make_error(format!("Network error: {e}")),
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Ok(SubscriptionQuota {
+        return SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
             credential_message: Some("Invalid API key".to_string()),
@@ -123,21 +123,18 @@ async fn query_kimi(api_key: &str) -> Result<SubscriptionQuota, String> {
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
-        });
+            reset_credits: None,
+        };
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
+        return make_error(format!("API error (HTTP {status}): {body}"));
     }
 
-    let raw = match resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return Err(format!("Failed to read response: {e}")),
-    };
-    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+    let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
+        Err(e) => return make_error(format!("Failed to parse response: {e}")),
     };
 
     let mut tiers = Vec::new();
@@ -184,7 +181,7 @@ async fn query_kimi(api_key: &str) -> Result<SubscriptionQuota, String> {
         });
     }
 
-    Ok(SubscriptionQuota {
+    SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -193,22 +190,87 @@ async fn query_kimi(api_key: &str) -> Result<SubscriptionQuota, String> {
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    })
+        reset_credits: None,
+    }
 }
 
 // ── 智谱 GLM ────────────────────────────────────────────────
 
-async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota, String> {
+enum ZhipuWindow {
+    FiveHour,
+    Weekly,
+}
+
+fn classify_zhipu_window(item: &serde_json::Value) -> Option<ZhipuWindow> {
+    match item.get("unit").and_then(|value| value.as_i64()) {
+        Some(3) => Some(ZhipuWindow::FiveHour),
+        Some(6) => Some(ZhipuWindow::Weekly),
+        _ => None,
+    }
+}
+
+/// Parse Zhipu token limits into their 5-hour and weekly windows.
+///
+/// Zhipu identifies the windows with `unit` (`3` for hours and `6` for
+/// weeks). When that field is absent or unknown, fall back to reset times;
+/// entries without a reset are considered first because an idle 5-hour
+/// window may omit `nextResetTime`.
+fn parse_zhipu_token_tiers(data: &serde_json::Value) -> Vec<QuotaTier> {
+    type Entry = (Option<i64>, f64, Option<String>);
+
+    let mut five_hour: Option<Entry> = None;
+    let mut weekly: Option<Entry> = None;
+    let mut unclassified = Vec::<Entry>::new();
+
+    if let Some(limits) = data.get("limits").and_then(|value| value.as_array()) {
+        for item in limits {
+            let limit_type = item.get("type").and_then(|value| value.as_str());
+            if !limit_type.is_some_and(|value| value.eq_ignore_ascii_case("TOKENS_LIMIT")) {
+                continue;
+            }
+
+            let percentage = item
+                .get("percentage")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            let reset_ms = item.get("nextResetTime").and_then(|value| value.as_i64());
+            let entry = (reset_ms, percentage, reset_ms.and_then(millis_to_iso8601));
+
+            match classify_zhipu_window(item) {
+                Some(ZhipuWindow::FiveHour) if five_hour.is_none() => five_hour = Some(entry),
+                Some(ZhipuWindow::Weekly) if weekly.is_none() => weekly = Some(entry),
+                _ => unclassified.push(entry),
+            }
+        }
+    }
+
+    unclassified.sort_by_key(|(reset, _, _)| (reset.is_some(), reset.unwrap_or(i64::MIN)));
+    for entry in unclassified {
+        if five_hour.is_none() {
+            five_hour = Some(entry);
+        } else if weekly.is_none() {
+            weekly = Some(entry);
+        }
+    }
+
+    [(TIER_FIVE_HOUR, five_hour), (TIER_WEEKLY_LIMIT, weekly)]
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            entry.map(|(_, utilization, resets_at)| QuotaTier {
+                name: name.to_string(),
+                utilization,
+                resets_at,
+            })
+        })
+        .collect()
+}
+
+async fn query_zhipu(api_key: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
-    let quota_base = if base_url.to_ascii_lowercase().contains("bigmodel.cn") {
-        "https://open.bigmodel.cn"
-    } else {
-        "https://api.z.ai"
-    };
-    let url = format!("{quota_base}/api/monitor/usage/quota/limit");
+    // 统一走 api.z.ai 国际站（中国站 bigmodel.cn 有反爬机制）
     let resp = client
-        .get(url)
+        .get("https://api.z.ai/api/monitor/usage/quota/limit")
         .header("Authorization", api_key) // 注意：智谱不加 Bearer 前缀
         .header("Content-Type", "application/json")
         .header("Accept-Language", "en-US,en")
@@ -218,12 +280,12 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota,
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error: {e}")),
+        Err(e) => return make_error(format!("Network error: {e}")),
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Ok(SubscriptionQuota {
+        return SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
             credential_message: Some("Invalid API key".to_string()),
@@ -232,21 +294,18 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota,
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
-        });
+            reset_credits: None,
+        };
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
+        return make_error(format!("API error (HTTP {status}): {body}"));
     }
 
-    let raw = match resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return Err(format!("Failed to read response: {e}")),
-    };
-    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+    let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
+        Err(e) => return make_error(format!("Failed to parse response: {e}")),
     };
 
     // 检查业务级别错误
@@ -255,63 +314,15 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota,
             .get("msg")
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown error");
-        return Ok(make_error(format!("API error: {msg}")));
+        return make_error(format!("API error: {msg}"));
     }
 
     let data = match body.get("data") {
         Some(d) => d,
-        None => return Ok(make_error("Missing 'data' field in response".to_string())),
+        None => return make_error("Missing 'data' field in response".to_string()),
     };
 
-    let mut five_hour = None;
-    let mut weekly = None;
-    let mut fallback = Vec::new();
-
-    if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
-        for limit_item in limits {
-            let limit_type = limit_item
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let percentage = limit_item
-                .get("percentage")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let next_reset = limit_item
-                .get("nextResetTime")
-                .and_then(|v| v.as_i64())
-                .and_then(millis_to_iso8601);
-
-            if !limit_type.eq_ignore_ascii_case("TOKENS_LIMIT") {
-                continue;
-            }
-
-            let tier = (percentage, next_reset);
-            match limit_item.get("unit").and_then(|value| value.as_i64()) {
-                Some(3) if five_hour.is_none() => five_hour = Some(tier),
-                Some(6) if weekly.is_none() => weekly = Some(tier),
-                _ => fallback.push(tier),
-            }
-        }
-    }
-
-    for tier in fallback {
-        if five_hour.is_none() {
-            five_hour = Some(tier);
-        } else if weekly.is_none() {
-            weekly = Some(tier);
-        }
-    }
-    let mut tiers = Vec::new();
-    for (name, tier) in [("five_hour", five_hour), ("weekly_limit", weekly)] {
-        if let Some((utilization, resets_at)) = tier {
-            tiers.push(QuotaTier {
-                name: name.to_string(),
-                utilization,
-                resets_at,
-            });
-        }
-    }
+    let tiers = parse_zhipu_token_tiers(data);
 
     // 套餐等级存入 credential_message
     let level = data
@@ -319,7 +330,7 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota,
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    Ok(SubscriptionQuota {
+    SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: level,
@@ -328,12 +339,13 @@ async fn query_zhipu(base_url: &str, api_key: &str) -> Result<SubscriptionQuota,
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    })
+        reset_credits: None,
+    }
 }
 
 // ── MiniMax ─────────────────────────────────────────────────
 
-async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, String> {
+async fn query_minimax(api_key: &str, is_cn: bool) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
     let api_domain = if is_cn {
@@ -353,12 +365,12 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
 
     let resp = match resp {
         Ok(r) => r,
-        Err(e) => return Err(format!("Network error: {e}")),
+        Err(e) => return make_error(format!("Network error: {e}")),
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Ok(SubscriptionQuota {
+        return SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
             credential_message: Some("Invalid API key".to_string()),
@@ -367,21 +379,18 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
-        });
+            reset_credits: None,
+        };
     }
 
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Ok(make_error(format!("API error (HTTP {status}): {body}")));
+        return make_error(format!("API error (HTTP {status}): {body}"));
     }
 
-    let raw = match resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => return Err(format!("Failed to read response: {e}")),
-    };
-    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+    let body: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
+        Err(e) => return make_error(format!("Failed to parse response: {e}")),
     };
 
     // 检查业务级别错误
@@ -395,7 +404,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
                 .get("status_msg")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error");
-            return Ok(make_error(format!("API error (code {status_code}): {msg}")));
+            return make_error(format!("API error (code {status_code}): {msg}"));
         }
     }
 
@@ -444,7 +453,7 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
         }
     }
 
-    Ok(SubscriptionQuota {
+    SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -453,41 +462,83 @@ async fn query_minimax(api_key: &str, is_cn: bool) -> Result<SubscriptionQuota, 
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    })
+        reset_credits: None,
+    }
 }
 
-// ── 公开入口 ────────────────────────────────────────────────
+// ── OpenCode Go ─────────────────────────────────────────────
 
-const ZHIPU_TEAM_QUOTA_URL: &str = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
-
-async fn query_zhipu_team(
-    api_key: &str,
-    organization_id: &str,
-    project_id: &str,
-) -> Result<SubscriptionQuota, String> {
-    query_zhipu_team_at(ZHIPU_TEAM_QUOTA_URL, api_key, organization_id, project_id).await
+/// 解析 OpenCode Go usage 端点响应为 tier 列表。
+///
+/// 响应形态（上游 `packages/console/app/src/routes/zen/go/v1/usage.ts`）：
+/// `{"usage":{"rolling"|"weekly"|"monthly":{"status":"ok"|"rate-limited",
+/// "percent":0-100 已用整数,"resetsAt":ISO8601}}}`，三窗口对应文档口径
+/// $12/5h、$30/周、$60/月（端点不回传金额，仅百分比）。
+///
+/// 该端点是第一方但未文档化的路由，上线当天就改过一次形态，故逐窗口
+/// 防御解析：缺失或 percent 不可解析的窗口跳过，不整体失败。
+///
+/// `status=="rate-limited"` 时上游已把 percent 钉在 100，无需特判；
+/// percent 为 0 时上游的 `resetsAt` 是「now+窗口时长」的占位值，
+/// 丢弃不展示倒计时。
+fn parse_opencode_go_tiers(body: &serde_json::Value) -> Vec<QuotaTier> {
+    const WINDOWS: [(&str, &str); 3] = [
+        ("rolling", TIER_FIVE_HOUR),
+        ("weekly", TIER_WEEKLY_LIMIT),
+        ("monthly", TIER_MONTHLY),
+    ];
+    let Some(usage) = body.get("usage") else {
+        return Vec::new();
+    };
+    let mut tiers = Vec::new();
+    for (key, tier_name) in WINDOWS {
+        let Some(window) = usage.get(key) else {
+            continue;
+        };
+        let Some(percent) = window.get("percent").and_then(parse_f64) else {
+            continue;
+        };
+        let resets_at = if percent > 0.0 {
+            window.get("resetsAt").and_then(extract_reset_time)
+        } else {
+            None
+        };
+        tiers.push(QuotaTier {
+            name: tier_name.to_string(),
+            utilization: percent,
+            resets_at,
+        });
+    }
+    tiers
 }
 
-async fn query_zhipu_team_at(
-    quota_url_base: &str,
-    api_key: &str,
-    organization_id: &str,
-    project_id: &str,
-) -> Result<SubscriptionQuota, String> {
-    let response = crate::proxy::http_client::get()
-        .get(format!("{quota_url_base}?type=2"))
-        .header("Authorization", api_key)
-        .header("bigmodel-organization", organization_id)
-        .header("bigmodel-project", project_id)
-        .header("Content-Type", "application/json")
-        .header("Accept-Language", "en-US,en")
+async fn query_opencode_go(api_key: &str) -> Result<SubscriptionQuota, String> {
+    let client = crate::proxy::http_client::get();
+
+    // 用量端点只认 `Authorization: Bearer`——与推理侧 /messages 只认
+    // x-api-key 正好相反，不能互换。
+    let resp = client
+        .get("https://opencode.ai/zen/go/v1/usage")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
         .timeout(std::time::Duration::from_secs(15))
         .send()
-        .await
-        .map_err(|error| format!("Network error: {error}"))?;
+        .await;
 
-    let status = response.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return Err(format!("Network error: {e}")),
+    };
+
+    let status = resp.status();
+    // 403 EntitlementError：key 本身有效（Zen 与 Go 共用同一把 workspace
+    // API key），但该 workspace 没有 Go 订阅——与 401 认证失败分开提示。
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Ok(make_error(
+            "API key is valid but has no OpenCode Go subscription (HTTP 403)".to_string(),
+        ));
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
         return Ok(SubscriptionQuota {
             tool: "coding_plan".to_string(),
             credential_status: CredentialStatus::Expired,
@@ -497,235 +548,304 @@ async fn query_zhipu_team_at(
             extra_usage: None,
             error: Some(format!("Authentication failed (HTTP {status})")),
             queried_at: Some(now_millis()),
+            reset_credits: None,
         });
     }
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = resp.text().await.unwrap_or_default();
         return Ok(make_error(format!("API error (HTTP {status}): {body}")));
     }
 
-    let raw = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read response: {error}"))?;
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Err(format!("Failed to read response: {e}")),
+    };
     let body: serde_json::Value = match serde_json::from_slice(&raw) {
-        Ok(body) => body,
-        Err(error) => return Ok(make_error(format!("Failed to parse response: {error}"))),
+        Ok(v) => v,
+        Err(e) => return Ok(make_error(format!("Failed to parse response: {e}"))),
     };
 
-    if body.get("success").and_then(|value| value.as_bool()) == Some(false) {
-        let message = body
-            .get("msg")
-            .and_then(|value| value.as_str())
-            .unwrap_or("Unknown error");
-        return Ok(make_error(format!("API error: {message}")));
+    let tiers = parse_opencode_go_tiers(&body);
+    // 三个窗口一个都没解析出来 = 响应形态不认识（未文档化端点可能再次
+    // 变形），明确报错而不是渲染一张空卡片。
+    if tiers.is_empty() {
+        return Ok(make_error("Unexpected usage response shape".to_string()));
     }
 
-    let Some(data) = body.get("data") else {
-        return Ok(make_error("Missing 'data' field in response".to_string()));
-    };
-    let mut quota = SubscriptionQuota {
+    Ok(SubscriptionQuota {
         tool: "coding_plan".to_string(),
         credential_status: CredentialStatus::Valid,
-        credential_message: data
-            .get("level")
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string),
+        credential_message: None,
         success: true,
-        tiers: vec![],
+        tiers,
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    };
-    let personal_shape = serde_json::json!({ "success": true, "data": data });
-    if let Some(data) = personal_shape.get("data") {
-        let mut five_hour = None;
-        let mut weekly = None;
-        if let Some(limits) = data.get("limits").and_then(|value| value.as_array()) {
-            for item in limits {
-                if !item
-                    .get("type")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|value| value.eq_ignore_ascii_case("TOKENS_LIMIT"))
-                {
-                    continue;
-                }
-                let entry = (
-                    item.get("percentage")
-                        .and_then(|value| value.as_f64())
-                        .unwrap_or(0.0),
-                    item.get("nextResetTime")
-                        .and_then(|value| value.as_i64())
-                        .and_then(millis_to_iso8601),
-                );
-                match item.get("unit").and_then(|value| value.as_i64()) {
-                    Some(6) => weekly = Some(entry),
-                    _ => five_hour = Some(entry),
-                }
-            }
-        }
-        for (name, entry) in [("five_hour", five_hour), ("weekly_limit", weekly)] {
-            if let Some((utilization, resets_at)) = entry {
-                quota.tiers.push(QuotaTier {
-                    name: name.to_string(),
-                    utilization,
-                    resets_at,
-                });
-            }
-        }
-    }
-    Ok(quota)
+        reset_credits: None,
+    })
 }
+
+// ── 公开入口 ────────────────────────────────────────────────
 
 pub async fn get_coding_plan_quota(
     base_url: &str,
     api_key: &str,
-    coding_plan_provider: Option<&str>,
-    team_organization_id: Option<&str>,
-    team_project_id: Option<&str>,
 ) -> Result<SubscriptionQuota, String> {
-    if coding_plan_provider.is_some_and(|value| value.eq_ignore_ascii_case("zhipu_team")) {
-        let organization_id = team_organization_id.unwrap_or("").trim();
-        let project_id = team_project_id.unwrap_or("").trim();
-        if api_key.trim().is_empty() || organization_id.is_empty() || project_id.is_empty() {
-            return Ok(coding_plan_not_found(Some(
-                "Zhipu team plan needs the API key + organization ID + project ID".to_string(),
-            )));
-        }
-        return query_zhipu_team(api_key, organization_id, project_id).await;
-    }
-
     if api_key.trim().is_empty() {
-        return Ok(coding_plan_not_found(None));
+        return Ok(SubscriptionQuota {
+            tool: "coding_plan".to_string(),
+            credential_status: CredentialStatus::NotFound,
+            credential_message: None,
+            success: false,
+            tiers: vec![],
+            extra_usage: None,
+            error: None,
+            queried_at: None,
+            reset_credits: None,
+        });
     }
 
     let provider = match detect_provider(base_url) {
         Some(p) => p,
         None => {
-            return Ok(coding_plan_not_found(Some(format!(
-                "No supported coding-plan quota endpoint for {base_url}"
-            ))))
+            return Ok(SubscriptionQuota {
+                tool: "coding_plan".to_string(),
+                credential_status: CredentialStatus::NotFound,
+                credential_message: None,
+                success: false,
+                tiers: vec![],
+                extra_usage: None,
+                error: None,
+                queried_at: None,
+                reset_credits: None,
+            })
         }
     };
 
     let quota = match provider {
         CodingPlanProvider::Kimi => query_kimi(api_key).await,
-        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => {
-            query_zhipu(base_url, api_key).await
-        }
+        CodingPlanProvider::ZhipuCn | CodingPlanProvider::ZhipuEn => query_zhipu(api_key).await,
         CodingPlanProvider::MiniMaxCn => query_minimax(api_key, true).await,
         CodingPlanProvider::MiniMaxEn => query_minimax(api_key, false).await,
+        CodingPlanProvider::OpencodeGo => query_opencode_go(api_key).await?,
     };
 
-    quota
+    Ok(quota)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::{Read, Write};
+    use super::{
+        detect_provider, parse_opencode_go_tiers, parse_zhipu_token_tiers, CodingPlanProvider,
+        TIER_FIVE_HOUR, TIER_MONTHLY, TIER_WEEKLY_LIMIT,
+    };
+    use serde_json::json;
 
-    fn ensure_no_proxy_for_loopback() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-            std::env::set_var("no_proxy", "127.0.0.1,localhost");
-        });
-    }
-
-    #[tokio::test]
-    async fn zhipu_team_requires_all_credentials_before_network_io() {
-        let quota = get_coding_plan_quota(
-            "https://open.bigmodel.cn/api/coding",
-            "key",
-            Some("zhipu_team"),
-            Some("org"),
-            None,
-        )
-        .await
-        .expect("deterministic missing credential result");
-        assert!(!quota.success);
+    #[test]
+    fn opencode_go_detects_both_base_variants_but_not_zen() {
         assert!(matches!(
-            quota.credential_status,
-            CredentialStatus::NotFound
+            detect_provider("https://opencode.ai/zen/go"),
+            Some(CodingPlanProvider::OpencodeGo)
         ));
-        assert!(quota
-            .error
-            .as_deref()
-            .is_some_and(|message| message.contains("organization ID + project ID")));
+        assert!(matches!(
+            detect_provider("https://opencode.ai/zen/go/v1"),
+            Some(CodingPlanProvider::OpencodeGo)
+        ));
+        assert!(detect_provider("https://opencode.ai/zen/v1").is_none());
     }
 
-    #[tokio::test]
-    async fn zhipu_team_request_uses_type2_and_team_headers() {
-        ensure_no_proxy_for_loopback();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener address");
-        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let captured_server = captured.clone();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut bytes = Vec::new();
-            let mut chunk = [0u8; 2048];
-            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut chunk).expect("read request");
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..read]);
+    #[test]
+    fn opencode_go_three_windows_map_to_known_tiers() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "ok", "percent": 37, "resetsAt": "2026-08-26T14:12:03.000Z" },
+                "weekly":  { "status": "ok", "percent": 62, "resetsAt": "2026-08-31T00:00:00.000Z" },
+                "monthly": { "status": "rate-limited", "percent": 100, "resetsAt": "2026-09-11T00:00:00.000Z" }
             }
-            *captured_server.lock().expect("capture lock") =
-                String::from_utf8_lossy(&bytes).to_string();
-            let body = serde_json::json!({
-                "success": true,
-                "data": {
-                    "level": "team",
-                    "limits": [
-                        {"type": "TOKENS_LIMIT", "unit": 3, "percentage": 25.0},
-                        {"type": "TOKENS_LIMIT", "unit": 6, "percentage": 50.0}
-                    ]
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 3);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 37.0);
+        assert_eq!(
+            tiers[0].resets_at.as_deref(),
+            Some("2026-08-26T14:12:03.000Z")
+        );
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 62.0);
+        assert_eq!(tiers[2].name, TIER_MONTHLY);
+        assert_eq!(tiers[2].utilization, 100.0);
+    }
+
+    #[test]
+    fn opencode_go_zero_percent_drops_placeholder_reset_time() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "ok", "percent": 0, "resetsAt": "2026-08-26T15:00:00.000Z" }
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert!(tiers[0].resets_at.is_none());
+    }
+
+    #[test]
+    fn opencode_go_partial_windows_skip_malformed() {
+        let body = json!({
+            "usage": {
+                "rolling": { "status": "ok" },
+                "weekly":  { "status": "ok", "percent": "12" },
+                "monthly": null
+            }
+        });
+        let tiers = parse_opencode_go_tiers(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[0].utilization, 12.0);
+    }
+
+    #[test]
+    fn opencode_go_legacy_flat_shape_returns_empty() {
+        let body = json!({
+            "useBalance": false,
+            "rollingUsage": { "status": "ok", "usagePercent": 37, "resetInSec": 3600 }
+        });
+        assert!(parse_opencode_go_tiers(&body).is_empty());
+    }
+
+    #[test]
+    fn zhipu_classifies_windows_by_unit_even_when_weekly_resets_first() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 6,
+                    "number": 7,
+                    "percentage": 42.0,
+                    "nextResetTime": 1_000_003_600_000_i64
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 1.0,
+                    "nextResetTime": 1_000_018_000_000_i64
                 }
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
+            ]
         });
 
-        let quota = query_zhipu_team_at(
-            &format!("http://{address}/quota"),
-            "team-key",
-            "org-id",
-            "project-id",
-        )
-        .await
-        .expect("team quota request");
-        server.join().expect("server thread");
+        let tiers = parse_zhipu_token_tiers(&data);
 
-        let request = captured.lock().expect("capture lock").to_ascii_lowercase();
-        assert!(request.contains("/quota?type=2"));
-        assert!(request.contains("authorization: team-key"));
-        assert!(request.contains("bigmodel-organization: org-id"));
-        assert!(request.contains("bigmodel-project: project-id"));
-        assert_eq!(quota.tiers.len(), 2);
-        assert_eq!(quota.tiers[0].name, "five_hour");
-        assert_eq!(quota.tiers[1].name, "weekly_limit");
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 1.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 42.0);
     }
 
-    #[tokio::test]
-    async fn zhipu_team_transport_failure_stays_in_error_channel() {
-        ensure_no_proxy_for_loopback();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let address = listener.local_addr().expect("listener address");
-        drop(listener);
+    #[test]
+    fn zhipu_accepts_weekly_unit_six_number_one() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 6,
+                    "number": 1,
+                    "percentage": 30.0
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 10.0
+                }
+            ]
+        });
 
-        let error =
-            query_zhipu_team_at(&format!("http://{address}/quota"), "key", "org", "project")
-                .await
-                .expect_err("connection failure must remain transient");
-        assert!(error.contains("Network error"));
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 10.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 30.0);
+    }
+
+    #[test]
+    fn zhipu_missing_reset_fallback_keeps_idle_window_first() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "percentage": 25.0,
+                    "nextResetTime": 2_000_000_000_000_i64
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "percentage": 0.0
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert!(tiers[0].resets_at.is_none());
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 25.0);
+    }
+
+    #[test]
+    fn zhipu_legacy_single_window_remains_five_hour() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "percentage": 2.0,
+                    "nextResetTime": 1_774_967_594_803_i64
+                },
+                {
+                    "type": "TIME_LIMIT",
+                    "percentage": 50.0
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 2.0);
+    }
+
+    #[test]
+    fn zhipu_unknown_units_fall_back_to_reset_order() {
+        let data = json!({
+            "limits": [
+                {
+                    "type": "tokens_limit",
+                    "unit": 9,
+                    "percentage": 53.0,
+                    "nextResetTime": 2_000_000_000_000_i64
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 9,
+                    "percentage": 44.0,
+                    "nextResetTime": 1_000_000_000_000_i64
+                }
+            ]
+        });
+
+        let tiers = parse_zhipu_token_tiers(&data);
+
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, TIER_FIVE_HOUR);
+        assert_eq!(tiers[0].utilization, 44.0);
+        assert_eq!(tiers[1].name, TIER_WEEKLY_LIMIT);
+        assert_eq!(tiers[1].utilization, 53.0);
     }
 }

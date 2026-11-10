@@ -4,4 +4,5 @@ pub mod gemini;
 pub mod hermes;
 pub mod openclaw;
 pub mod opencode;
-mod utils;
+pub mod pi;
+pub(crate) mod utils;

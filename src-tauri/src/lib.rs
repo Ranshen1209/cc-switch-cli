@@ -1,10 +1,16 @@
+// The library exposes a curated facade. Without the CLI, shared modules retain
+// private helpers that are only reached by CLI workflows.
+#![cfg_attr(not(feature = "cli"), allow(dead_code))]
+
 // Core modules
 mod app_config;
-pub mod claude_desktop_config;
+mod claude_desktop_config;
 mod claude_mcp;
+mod claude_model_config;
 mod claude_plugin;
 mod codex_config;
 mod codex_history_migration;
+mod codex_state_db;
 pub mod commands;
 mod config;
 #[cfg(unix)]
@@ -19,12 +25,18 @@ mod import_export;
 #[allow(dead_code)]
 mod init_status;
 mod mcp;
+mod model_capabilities;
 mod openclaw_config;
 mod opencode_config;
+mod pi_config;
 mod prompt;
 mod prompt_files;
 mod provider;
 mod provider_defaults;
+mod provider_preset_builtin;
+mod provider_preset_models;
+mod provider_preset_pi;
+mod provider_preset_sponsors;
 mod proxy;
 mod services;
 mod session_manager;
@@ -37,7 +49,12 @@ mod usage_script;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+// Localized validation text is also used by the library-only build.
+#[path = "cli/i18n.rs"]
+pub mod i18n;
+
 // CLI module
+#[cfg(feature = "cli")]
 pub mod cli;
 
 // Public exports
@@ -47,8 +64,8 @@ pub use claude_plugin::{
 };
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use config::{
-    check_permissions, get_app_config_dir, get_claude_mcp_path, get_claude_settings_path,
-    prompt_fix_permissions, read_json_file, validate_config_dir,
+    get_app_config_dir, get_claude_mcp_path, get_claude_settings_path, read_json_file,
+    validate_config_dir,
 };
 pub use database::{Database, FailoverQueueItem};
 pub use deeplink::{
@@ -68,16 +85,22 @@ pub use provider::{
 };
 pub use proxy::{ProxyConfig, ProxyServerInfo, ProxyStatus};
 pub use services::{
-    AuthService, ConfigService, CredentialStatus, EndpointLatency, ExtraUsage, HealthStatus,
-    ImportSkillSelection, ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus,
-    McpService, PromptService, ProviderService, ProxyService, QuotaTier, SkillService,
-    SpeedtestService, StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota,
-    SyncDecision, WebDavSyncService, WebDavSyncSummary,
+    reapply_current_codex_official_live, AuthService, ConfigService, CredentialStatus,
+    EndpointLatency, ExtraUsage, GlobalOutboundProxyConfig, HealthStatus, ImportSkillSelection,
+    ManagedAuthAccount, ManagedAuthDeviceCodeResponse, ManagedAuthStatus, McpService,
+    MigrationResult, PromptService, ProviderService, ProxyService, QuotaTier, S3RemoteInfo,
+    S3SyncService, S3SyncSummary, SkillService, SkillStorageLocation, SpeedtestService,
+    StreamCheckConfig, StreamCheckResult, StreamCheckService, SubscriptionQuota, SyncDecision,
+    WebDavSyncService, WebDavSyncSummary,
 };
 pub use settings::{
-    get_enable_claude_plugin_integration, get_skip_claude_onboarding, get_webdav_sync_settings,
-    set_enable_claude_plugin_integration, set_skip_claude_onboarding, set_webdav_sync_settings,
-    update_settings, update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings,
+    get_enable_claude_plugin_integration, get_s3_sync_settings, get_skip_claude_onboarding,
+    get_webdav_sync_settings, set_enable_claude_plugin_integration, set_s3_sync_settings,
+    set_skip_claude_onboarding, set_webdav_sync_settings, update_s3_sync_status, update_settings,
+    update_webdav_sync_status, webdav_jianguoyun_preset, AppSettings, S3SyncSettings,
     WebDavSyncSettings, WebDavSyncStatus,
 };
 pub use store::AppState;
+
+pub mod live;
+pub mod mode;

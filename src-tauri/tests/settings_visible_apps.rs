@@ -11,24 +11,26 @@ mod app_config {
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum AppType {
         Claude,
-        ClaudeDesktop,
         Codex,
         Gemini,
         OpenCode,
         OpenClaw,
         Hermes,
+        Pi,
+        ClaudeDesktop,
     }
 
     impl AppType {
         pub fn as_str(&self) -> &'static str {
             match self {
                 AppType::Claude => "claude",
-                AppType::ClaudeDesktop => "claude-desktop",
                 AppType::Codex => "codex",
                 AppType::Gemini => "gemini",
                 AppType::OpenCode => "opencode",
                 AppType::OpenClaw => "openclaw",
                 AppType::Hermes => "hermes",
+                AppType::Pi => "pi",
+                AppType::ClaudeDesktop => "claude-desktop",
             }
         }
     }
@@ -148,6 +150,14 @@ mod error {
                 source,
             }
         }
+
+        pub fn localized(
+            _key: &'static str,
+            _zh: impl Into<String>,
+            en: impl Into<String>,
+        ) -> Self {
+            Self::InvalidInput(en.into())
+        }
     }
 
     impl<T> From<PoisonError<T>> for AppError {
@@ -168,6 +178,14 @@ mod services {
             Auto,
             Symlink,
             Copy,
+        }
+
+        #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+        #[serde(rename_all = "snake_case")]
+        pub enum SkillStorageLocation {
+            #[default]
+            CcSwitch,
+            Unified,
         }
     }
 
@@ -223,6 +241,61 @@ mod services {
     }
 }
 
+mod test_support {
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub(crate) struct TestEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+        old_cc_switch_config_dir: Option<OsString>,
+    }
+
+    pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    impl TestEnvGuard {
+        pub(crate) fn isolated(home: &Path) -> Self {
+            let lock = lock_test_env();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_cc_switch_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            crate::settings_impl::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+                old_cc_switch_config_dir,
+            }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            restore("HOME", &self.old_home);
+            restore("USERPROFILE", &self.old_userprofile);
+            restore("CC_SWITCH_CONFIG_DIR", &self.old_cc_switch_config_dir);
+            crate::settings_impl::reload_test_settings();
+        }
+    }
+
+    fn restore(key: &str, value: &Option<OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
 #[path = "../src/settings.rs"]
 mod settings_impl;
 
@@ -234,6 +307,7 @@ use settings_impl::{
 };
 
 struct HomeGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
     _temp: TempDir,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
@@ -242,6 +316,7 @@ struct HomeGuard {
 
 impl HomeGuard {
     fn new() -> Self {
+        let lock = test_support::lock_test_env();
         let temp = tempfile::tempdir().expect("create tempdir");
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
@@ -252,6 +327,7 @@ impl HomeGuard {
         reload_test_settings();
 
         Self {
+            _lock: lock,
             _temp: temp,
             old_home,
             old_userprofile,
@@ -318,11 +394,12 @@ fn default_visible_apps_hide_gemini() {
         visible.ordered_enabled(),
         vec![
             AppType::Claude,
-            AppType::ClaudeDesktop,
             AppType::Codex,
             AppType::OpenCode,
             AppType::Hermes,
             AppType::OpenClaw,
+            AppType::Pi,
+            AppType::ClaudeDesktop,
         ]
     );
     assert!(!visible.is_enabled_for(&AppType::Gemini));
@@ -335,11 +412,12 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
 
     set_visible_apps(VisibleApps {
         claude: false,
-        claude_desktop: false,
         codex: true,
         gemini: true,
         opencode: false,
         openclaw: true,
+        pi: false,
+        claude_desktop: false,
         hermes: true,
     })
     .expect("persist visible apps");
@@ -353,12 +431,13 @@ fn set_visible_apps_persists_visible_apps_as_camel_case_json() {
         value["visibleApps"],
         json!({
             "claude": false,
-            "claude-desktop": false,
             "codex": true,
             "gemini": true,
             "opencode": false,
             "openclaw": true,
             "hermes": true,
+            "pi": false,
+            "claudeDesktop": false,
         })
     );
 }
@@ -388,22 +467,24 @@ fn load_reads_valid_non_default_visible_apps_from_settings_json() {
         visible,
         VisibleApps {
             claude: false,
-            claude_desktop: true,
             codex: true,
             gemini: true,
             opencode: true,
             openclaw: false,
+            pi: true,
+            claude_desktop: true,
             hermes: true,
         }
     );
     assert_eq!(
         visible.ordered_enabled(),
         vec![
-            AppType::ClaudeDesktop,
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
-            AppType::Hermes
+            AppType::Hermes,
+            AppType::Pi,
+            AppType::ClaudeDesktop,
         ]
     );
 }
@@ -427,11 +508,12 @@ fn load_partial_visible_apps_object_uses_defaults_for_missing_keys() {
         get_visible_apps(),
         VisibleApps {
             claude: false,
-            claude_desktop: true,
             codex: true,
             gemini: false,
             opencode: true,
             openclaw: true,
+            pi: true,
+            claude_desktop: true,
             hermes: true,
         }
     );
@@ -503,11 +585,12 @@ fn set_visible_apps_rejects_zero_selection() {
 
     let err = set_visible_apps(VisibleApps {
         claude: false,
-        claude_desktop: false,
         codex: false,
         gemini: false,
         opencode: false,
         openclaw: false,
+        pi: false,
+        claude_desktop: false,
         hermes: false,
     })
     .expect_err("zero visible apps should be rejected");
@@ -526,11 +609,12 @@ fn update_settings_rejects_all_false_visible_apps() {
     let settings = AppSettings {
         visible_apps: VisibleApps {
             claude: false,
-            claude_desktop: false,
             codex: false,
             gemini: false,
             opencode: false,
             openclaw: false,
+            pi: false,
+            claude_desktop: false,
             hermes: false,
         },
         ..Default::default()
@@ -578,12 +662,13 @@ fn load_normalizes_all_false_visible_apps_to_defaults() {
         json!({
             "visibleApps": {
                 "claude": false,
-                "claude-desktop": false,
                 "codex": false,
                 "gemini": false,
                 "opencode": false,
                 "openclaw": false,
-                "hermes": false
+                "hermes": false,
+                "pi": false,
+                "claudeDesktop": false
             }
         }),
     );
@@ -623,11 +708,12 @@ fn malformed_visible_apps_json_falls_back_to_full_defaults() {
 fn next_visible_app_wraps_and_skips_hidden_entries() {
     let visible = VisibleApps {
         claude: true,
-        claude_desktop: false,
         codex: false,
         gemini: false,
         opencode: true,
         openclaw: true,
+        pi: false,
+        claude_desktop: false,
         hermes: true,
     };
 

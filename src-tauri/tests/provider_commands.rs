@@ -79,9 +79,6 @@ fn usage_query_set_command(
         base_url: None,
         access_token: None,
         user_id: None,
-        coding_plan_provider: None,
-        team_organization_id: None,
-        team_project_id: None,
     }
 }
 
@@ -110,8 +107,6 @@ fn usage_script_fixture() -> UsageScript {
         template_type: Some("general".to_string()),
         auto_query_interval: Some(30),
         coding_plan_provider: None,
-        team_organization_id: None,
-        team_project_id: None,
     }
 }
 
@@ -157,7 +152,7 @@ fn provider_usage_query_set_writes_upstream_defaults_and_preserves_meta() {
     command.auto_query_interval = Some(1441);
 
     provider_command(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
         AppType::Claude,
     );
 
@@ -225,7 +220,7 @@ fn provider_usage_query_set_newapi_clears_general_credentials() {
     command.user_id = Some("user-demo".to_string());
 
     provider_command(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
         AppType::Claude,
     );
 
@@ -335,7 +330,7 @@ fn provider_usage_query_set_defaults_to_balance_template_from_provider_url() {
     command.enabled = true;
 
     provider_command(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
         AppType::Claude,
     );
 
@@ -392,7 +387,7 @@ fn provider_usage_query_set_rejects_enabled_script_without_return() {
     command.code = Some("({ request: { url: 'https://usage.example.com' } })".to_string());
 
     let err = provider_command_result(
-        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(Box::new(command))),
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
         AppType::Claude,
     )
     .expect_err("enabled script without return should be rejected");
@@ -411,7 +406,7 @@ fn provider_usage_query_set_rejects_enabled_script_without_return() {
 
 #[test]
 #[serial]
-fn provider_export_writes_merged_claude_settings_to_default_path() {
+fn provider_export_does_not_replay_legacy_claude_snippets() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let home = ensure_test_home();
@@ -481,15 +476,15 @@ fn provider_export_writes_merged_claude_settings_to_default_path() {
             .get("env")
             .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|v| v.as_i64()),
-        Some(1),
-        "common config snippet should be merged into export"
+        None,
+        "legacy common snippets must not be replayed into exports"
     );
     assert_eq!(
         exported
             .get("includeCoAuthoredBy")
             .and_then(|v| v.as_bool()),
-        Some(false),
-        "top-level common config should be present in export"
+        None,
+        "legacy global snippet values must not enter exports"
     );
     assert_eq!(
         exported
@@ -1462,14 +1457,14 @@ command = "echo"
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "switch must preserve live MCP servers instead of resyncing stored definitions"
     );
     let parsed_config: toml::Value = toml::from_str(&config_text).expect("parse config.toml");
     assert_eq!(
         parsed_config
             .get("model_providers")
-            .and_then(|value| value.get("latest"))
+            .and_then(|value| value.get("custom"))
             .and_then(|value| value.get("experimental_bearer_token"))
             .and_then(|value| value.as_str()),
         Some("fresh-key"),
@@ -1511,8 +1506,8 @@ command = "echo"
         .and_then(|v| v.as_str())
         .unwrap_or("");
     assert_eq!(
-        legacy_auth_value, "legacy-key",
-        "previous provider should be backfilled with live auth"
+        legacy_auth_value, "stale",
+        "switching must not backfill native login into a provider row"
     );
 }
 
@@ -1568,8 +1563,8 @@ requires_openai_auth = true
 
     assert_eq!(
         live_value.get("model_provider").and_then(|v| v.as_str()),
-        Some("azure"),
-        "model_provider should be preserved from stored config"
+        Some("custom"),
+        "live routing uses the upstream stable custom bucket"
     );
 
     let providers = live_value
@@ -1577,7 +1572,7 @@ requires_openai_auth = true
         .and_then(|v| v.as_table())
         .expect("model_providers should exist");
     let provider_table = providers
-        .get("azure")
+        .get("custom")
         .and_then(|v| v.as_table())
         .expect("azure provider table should exist");
     assert_eq!(
@@ -1594,8 +1589,8 @@ requires_openai_auth = true
         provider_table
             .get("requires_openai_auth")
             .and_then(|v| v.as_bool()),
-        Some(true),
-        "requires_openai_auth should be carried over from stored config"
+        Some(false),
+        "a route without native login must not require official auth"
     );
 }
 
@@ -1708,8 +1703,9 @@ fn switch_provider_updates_claude_live_and_state() {
         .get("old-provider")
         .expect("legacy provider still exists");
     assert_eq!(
-        legacy_provider.settings_config, legacy_live,
-        "previous provider should receive backfilled live config"
+        legacy_provider.settings_config,
+        json!({"env":{"ANTHROPIC_API_KEY":"stale-key"}}),
+        "switching must not backfill live settings into provider rows"
     );
 
     let new_provider = manager
@@ -1953,8 +1949,8 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
             .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
-        Some("1"),
-        "selected-provider restore backup should use normal Claude common snippet semantics"
+        None,
+        "switching must not replay saved common settings"
     );
 
     let failover_snapshot = state
@@ -1970,8 +1966,8 @@ async fn switch_provider_under_takeover_refreshes_claude_restore_backup_to_selec
             .get("env")
             .and_then(|env| env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
             .and_then(|value| value.as_str()),
-        Some("1"),
-        "takeover-time switch should generate a provider snapshot with normal Claude common snippet semantics"
+        None,
+        "switching must not replay saved common settings"
     );
 
     state

@@ -62,12 +62,13 @@ where
 pub(crate) fn app_display_name(app_type: &AppType) -> &'static str {
     match app_type {
         AppType::Claude => "Claude",
-        AppType::ClaudeDesktop => "Claude Desktop",
         AppType::Codex => "Codex",
         AppType::Gemini => "Gemini",
         AppType::OpenCode => "OpenCode",
         AppType::Hermes => "Hermes",
         AppType::OpenClaw => "OpenClaw",
+        AppType::Pi => "Pi",
+        AppType::ClaudeDesktop => "Claude Desktop",
     }
 }
 
@@ -77,6 +78,7 @@ pub(crate) fn queue_managed_proxy_action(
     proxy_loading: &mut RequestTracker,
     app_type: AppType,
     enabled: bool,
+    base_reload_token: super::super::data::UiDataReloadToken,
 ) -> Result<(), AppError> {
     let Some(tx) = proxy_req_tx else {
         app.push_toast(
@@ -101,6 +103,7 @@ pub(crate) fn queue_managed_proxy_action(
         request_id,
         app_type,
         enabled,
+        base_reload_token,
     }) {
         proxy_loading.cancel();
         app.overlay = Overlay::None;

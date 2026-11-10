@@ -80,11 +80,27 @@ Commands that normally create startup state call `AppState::try_new_with_startup
 
 OpenClaw workspace helpers live under `src/commands/workspace.rs`, not the Clap command tree. They restrict file access to the OpenClaw workspace allowlist (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `MEMORY.md`, `HEARTBEAT.md`, `BOOTSTRAP.md`, `BOOT.md`) and daily memory files, and deliberately reject symlinks/path traversal.
 
+## TUI interaction guidance
+
+- Keep primary TUI surfaces focused on fields, current values/status, and available actions.
+- Put feature explanations, behavioral caveats, validation rules, and other long-form hints in the contextual `?` help for the focused control.
+- Do not add persistent instruction or description panels when the same information can live in `?` help.
+
 ## Proxy architecture
 
 The proxy command surface is in `src/cli/commands/proxy.rs`, orchestration lives in `src/services/proxy.rs`, and the HTTP server is in `src/proxy/server.rs` and `src/proxy/handlers.rs`.
 
 Request handling flows through `HandlerContext`, `ProviderRouter`, `RequestForwarder`, provider adapters in `src/proxy/providers/`, and response builders/handlers in `src/proxy/response*.rs`. Claude `/v1/messages` traffic may be transformed between Anthropic and OpenAI-compatible formats; Codex/OpenAI, Gemini, Copilot, and streaming-response routes are handled by provider-specific adapters. Proxy tests are split across focused integration targets such as `proxy_claude_streaming`, `proxy_claude_openai_chat`, `proxy_claude_response_parity`, `proxy_claude_forwarder_alignment`, `proxy_multi_app_passthrough`, `proxy_takeover`, `proxy_service`, and `proxy_daemon`.
+
+## Blind review protocol
+
+- Before development, define the requirements, acceptance criteria, and task boundaries. Keep changes minimal and avoid unrelated refactoring or behavior changes.
+- After implementation and local validation are complete, send the full change set to one new subagent for blind review.
+- Start every reviewer with fresh context, without inheriting the development conversation. Provide only the user's goal, intended behavior, acceptance criteria, task boundaries, relevant constraints, repository location, and comparison baseline. Before review begins, tell the user the requirements, criteria, and boundaries given to the reviewer.
+- Do not disclose implementation details, change summaries, self-assessments, or findings from prior review rounds. Ask the reviewer to independently inspect all current modifications and report correctness, regression, security, performance, UX, and test-coverage issues.
+- Validate every finding against the code. Make minimal fixes for confirmed issues within scope, run the relevant checks, then start another blind review with a new subagent under the same context rules.
+- If a confirmed finding also exists upstream, fixing it would expand the task, and compatibility is the intended behavior, it may remain unchanged. Record that decision and prefer upstream parity over an unrelated local fix.
+- If review and repair keep cycling without convergence, stop patching and reconsider the overall design and task boundaries. If that still cannot produce a sound resolution, stop expanding the change set and report the unresolved issues, tradeoffs, and evidence to the user.
 
 ## Testing requirements
 

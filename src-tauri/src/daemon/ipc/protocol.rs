@@ -9,10 +9,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
-    /// Foreground asks which database this daemon owns before sending any
-    /// state-mutating request. This prevents a daemon started with a different
-    /// `CC_SWITCH_CONFIG_DIR` from serving the process-global control socket.
-    ConfigIdentity,
     /// Foreground asks the daemon to bring the named app's worker up if it
     /// isn't already, and enable proxy takeover for that app.
     EnsureWorker {
@@ -40,6 +36,9 @@ pub enum Request {
     /// daemon writes the desired switch only; app routes start through
     /// `EnsureWorker`.
     SetGlobalEnabled { enabled: bool },
+    /// Foreground asks the daemon and active workers to reload the persisted
+    /// global outbound proxy. The URL itself never crosses IPC.
+    ReloadOutboundProxy,
     /// Force the daemon to stop the worker (if any) and exit.
     Shutdown,
 }
@@ -48,9 +47,6 @@ pub enum Request {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
     Ok,
-    ConfigIdentity {
-        database: String,
-    },
     Worker {
         address: String,
         port: u16,
@@ -157,14 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn config_identity_roundtrips() {
-        roundtrip_request(Request::ConfigIdentity);
-        roundtrip_response(Response::ConfigIdentity {
-            database: "file:/tmp/cc-switch.db".to_string(),
-        });
-    }
-
-    #[test]
     fn ensure_worker_decodes_legacy_request_without_fallback() {
         let decoded: Request =
             serde_json::from_str(r#"{"kind":"ensure_worker","app_type":"claude"}"#)
@@ -209,6 +197,11 @@ mod tests {
     fn set_global_enabled_roundtrips_both_polarities() {
         roundtrip_request(Request::SetGlobalEnabled { enabled: true });
         roundtrip_request(Request::SetGlobalEnabled { enabled: false });
+    }
+
+    #[test]
+    fn reload_outbound_proxy_roundtrips() {
+        roundtrip_request(Request::ReloadOutboundProxy);
     }
 
     #[test]

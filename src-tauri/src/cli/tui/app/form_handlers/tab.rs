@@ -1,12 +1,26 @@
 use super::*;
 
 impl App {
-    pub(super) fn handle_form_tab_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn handle_form_tab_key(&mut self, key: KeyEvent, _data: &UiData) -> bool {
         let is_backtab = matches!(key.code, KeyCode::BackTab)
             || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT));
         let is_tab = matches!(key.code, KeyCode::Tab) && !is_backtab;
         if !is_tab && !is_backtab {
             return false;
+        }
+
+        if self.form.as_ref().is_some_and(FormState::is_editing)
+            && !matches!(
+                self.form.as_ref(),
+                Some(FormState::PromptMeta(prompt))
+                    if matches!(prompt.focus, FormFocus::Content)
+                        && prompt.text_edit.is_none()
+            )
+        {
+            // Inline editors use Enter to apply and Esc to cancel. Tab and
+            // Shift+Tab deliberately do nothing here so they cannot commit a
+            // partially typed value or unexpectedly jump to another field.
+            return true;
         }
 
         let Some(form) = self.form.as_mut() else {
@@ -33,6 +47,13 @@ impl App {
                     provider.focus = FormFocus::Fields;
                     return true;
                 }
+                if matches!(provider.page, form::ProviderFormPage::LocalProxySettings) {
+                    if is_backtab {
+                        return false;
+                    }
+                    provider.focus = FormFocus::Fields;
+                    return true;
+                }
                 if matches!(provider.page, form::ProviderFormPage::CodexModelCatalog) {
                     if is_backtab {
                         return false;
@@ -44,7 +65,6 @@ impl App {
                     if is_backtab {
                         return false;
                     }
-                    finish_usage_query_tab_editing(provider);
                     if !provider.usage_query_extractor_available() {
                         provider.focus = FormFocus::Fields;
                         return true;
@@ -66,7 +86,10 @@ impl App {
                         provider.focus,
                         provider.codex_preview_section,
                     ) {
-                        (FormMode::Add, FormFocus::Templates, _) => {
+                        // The template is a field row now, so the provider form
+                        // never rests on `Templates`; the arm only exists to
+                        // recover if some other path sets it.
+                        (_, FormFocus::Templates, _) => {
                             provider.focus = FormFocus::Fields;
                         }
                         (FormMode::Add, FormFocus::Fields, _) => {
@@ -86,7 +109,7 @@ impl App {
                             FormFocus::JsonPreview,
                             form::CodexPreviewSection::Config,
                         ) => {
-                            provider.focus = FormFocus::Templates;
+                            provider.focus = FormFocus::Fields;
                         }
                         (FormMode::Edit { .. }, FormFocus::Fields, _) => {
                             provider.focus = FormFocus::JsonPreview;
@@ -107,23 +130,17 @@ impl App {
                         ) => {
                             provider.focus = FormFocus::Fields;
                         }
-                        (FormMode::Edit { .. }, FormFocus::Templates, _) => {
-                            provider.focus = FormFocus::Fields;
-                        }
                         (_, FormFocus::Content, _) => {
                             provider.focus = FormFocus::Fields;
                         }
                     }
                 } else {
-                    provider.focus = match (&provider.mode, provider.focus) {
-                        (FormMode::Add, FormFocus::Templates) => FormFocus::Fields,
-                        (FormMode::Add, FormFocus::Fields) => FormFocus::JsonPreview,
-                        (FormMode::Add, FormFocus::JsonPreview) => FormFocus::Templates,
-                        (FormMode::Add, FormFocus::Content) => FormFocus::Fields,
-                        (FormMode::Edit { .. }, FormFocus::Fields) => FormFocus::JsonPreview,
-                        (FormMode::Edit { .. }, FormFocus::JsonPreview) => FormFocus::Fields,
-                        (FormMode::Edit { .. }, FormFocus::Templates) => FormFocus::Fields,
-                        (FormMode::Edit { .. }, FormFocus::Content) => FormFocus::Fields,
+                    // Add and Edit now share the same two-stop cycle: the
+                    // template lives in the field table, not its own pane.
+                    provider.focus = match provider.focus {
+                        FormFocus::Fields => FormFocus::JsonPreview,
+                        FormFocus::JsonPreview => FormFocus::Fields,
+                        FormFocus::Templates | FormFocus::Content => FormFocus::Fields,
                     };
                 }
             }
@@ -144,41 +161,22 @@ impl App {
             }
             FormState::PromptMeta(prompt) => {
                 if is_backtab {
-                    prompt.editing = false;
                     prompt.focus = FormFocus::Fields;
                     return true;
                 }
                 if is_tab && matches!(prompt.focus, FormFocus::Content) {
                     return false;
                 }
-                prompt.editing = false;
                 prompt.focus = match prompt.focus {
                     FormFocus::Fields => FormFocus::Content,
                     FormFocus::Content => FormFocus::Fields,
                     FormFocus::Templates | FormFocus::JsonPreview => FormFocus::Fields,
                 };
             }
+            FormState::S3Sync(_) => return false,
+            FormState::WebDavSync(_) => return false,
         }
 
         true
     }
-}
-
-fn finish_usage_query_tab_editing(provider: &mut form::ProviderAddFormState) {
-    if !provider.usage_query_editing {
-        return;
-    }
-
-    if matches!(
-        provider.selected_usage_query_field(),
-        Some(form::UsageQueryField::Timeout | form::UsageQueryField::AutoInterval)
-    ) {
-        let timeout = form::normalize_usage_timeout(&provider.usage_query_timeout.value);
-        provider.usage_query_timeout.set(timeout.to_string());
-
-        let interval = form::normalize_usage_interval(&provider.usage_query_auto_interval.value);
-        provider.usage_query_auto_interval.set(interval.to_string());
-    }
-
-    provider.usage_query_editing = false;
 }

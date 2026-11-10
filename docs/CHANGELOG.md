@@ -7,6 +7,659 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [5.11.3] - 2026-10-22
+
+### Fixed
+
+- **Database / Compatibility**: Support database schemas 21 and 22, fixing startup failures when opening a database created by a newer CC Switch desktop version. Align the migration steps and MCP/Skills fields with the shared schema, preserving existing data and application enablement flags through upgrades, edits, and WebDAV sync. Includes [#528](https://github.com/SaladDay/cc-switch-cli/pull/528), fixing [#526](https://github.com/SaladDay/cc-switch-cli/issues/526).
+
+### Upgrade notes
+
+- If startup reports database version 21 or 22 as unsupported, update to v5.11.3. The existing pre-migration backup runs before upgrading older databases; databases newer than schema 22 are still rejected.
+- This release adds database compatibility, not CLI management for Antigravity or Kimi Code. After migration to schema 22, older CLI versions cannot open the upgraded database.
+- Run `cc-switch update`, or use `brew upgrade cc-switch-cli` for Homebrew installations once the formula is updated.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.11.2, including earlier participants in those discussions and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@AtaraxiaEpiphany](https://github.com/AtaraxiaEpiphany) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517), [#522](https://github.com/SaladDay/cc-switch-cli/pull/522) |
+| [@claude](https://github.com/claude) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517), [#521](https://github.com/SaladDay/cc-switch-cli/pull/521), [#522](https://github.com/SaladDay/cc-switch-cli/pull/522) |
+| [@hao-lin-lwh](https://github.com/hao-lin-lwh) | [#525](https://github.com/SaladDay/cc-switch-cli/issues/525) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#526](https://github.com/SaladDay/cc-switch-cli/issues/526) |
+| [@RGB-loop](https://github.com/RGB-loop) | [#481](https://github.com/SaladDay/cc-switch-cli/issues/481), [#521](https://github.com/SaladDay/cc-switch-cli/pull/521) |
+| [@SaladDay](https://github.com/SaladDay) | [#528](https://github.com/SaladDay/cc-switch-cli/pull/528) |
+| [@SanAntonio021](https://github.com/SanAntonio021) | [#523](https://github.com/SaladDay/cc-switch-cli/pull/523), [#524](https://github.com/SaladDay/cc-switch-cli/pull/524) |
+| [@stone-w4tch3r](https://github.com/stone-w4tch3r) | [#481](https://github.com/SaladDay/cc-switch-cli/issues/481) |
+| [@Xiao-Maker-droid](https://github.com/Xiao-Maker-droid) | [#527](https://github.com/SaladDay/cc-switch-cli/pull/527) |
+
+Thanks also to our sponsors, everyone supporting and using the project, and the CC-Switch maintainers and contributors whose shared migration implementations underpin this fix.
+
+## [5.11.2] - 2026-10-16
+
+### Added
+
+- **Presets / APIMart**: Add APIMart as the second sponsor preset with protocol-specific endpoints for supported applications. Update the English, Chinese and Japanese README sponsor sections with the supplied banner and registration link. Includes [#518](https://github.com/SaladDay/cc-switch-cli/pull/518).
+
+### Changed
+
+- **Presets / Ordering**: Keep PatewayAI available for Claude and Codex in the penultimate sponsor position, while removing its README sponsorship entry. Existing provider records remain unchanged. Includes [#518](https://github.com/SaladDay/cc-switch-cli/pull/518).
+- **Documentation / Japanese**: Synchronize the Japanese README with current project documentation. Includes [#511](https://github.com/SaladDay/cc-switch-cli/pull/511).
+
+### Fixed
+
+- **Claude / Default Model Context**: Add an independent **Default model 1M** toggle immediately after the default-model field in the TUI. `ANTHROPIC_MODEL` takes precedence over role aliases in direct sessions, so enabling 1M only on role rows could leave the active default model at a smaller context window. The new control preserves its declaration when renaming, disables it when clearing the model, and keeps role settings independent. Contextual help explains the priority. Includes [#519](https://github.com/SaladDay/cc-switch-cli/pull/519), fixing [#507](https://github.com/SaladDay/cc-switch-cli/issues/507).
+
+### Upgrade notes
+
+- If your default Claude model supports 1M context, enable **Default model 1M** in the provider form, save, and restart Claude Code. Role-model 1M toggles do not automatically enable it for the default model. The declaration does not verify provider capability.
+- Existing provider settings are not automatically rewritten. The APIMart presets configure supported text protocols; this release does not add image/video task APIs to the CLI.
+- For Homebrew installations, use `brew upgrade cc-switch-cli` once the formula is updated.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.11.1, including earlier participants in those discussions and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@AtaraxiaEpiphany](https://github.com/AtaraxiaEpiphany) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517) |
+| [@claude](https://github.com/claude) | [#517](https://github.com/SaladDay/cc-switch-cli/pull/517) |
+| [@denghongcai](https://github.com/denghongcai) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@feicai922](https://github.com/feicai922) | [#516](https://github.com/SaladDay/cc-switch-cli/issues/516) |
+| [@GalaxyKW](https://github.com/GalaxyKW) | [#514](https://github.com/SaladDay/cc-switch-cli/pull/514) |
+| [@jellyjelly814](https://github.com/jellyjelly814) | [#511](https://github.com/SaladDay/cc-switch-cli/pull/511) |
+| [@lijiawei0305-pixel](https://github.com/lijiawei0305-pixel) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@RGB-loop](https://github.com/RGB-loop) | [#512](https://github.com/SaladDay/cc-switch-cli/pull/512) |
+| [@SaladDay](https://github.com/SaladDay) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507), [#511](https://github.com/SaladDay/cc-switch-cli/pull/511), [#513](https://github.com/SaladDay/cc-switch-cli/issues/513), [#516](https://github.com/SaladDay/cc-switch-cli/issues/516), [#518](https://github.com/SaladDay/cc-switch-cli/pull/518), [#519](https://github.com/SaladDay/cc-switch-cli/pull/519) |
+| [@TaichiLi](https://github.com/TaichiLi) | [#515](https://github.com/SaladDay/cc-switch-cli/issues/515) |
+| [@xiaojueshi](https://github.com/xiaojueshi) | [#513](https://github.com/SaladDay/cc-switch-cli/issues/513) |
+
+Thanks also to APIMart and our other sponsors, everyone supporting and using the project, and the CC-Switch maintainers and contributors whose shared implementations underpin these improvements.
+
+## [5.11.1] - 2026-10-12
+
+### Added
+
+- **Presets**: Add 88API presets and align the preset ordering with README sponsors, keeping former sponsors available at the end of the list. Includes [#504](https://github.com/SaladDay/cc-switch-cli/pull/504).
+- **Documentation**: Add a Japanese README. Includes [#502](https://github.com/SaladDay/cc-switch-cli/pull/502).
+
+### Changed
+
+- **Configuration / Provider Switching**: Replace provider-owned routing, authentication, and model fields while preserving other live settings. Claude and Gemini switching, proxy restoration, and temporary Claude launches use the shared key-field write mechanism; Codex includes the top-level `base_url` compatibility fix. Interrupted writes use durable recovery. Includes [#506](https://github.com/SaladDay/cc-switch-cli/pull/506).
+
+### Fixed
+
+- **Codex / Shared Workspace Accounts**: Keep members of the same ChatGPT workspace in separate managed accounts instead of overwriting credentials. Targeted reauthentication preserves the local account ID and provider bindings, and proxy, model, and quota requests use the selected member's credentials and workspace. Includes [#509](https://github.com/SaladDay/cc-switch-cli/pull/509), fixing [#493](https://github.com/SaladDay/cc-switch-cli/issues/493).
+- **Proxy / Daemon Shutdown**: Stop daemon-owned proxy workers even when runtime metadata is missing, allowing WebDAV restore to proceed. Includes [#508](https://github.com/SaladDay/cc-switch-cli/pull/508), fixing [#497](https://github.com/SaladDay/cc-switch-cli/issues/497).
+- **macOS / Build Compatibility**: Restore daemon linking on Apple targets with libc 0.2.190. Includes [#505](https://github.com/SaladDay/cc-switch-cli/pull/505), fixing [#499](https://github.com/SaladDay/cc-switch-cli/issues/499).
+
+### Upgrade notes
+
+- Existing managed Codex OAuth accounts require reauthentication after upgrading. Use **Reauthenticate** in the account menu or `cc-switch auth login --account-id <id>` with the original user and workspace to preserve provider bindings. Accounts requiring reauthentication cannot supply credentials until confirmed.
+- Ordinary provider switching preserves live user settings and no longer replays saved common snippets or reprojects MCP configuration. Explicit common-config editing remains available.
+- For Homebrew installations, use `brew upgrade cc-switch-cli` once the formula is updated.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.11.0, including earlier participants in those discussions and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@3aKHP](https://github.com/3aKHP) | [#496](https://github.com/SaladDay/cc-switch-cli/issues/496) |
+| [@denghongcai](https://github.com/denghongcai) | [#507](https://github.com/SaladDay/cc-switch-cli/issues/507) |
+| [@genmlite](https://github.com/genmlite) | [#497](https://github.com/SaladDay/cc-switch-cli/issues/497) |
+| [@jellyjelly814](https://github.com/jellyjelly814) | [#502](https://github.com/SaladDay/cc-switch-cli/pull/502), [#503](https://github.com/SaladDay/cc-switch-cli/pull/503) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#495](https://github.com/SaladDay/cc-switch-cli/issues/495) |
+| [@liuyang8903](https://github.com/liuyang8903) | [#499](https://github.com/SaladDay/cc-switch-cli/issues/499) |
+| [@mosongnan](https://github.com/mosongnan) | [#493](https://github.com/SaladDay/cc-switch-cli/issues/493) |
+| [@neverdie0710](https://github.com/neverdie0710) | [#451](https://github.com/SaladDay/cc-switch-cli/pull/451) |
+| [@RGB-loop](https://github.com/RGB-loop) | [#481](https://github.com/SaladDay/cc-switch-cli/issues/481), [#496](https://github.com/SaladDay/cc-switch-cli/issues/496) |
+| [@SaladDay](https://github.com/SaladDay) | [#451](https://github.com/SaladDay/cc-switch-cli/pull/451), [#464](https://github.com/SaladDay/cc-switch-cli/issues/464), [#493](https://github.com/SaladDay/cc-switch-cli/issues/493), [#496](https://github.com/SaladDay/cc-switch-cli/issues/496), [#497](https://github.com/SaladDay/cc-switch-cli/issues/497), [#502](https://github.com/SaladDay/cc-switch-cli/pull/502), [#504](https://github.com/SaladDay/cc-switch-cli/pull/504), [#505](https://github.com/SaladDay/cc-switch-cli/pull/505), [#506](https://github.com/SaladDay/cc-switch-cli/pull/506), [#507](https://github.com/SaladDay/cc-switch-cli/issues/507), [#508](https://github.com/SaladDay/cc-switch-cli/pull/508), [#509](https://github.com/SaladDay/cc-switch-cli/pull/509) |
+| [@sean0407](https://github.com/sean0407) | [#505](https://github.com/SaladDay/cc-switch-cli/pull/505) |
+| [@stone-w4tch3r](https://github.com/stone-w4tch3r) | [#481](https://github.com/SaladDay/cc-switch-cli/issues/481) |
+| [@tao-deng](https://github.com/tao-deng) | [#498](https://github.com/SaladDay/cc-switch-cli/pull/498) |
+| [@timeuser4](https://github.com/timeuser4) | [#500](https://github.com/SaladDay/cc-switch-cli/pull/500), [#501](https://github.com/SaladDay/cc-switch-cli/issues/501) |
+| [@wongsinglam](https://github.com/wongsinglam) | [#494](https://github.com/SaladDay/cc-switch-cli/issues/494) |
+| [@ybin2024](https://github.com/ybin2024) | [#464](https://github.com/SaladDay/cc-switch-cli/issues/464) |
+
+Thanks also to our sponsors, everyone supporting and using the project, and the CC-Switch maintainers and contributors whose shared implementations underpin these improvements.
+
+## [5.11.0] - 2026-10-07
+
+### Added
+
+- **Codex / Reset Credits**: Inspect and redeem rate-limit reset credits from auth and provider quota commands. Confirmation commands pin the selected managed account and credit; inspection failures are distinguished from empty results, and a failed refresh after redemption does not invite a second redemption. Includes [#475](https://github.com/SaladDay/cc-switch-cli/pull/475) and [#477](https://github.com/SaladDay/cc-switch-cli/pull/477).
+
+### Changed
+
+- **Database / Compatibility**: Align schema and migrations with CC-Switch schema v20, including shared MCP/Skills fields. Databases at v18 and v19 migrate forward; v20 databases work with local startup and SQL/WebDAV import. Includes [#484](https://github.com/SaladDay/cc-switch-cli/pull/484), addressing [#472](https://github.com/SaladDay/cc-switch-cli/issues/472).
+- **Codex / Configuration and Authentication**: Align provider switching, native-login preservation, configuration projection, and interrupted-write recovery with the shared implementation. Third-party keys are written to the provider's TOML bearer token, and switching back to OpenAI Official restores the native login without retaining the third-party key. Includes [#486](https://github.com/SaladDay/cc-switch-cli/pull/486), addressing [#480](https://github.com/SaladDay/cc-switch-cli/issues/480) and [#473](https://github.com/SaladDay/cc-switch-cli/issues/473).
+- **OpenCode / V2 Storage**: Support OpenCode 2.x session and message tables for session browsing, transcripts, deletion, and usage collection, while retaining V1 support and handling mixed databases. Includes [#485](https://github.com/SaladDay/cc-switch-cli/pull/485), fixing [#483](https://github.com/SaladDay/cc-switch-cli/issues/483).
+
+### Fixed
+
+- **Codex / Compressed Requests**: Decode compressed Codex requests before proxy processing. Includes [#487](https://github.com/SaladDay/cc-switch-cli/pull/487), fixing [#469](https://github.com/SaladDay/cc-switch-cli/issues/469).
+- **Codex / Tool Declarations**: Collect supported `additional_tools` declarations from input carriers for Chat Completions conversion. Includes [#488](https://github.com/SaladDay/cc-switch-cli/pull/488), fixing [#466](https://github.com/SaladDay/cc-switch-cli/issues/466).
+- **Codex / Reasoning and Tools**: Preserve reasoning across mixed tool-call turns and combine commentary with tool output where required by the conversion path. Includes [#491](https://github.com/SaladDay/cc-switch-cli/pull/491), fixing [#458](https://github.com/SaladDay/cc-switch-cli/issues/458).
+- **Codex / OAuth Identity**: Use consistent Codex client identity headers for OAuth requests and model discovery, matching client version 0.159.0. Includes [#465](https://github.com/SaladDay/cc-switch-cli/pull/465).
+- **Proxy / Empty Legacy Tool Calls**: Ignore legacy `function_call` payloads in Chat-to-Anthropic streaming, preventing empty placeholders from creating invalid tool blocks. Includes [#438](https://github.com/SaladDay/cc-switch-cli/pull/438), addressing [#437](https://github.com/SaladDay/cc-switch-cli/issues/437). See the compatibility note below.
+- **Hermes / Custom Home**: Honor custom Hermes home directories. Includes [#489](https://github.com/SaladDay/cc-switch-cli/pull/489), fixing [#464](https://github.com/SaladDay/cc-switch-cli/issues/464).
+- **Configuration / Symlinked Home**: Support symlinked home-directory ancestors, including Synology layouts, while retaining protections for managed paths. Includes [#490](https://github.com/SaladDay/cc-switch-cli/pull/490), fixing [#457](https://github.com/SaladDay/cc-switch-cli/issues/457).
+- **TUI / Build Reliability**: Prevent visibility sentinel functions from being folded together. Includes [#462](https://github.com/SaladDay/cc-switch-cli/pull/462).
+- **Tests / Portability**: Handle the single-parser-worker completion-order case and skip the non-UTF8 filename case on macOS. Includes [#470](https://github.com/SaladDay/cc-switch-cli/pull/470) and [#463](https://github.com/SaladDay/cc-switch-cli/pull/463).
+
+### Upgrade notes
+
+- Database schema advances from v18 to v20. Back up your configuration before upgrading; older clients that only support v18 cannot open a migrated database. Schema versions newer than v20 remain rejected.
+- Normal Codex provider switching preserves live settings and MCP configuration rather than replaying saved common snippets or resynchronizing MCP. Explicit common-config editing remains available.
+- Streamed tool invocations must use modern `tool_calls`. Legacy-only `function_call` payloads are now ignored, including nonempty payloads; the existing finish-reason mapping is retained. See the [compatibility details](https://github.com/SaladDay/cc-switch-cli/blob/v5.11.0/docs/maintenance/legacy-function-call-streaming.md).
+- For Homebrew installations, use `brew upgrade cc-switch-cli`.
+
+### Thanks
+
+Thank you to everyone who reported problems, proposed changes, shared diagnostics, reviewed code, or joined the discussions. The list below covers issues and pull requests active since v5.10.5 and their linked discussions, including earlier participants and contributions that have not been merged. Being listed here does not mean a proposed feature is included in this release.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@1753135250](https://github.com/1753135250) | [#252](https://github.com/SaladDay/cc-switch-cli/issues/252) |
+| [@525300887039](https://github.com/525300887039) | [#476](https://github.com/SaladDay/cc-switch-cli/pull/476) |
+| [@alario-tang](https://github.com/alario-tang) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@bryango](https://github.com/bryango) | [#462](https://github.com/SaladDay/cc-switch-cli/pull/462), [#463](https://github.com/SaladDay/cc-switch-cli/pull/463), [#470](https://github.com/SaladDay/cc-switch-cli/pull/470) |
+| [@bytemain](https://github.com/bytemain) | [#467](https://github.com/SaladDay/cc-switch-cli/pull/467), [#475](https://github.com/SaladDay/cc-switch-cli/pull/475), [#477](https://github.com/SaladDay/cc-switch-cli/pull/477) |
+| [@CCE-Li](https://github.com/CCE-Li) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@CodeCatMeow](https://github.com/CodeCatMeow) | [#403](https://github.com/SaladDay/cc-switch-cli/issues/403) |
+| [@cyberElar](https://github.com/cyberElar) | [#468](https://github.com/SaladDay/cc-switch-cli/issues/468), [#469](https://github.com/SaladDay/cc-switch-cli/issues/469) |
+| [@Devin-Pi](https://github.com/Devin-Pi) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358), [#446](https://github.com/SaladDay/cc-switch-cli/pull/446) |
+| [@dividduang](https://github.com/dividduang) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@GOTOgxy](https://github.com/GOTOgxy) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@haai-team](https://github.com/haai-team) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@HappyLiang12](https://github.com/HappyLiang12) | [#466](https://github.com/SaladDay/cc-switch-cli/issues/466) |
+| [@JM-FRANK](https://github.com/JM-FRANK) | [#478](https://github.com/SaladDay/cc-switch-cli/pull/478) |
+| [@Josh00-Lu](https://github.com/Josh00-Lu) | [#473](https://github.com/SaladDay/cc-switch-cli/issues/473) |
+| [@JounQin](https://github.com/JounQin) | [#457](https://github.com/SaladDay/cc-switch-cli/issues/457) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#403](https://github.com/SaladDay/cc-switch-cli/issues/403), [#444](https://github.com/SaladDay/cc-switch-cli/issues/444), [#474](https://github.com/SaladDay/cc-switch-cli/pull/474), [#479](https://github.com/SaladDay/cc-switch-cli/issues/479) |
+| [@kiwiflydream](https://github.com/kiwiflydream) | [#334](https://github.com/SaladDay/cc-switch-cli/issues/334) |
+| [@l2yyd5](https://github.com/l2yyd5) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@LJY-emperor](https://github.com/LJY-emperor) | [#480](https://github.com/SaladDay/cc-switch-cli/issues/480) |
+| [@MainRedstoner](https://github.com/MainRedstoner) | [#482](https://github.com/SaladDay/cc-switch-cli/issues/482) |
+| [@MALossov](https://github.com/MALossov) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@moonjoke001](https://github.com/moonjoke001) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@msuadOf](https://github.com/msuadOf) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@neverdie0710](https://github.com/neverdie0710) | [#451](https://github.com/SaladDay/cc-switch-cli/pull/451) |
+| [@qiufuyu123](https://github.com/qiufuyu123) | [#465](https://github.com/SaladDay/cc-switch-cli/pull/465) |
+| [@RainyPixel](https://github.com/RainyPixel) | [#449](https://github.com/SaladDay/cc-switch-cli/pull/449) |
+| [@RuoChen5251](https://github.com/RuoChen5251) | [#471](https://github.com/SaladDay/cc-switch-cli/issues/471) |
+| [@ruolin1314](https://github.com/ruolin1314) | [#483](https://github.com/SaladDay/cc-switch-cli/issues/483) |
+| [@Sakulakime](https://github.com/Sakulakime) | [#472](https://github.com/SaladDay/cc-switch-cli/issues/472) |
+| [@SaladDay](https://github.com/SaladDay) | [#334](https://github.com/SaladDay/cc-switch-cli/issues/334), [#358](https://github.com/SaladDay/cc-switch-cli/issues/358), [#434](https://github.com/SaladDay/cc-switch-cli/pull/434), [#438](https://github.com/SaladDay/cc-switch-cli/pull/438), [#444](https://github.com/SaladDay/cc-switch-cli/issues/444), [#446](https://github.com/SaladDay/cc-switch-cli/pull/446), [#449](https://github.com/SaladDay/cc-switch-cli/pull/449), [#451](https://github.com/SaladDay/cc-switch-cli/pull/451), [#457](https://github.com/SaladDay/cc-switch-cli/issues/457), [#458](https://github.com/SaladDay/cc-switch-cli/issues/458), [#461](https://github.com/SaladDay/cc-switch-cli/issues/461), [#462](https://github.com/SaladDay/cc-switch-cli/pull/462), [#463](https://github.com/SaladDay/cc-switch-cli/pull/463), [#464](https://github.com/SaladDay/cc-switch-cli/issues/464), [#465](https://github.com/SaladDay/cc-switch-cli/pull/465), [#466](https://github.com/SaladDay/cc-switch-cli/issues/466), [#467](https://github.com/SaladDay/cc-switch-cli/pull/467), [#468](https://github.com/SaladDay/cc-switch-cli/issues/468), [#469](https://github.com/SaladDay/cc-switch-cli/issues/469), [#470](https://github.com/SaladDay/cc-switch-cli/pull/470), [#471](https://github.com/SaladDay/cc-switch-cli/issues/471), [#472](https://github.com/SaladDay/cc-switch-cli/issues/472), [#473](https://github.com/SaladDay/cc-switch-cli/issues/473), [#475](https://github.com/SaladDay/cc-switch-cli/pull/475), [#476](https://github.com/SaladDay/cc-switch-cli/pull/476), [#477](https://github.com/SaladDay/cc-switch-cli/pull/477), [#478](https://github.com/SaladDay/cc-switch-cli/pull/478), [#479](https://github.com/SaladDay/cc-switch-cli/issues/479), [#480](https://github.com/SaladDay/cc-switch-cli/issues/480), [#484](https://github.com/SaladDay/cc-switch-cli/pull/484), [#485](https://github.com/SaladDay/cc-switch-cli/pull/485), [#486](https://github.com/SaladDay/cc-switch-cli/pull/486), [#487](https://github.com/SaladDay/cc-switch-cli/pull/487), [#488](https://github.com/SaladDay/cc-switch-cli/pull/488), [#489](https://github.com/SaladDay/cc-switch-cli/pull/489), [#490](https://github.com/SaladDay/cc-switch-cli/pull/490), [#491](https://github.com/SaladDay/cc-switch-cli/pull/491) |
+| [@SoFarSoGoodya](https://github.com/SoFarSoGoodya) | [#334](https://github.com/SaladDay/cc-switch-cli/issues/334) |
+| [@suntory1](https://github.com/suntory1) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@SyaJask](https://github.com/SyaJask) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@tangjunyi1](https://github.com/tangjunyi1) | [#458](https://github.com/SaladDay/cc-switch-cli/issues/458) |
+| [@tianzhuwei](https://github.com/tianzhuwei) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@tony](https://github.com/tony) | [#434](https://github.com/SaladDay/cc-switch-cli/pull/434) |
+| [@Tonystarkw12](https://github.com/Tonystarkw12) | [#434](https://github.com/SaladDay/cc-switch-cli/pull/434) |
+| [@u1544096979](https://github.com/u1544096979) | [#437](https://github.com/SaladDay/cc-switch-cli/issues/437), [#438](https://github.com/SaladDay/cc-switch-cli/pull/438) |
+| [@unive3sal](https://github.com/unive3sal) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+| [@wangsiqidahaoren](https://github.com/wangsiqidahaoren) | [#461](https://github.com/SaladDay/cc-switch-cli/issues/461) |
+| [@ybin2024](https://github.com/ybin2024) | [#464](https://github.com/SaladDay/cc-switch-cli/issues/464) |
+| [@zhiquanchi](https://github.com/zhiquanchi) | [#130](https://github.com/SaladDay/cc-switch-cli/issues/130) |
+
+Thanks also to the CC-Switch maintainers and contributors whose shared implementations underpin the compatibility fixes in this release.
+
+## [5.10.5] - 2026-09-15
+
+### Added
+
+- **Codex / Shared Sessions**: Add opt-in `cc-switch start codex <provider> --shared-sessions` on macOS/Linux. Providers keep separate credentials and configuration while sharing persistent native session history and session locks. Includes [#440](https://github.com/SaladDay/cc-switch-cli/pull/440), addressing [#436](https://github.com/SaladDay/cc-switch-cli/issues/436).
+- **Codex / Per-Model Reasoning**: Expose supported reasoning levels and a default for each model in both TUI model-catalog editors, with the existing Auto behavior and contextual help. Includes [#442](https://github.com/SaladDay/cc-switch-cli/pull/442), addressing [#441](https://github.com/SaladDay/cc-switch-cli/issues/441).
+- **Providers / PatewayAI**: Add the PatewayAI sponsor preset and its provider setup support.
+
+### Changed
+
+- **Quota / Reset Times**: Show quota reset timestamps in the local timezone, with UTC offsets and remaining time in CLI text; add compact reset countdowns to the TUI. Raw JSON timestamps and upstream quota calculations retain their existing semantics. Includes [#456](https://github.com/SaladDay/cc-switch-cli/pull/456), fixing [#445](https://github.com/SaladDay/cc-switch-cli/issues/445).
+- **Pricing / GPT-6 Astra**: Add standard prices per million tokens: $10 input, $50 output, $1 cached input, and $12.50 cache writes. Missing entries are added without replacing user-customized prices or restoring user-deleted entries. Includes [#460](https://github.com/SaladDay/cc-switch-cli/pull/460), fixing [#459](https://github.com/SaladDay/cc-switch-cli/issues/459).
+
+### Fixed
+
+- **Codex / Model Mapping Persistence**: Preserve stored model catalogs and per-model reasoning settings during provider switches and temporary-launch capture. Fixes [#447](https://github.com/SaladDay/cc-switch-cli/issues/447).
+- **Codex / User-Owned Catalogs**: Preserve custom `model_catalog_json` paths when generating a cc-switch catalog. Includes [#454](https://github.com/SaladDay/cc-switch-cli/pull/454).
+- **Codex / OpenCode Go Reasoning**: Recognize the OpenCode Zen gateway before applying model-vendor reasoning defaults, and constrain effort to the model's catalog settings. Fixes [#443](https://github.com/SaladDay/cc-switch-cli/issues/443).
+- **Proxy / Chat Completions Compatibility**: Convert null or missing message content to an empty string when translating Responses requests to Chat Completions, preserving tool payloads and multimodal content. Fixes the Azure compatibility issue in [#448](https://github.com/SaladDay/cc-switch-cli/issues/448).
+- **Windows / Session Scanning**: Open existing session-cache files with the access required for synchronization, avoiding `Access denied (os error 5)` without truncating their contents. Includes [#455](https://github.com/SaladDay/cc-switch-cli/pull/455), fixing [#450](https://github.com/SaladDay/cc-switch-cli/issues/450).
+- **Configuration / SQL Import**: Acquire the sync lock before synchronous import and live-config projection to avoid a nested-executor panic when importing or restoring SQL backups. Fixes [#453](https://github.com/SaladDay/cc-switch-cli/issues/453).
+- **TUI / Claude Quick Config**: Correct the displayed item total in the quick-configuration menu. Fixes [#435](https://github.com/SaladDay/cc-switch-cli/issues/435).
+
+### Upgrade notes
+
+- The database schema remains at v18; upgrading from v5.10.4 requires no schema migration.
+- Shared Codex sessions are opt-in and limited to macOS/Linux. Keep the persistent `.cc-switch-launches/` directories, allow only one shared launch per provider, and close a session before continuing it through another provider. See the [shared-session usage notes](https://github.com/SaladDay/cc-switch-cli/blob/v5.10.5/README.md) for argument restrictions and cross-provider limitations.
+- GPT-6 Astra uses the existing standard-rate calculator. Long-context and service-tier pricing are outside this release's pricing change.
+
+### Thanks
+
+Thank you to everyone who opened an issue or pull request, shared diagnostics, reviewed a change, or joined a discussion. This list covers issues and pull requests active since v5.10.4, including participants in their earlier discussions.
+
+| Contributor | Issues and pull requests |
+| --- | --- |
+| [@6UOOON9](https://github.com/6UOOON9) | [#447](https://github.com/SaladDay/cc-switch-cli/issues/447) |
+| [@ChanthMiao](https://github.com/ChanthMiao) | [#409](https://github.com/SaladDay/cc-switch-cli/pull/409) |
+| [@Curious-r](https://github.com/Curious-r) | [#441](https://github.com/SaladDay/cc-switch-cli/issues/441), [#443](https://github.com/SaladDay/cc-switch-cli/issues/443) |
+| [@czfhhh](https://github.com/czfhhh) | [#454](https://github.com/SaladDay/cc-switch-cli/pull/454) |
+| [@Devin-Pi](https://github.com/Devin-Pi) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358), [#446](https://github.com/SaladDay/cc-switch-cli/pull/446) |
+| [@dividduang](https://github.com/dividduang) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@GMOogway](https://github.com/GMOogway) | [#433](https://github.com/SaladDay/cc-switch-cli/issues/433) |
+| [@HappyLiang12](https://github.com/HappyLiang12) | [#448](https://github.com/SaladDay/cc-switch-cli/issues/448) |
+| [@jinjiwu](https://github.com/jinjiwu) | [#436](https://github.com/SaladDay/cc-switch-cli/issues/436), [#445](https://github.com/SaladDay/cc-switch-cli/issues/445) |
+| [@JounQin](https://github.com/JounQin) | [#457](https://github.com/SaladDay/cc-switch-cli/issues/457) |
+| [@kelvkhiu](https://github.com/kelvkhiu) | [#444](https://github.com/SaladDay/cc-switch-cli/issues/444) |
+| [@moonjoke001](https://github.com/moonjoke001) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@netcatty](https://github.com/netcatty) | [#450](https://github.com/SaladDay/cc-switch-cli/issues/450) |
+| [@neverdie0710](https://github.com/neverdie0710) | [#451](https://github.com/SaladDay/cc-switch-cli/pull/451) |
+| [@odup](https://github.com/odup) | [#453](https://github.com/SaladDay/cc-switch-cli/issues/453) |
+| [@paopjian](https://github.com/paopjian) | [#439](https://github.com/SaladDay/cc-switch-cli/issues/439) |
+| [@RainyPixel](https://github.com/RainyPixel) | [#449](https://github.com/SaladDay/cc-switch-cli/pull/449) |
+| [@SaladDay](https://github.com/SaladDay) | [#440](https://github.com/SaladDay/cc-switch-cli/pull/440), [#442](https://github.com/SaladDay/cc-switch-cli/pull/442), [#455](https://github.com/SaladDay/cc-switch-cli/pull/455), [#456](https://github.com/SaladDay/cc-switch-cli/pull/456), [#460](https://github.com/SaladDay/cc-switch-cli/pull/460) |
+| [@suntory1](https://github.com/suntory1) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@SyaJask](https://github.com/SyaJask) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@tangjunyi1](https://github.com/tangjunyi1) | [#458](https://github.com/SaladDay/cc-switch-cli/issues/458) |
+| [@TheBoYang](https://github.com/TheBoYang) | [#432](https://github.com/SaladDay/cc-switch-cli/issues/432) |
+| [@tianzhuwei](https://github.com/tianzhuwei) | [#358](https://github.com/SaladDay/cc-switch-cli/issues/358) |
+| [@Tonystarkw12](https://github.com/Tonystarkw12) | [#434](https://github.com/SaladDay/cc-switch-cli/pull/434) |
+| [@u1544096979](https://github.com/u1544096979) | [#437](https://github.com/SaladDay/cc-switch-cli/issues/437), [#438](https://github.com/SaladDay/cc-switch-cli/pull/438) |
+| [@wangsiqidahaoren](https://github.com/wangsiqidahaoren) | [#459](https://github.com/SaladDay/cc-switch-cli/issues/459) |
+| [@wbbo](https://github.com/wbbo) | [#435](https://github.com/SaladDay/cc-switch-cli/issues/435) |
+| [@xiaoshidebug](https://github.com/xiaoshidebug) | [#452](https://github.com/SaladDay/cc-switch-cli/issues/452) |
+
+We also thank [@farion1231](https://github.com/farion1231) and upstream CC-Switch contributors, including [@zayokami](https://github.com/zayokami) for the [OpenCode Zen reasoning fix](https://github.com/farion1231/cc-switch/pull/6123), and [@misaka-myu](https://github.com/misaka-myu) for the [user-owned catalog fix](https://github.com/farion1231/cc-switch/pull/6087).
+
+Some acknowledged reports and proposals remain open or are not included in this release; a thank-you does not imply that an issue is fixed or a pull request is merged.
+
+## [5.10.4] - 2026-08-30
+
+### Added
+
+- **Pi / First-Class App Support**: Add Pi across CLI and TUI provider management, prompts, MCP, Skills, session history, usage import, configuration, launch, and visibility workflows. Includes [#431](https://github.com/SaladDay/cc-switch-cli/pull/431) and resolves the Pi portion of [#358](https://github.com/SaladDay/cc-switch-cli/issues/358); OMP remains outside this release.
+- **Providers / Built-In Presets**: Add Pi presets and selected upstream built-in Claude and Codex presets for DeepSeek, Zhipu GLM, ModelScope, MiniMax, Xiaomi MiMo, OpenCode Go, and OpenRouter without importing promotional or referral content.
+- **Usage / OpenCode Go**: Query OpenCode Go subscription windows through its token-plan endpoint and expose them through the existing usage-query UI.
+
+### Changed
+
+- **Database / Desktop v3.20.1 Compatibility**: Advance the database from schema v17 to v18 and align Claude session-log synchronization with the upstream byte cursor and SHA-256 tail fingerprint. Legacy line cursors convert without replaying history, including files whose last recorded line has no trailing newline. Truncation and non-append rewrites pin the cursor to the current file end instead of re-importing pruned usage. Fixes [#432](https://github.com/SaladDay/cc-switch-cli/issues/432).
+
+### Fixed
+
+- **Providers / Live Projection**: Keep edits to the active provider projected to its live configuration while preserving takeover and backup ownership rules.
+- **Sessions / TUI Refresh**: Refresh session data when entering the Sessions view so the list does not remain stale after activity outside the TUI.
+- **Pi / Usage Import Performance**: Index Pi session deduplication lookups used during local usage imports.
+
+### Upgrade notes
+
+- The database migrates from schema v17 to v18 after creating the normal pre-migration backup. The migration adds nullable byte-cursor and tail-fingerprint columns without rebuilding usage data.
+- Devices that exchange database snapshots through WebDAV or S3 should all be upgraded before syncing a v18 snapshot. Older releases reject newer database schemas by design.
+- Existing v17 Claude line cursors are converted on the next changed-file scan. The converter follows the upstream byte-counting behavior and does not replay already-counted history.
+- Pi is now available as a managed app. Existing app visibility, provider, prompt, MCP, and Skills settings keep their current values.
+
+### Thanks
+
+Thank you to everyone who reported a problem, tested behavior, followed up in a discussion, or worked on a pull request during this release cycle:
+
+- Pi requests and follow-up: [@dividduang](https://github.com/dividduang), [@moonjoke001](https://github.com/moonjoke001), [@suntory1](https://github.com/suntory1), [@SyaJask](https://github.com/SyaJask), and [@tianzhuwei](https://github.com/tianzhuwei) ([#358](https://github.com/SaladDay/cc-switch-cli/issues/358)).
+- Database compatibility report: [@TheBoYang](https://github.com/TheBoYang) ([#432](https://github.com/SaladDay/cc-switch-cli/issues/432)).
+- Pull requests, implementation, and follow-up work: [@SaladDay](https://github.com/SaladDay) ([#431](https://github.com/SaladDay/cc-switch-cli/pull/431)) and [@ChanthMiao](https://github.com/ChanthMiao) ([#409](https://github.com/SaladDay/cc-switch-cli/pull/409)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all CC-Switch contributors whose schema-v18 session cursor, provider preset, and compatibility work was adapted here.
+
+Some acknowledged work remains open or was not merged into this release; inclusion here is a thank-you, not a change in its status.
+
+## [5.10.3] - 2026-08-25
+
+### Added
+
+- **Network / Global Outbound Proxy**: Add persistent HTTP, HTTPS, and SOCKS5 proxy settings across the CLI, TUI, daemon, updater, provider checks, authentication, discovery, and cloud-sync clients. Resolves [#419](https://github.com/SaladDay/cc-switch-cli/issues/419) and provides the supported global alternative discussed in [#420](https://github.com/SaladDay/cc-switch-cli/issues/420).
+- **Skills / Storage and Deployment**: Let users keep managed Skills in either CC Switch storage or the shared `~/.agents/skills` directory, migrate managed content safely between them, and choose symlink or copy deployment from the TUI. Addresses [#413](https://github.com/SaladDay/cc-switch-cli/issues/413) and incorporates the original proposal and implementation work from [#414](https://github.com/SaladDay/cc-switch-cli/pull/414).
+- **Library Embedding / Optional CLI Surface**: Make CLI-only dependencies optional behind the default `cli` feature so Rust and napi-rs consumers can build the library with `default-features = false`, with structural Linux and Windows CI checks protecting that boundary. Includes [#421](https://github.com/SaladDay/cc-switch-cli/pull/421).
+
+### Changed
+
+- **TUI / Provider Templates**: Replace the overflowing horizontal template chip row with a focused field and grouped picker that keeps every preset reachable and restores focus predictably. Fixes [#416](https://github.com/SaladDay/cc-switch-cli/issues/416).
+- **Skills / Upstream Alignment**: Align repository metadata, deleted-default preservation, deployment reconciliation, managed-directory validation, update/install behavior, and configuration/cloud-restore projection with upstream CC-Switch while keeping the CLI/TUI interaction model.
+- **Sponsors / Documentation**: Remove the RunAPI sponsor listing from the English and Chinese READMEs while retaining its provider preset.
+
+### Fixed
+
+- **Skills / State Safety**: Prevent stale snapshots and unsafe managed paths from corrupting or overwriting Skills state during install, update, uninstall, repository changes, storage migration, app projection, and backup or cloud restore operations. New-install projection failures now roll back their database row, and restored managed directories retain secure permissions.
+- **Android / Session Usage**: Use Android's available `flock(2)` path for the cross-process session-usage lock instead of the unsupported standard-library file-lock implementation. Fixes [#426](https://github.com/SaladDay/cc-switch-cli/issues/426).
+- **Library Builds / Feature Boundary**: Keep CLI-only exports and database helpers behind the correct feature gates, and add positive-control CI checks so library-only builds cannot silently regain CLI dependencies.
+
+### Upgrade notes
+
+- The database schema remains at v17; no database migration is required.
+- Existing Skills storage and deployment settings are preserved. Switching to `~/.agents/skills` is explicit and migrates only database-managed Skills; conflicting or unmanaged target directories are not claimed or overwritten.
+- No outbound proxy is saved by default. When no saved proxy exists, standard proxy environment variables remain effective; if none are set, requests go directly. A saved proxy takes precedence over those variables. Existing provider-specific endpoint and authentication settings are unchanged.
+- This patch is recommended for users of Skills, Android/Termux session usage, embedded library builds, provider templates, or outbound proxies.
+
+### Thanks
+
+Thank you to everyone who reported an issue, shared diagnostics, continued a discussion, proposed a change, or opened a pull request during this patch cycle:
+
+- Issue reports, requests, and follow-up testing: [@LeonardoTan19](https://github.com/LeonardoTan19) ([#416](https://github.com/SaladDay/cc-switch-cli/issues/416)), [@Wq-dd](https://github.com/Wq-dd) ([#419](https://github.com/SaladDay/cc-switch-cli/issues/419)), [@wildoranges](https://github.com/wildoranges) ([#420](https://github.com/SaladDay/cc-switch-cli/issues/420)), [@whyseu](https://github.com/whyseu) ([#425](https://github.com/SaladDay/cc-switch-cli/issues/425)), [@Merilune](https://github.com/Merilune) ([#426](https://github.com/SaladDay/cc-switch-cli/issues/426)), and [@Gis-Code](https://github.com/Gis-Code) ([#427](https://github.com/SaladDay/cc-switch-cli/issues/427)).
+- Pull requests and code proposals: [@ShatterDusk](https://github.com/ShatterDusk) ([#414](https://github.com/SaladDay/cc-switch-cli/pull/414)), [@Lingrui98](https://github.com/Lingrui98) ([#417](https://github.com/SaladDay/cc-switch-cli/pull/417)), [@SomSamantray](https://github.com/SomSamantray) ([#418](https://github.com/SaladDay/cc-switch-cli/pull/418)), [@cindyrui71](https://github.com/cindyrui71) and [@bytemain](https://github.com/bytemain) ([#421](https://github.com/SaladDay/cc-switch-cli/pull/421)), and [@bytemain](https://github.com/bytemain) ([#423](https://github.com/SaladDay/cc-switch-cli/pull/423)).
+- Continued issue and pull-request discussions: [@moonjoke001](https://github.com/moonjoke001), [@dividduang](https://github.com/dividduang), and [@suntory1](https://github.com/suntory1) ([#358](https://github.com/SaladDay/cc-switch-cli/issues/358)); [@evelyn-jialin-zhang](https://github.com/evelyn-jialin-zhang) ([#408](https://github.com/SaladDay/cc-switch-cli/issues/408)); and [@ChanthMiao](https://github.com/ChanthMiao) ([#409](https://github.com/SaladDay/cc-switch-cli/pull/409)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all upstream CC-Switch contributors whose work was adapted here, especially [@yovinchen](https://github.com/yovinchen) ([upstream #596](https://github.com/farion1231/cc-switch/pull/596)) for the global proxy foundation, and [@makoMakoGo](https://github.com/makoMakoGo) ([#4153](https://github.com/farion1231/cc-switch/pull/4153)), [@allenxu09](https://github.com/allenxu09) ([#5356](https://github.com/farion1231/cc-switch/pull/5356)), [@zayokami](https://github.com/zayokami) ([#5811](https://github.com/farion1231/cc-switch/pull/5811), [#6119](https://github.com/farion1231/cc-switch/pull/6119)), and [@YUZHEthefool](https://github.com/YUZHEthefool) ([#6119](https://github.com/farion1231/cc-switch/pull/6119), [#6147](https://github.com/farion1231/cc-switch/pull/6147)) for the Skills behavior and consistency work aligned in this release.
+
+Some acknowledged reports and proposals remain open, were superseded, or were not merged; inclusion here is a thank-you, not a change in their status.
+
+## [5.10.2] - 2026-08-18
+
+### Added
+
+- **Skills / Manual Updates**: Add CLI and TUI flows to check repository-backed skills for updates, update one skill, or update every detected skill while preserving managed metadata and app enablement. Implements [#407](https://github.com/SaladDay/cc-switch-cli/issues/407).
+- **Providers / OpenModel**: Add an OpenModel sponsor preset for Claude, Codex, Gemini, OpenCode, Hermes, and OpenClaw with protocol-appropriate endpoints and model defaults.
+
+### Changed
+
+- **Database / Upstream Compatibility**: Advance the database to upstream schema v17 with the persistent session-usage deduplication ledger, and refresh the built-in model-price catalog and aliases to match upstream CC-Switch v3.20.
+- **Backup and Cloud Sync / Recovery Safety**: Align SQL export/import fidelity, restore validation, preserved-table handling, automatic migration backups, and the shared WebDAV/S3 process lock with upstream behavior.
+- **Sponsors / Documentation**: Add OpenModel to the sponsor documentation and refresh sponsor presentation.
+
+### Fixed
+
+- **TUI / Provider Quick Configuration**: Persist provider common-config membership and quick settings when editing and saving providers, including inherited Claude/Codex values and common-snippet validation. Fixes [#410](https://github.com/SaladDay/cc-switch-cli/issues/410).
+
+### Upgrade notes
+
+- The database migrates from schema v16 to v17 after creating the normal pre-migration backup. The migration adds the usage-deduplication ledger without rebuilding or deleting existing usage logs.
+- Installations that exchange database snapshots through WebDAV or S3 should all be upgraded before syncing a v17 snapshot; older versions reject newer database schemas by design.
+- Built-in pricing now includes the upstream v3.20 catalog and corrections, including current GPT, Gemini, DeepSeek, Kimi, MiniMax, GLM, Qwen, and Grok entries and aliases.
+- This patch is recommended for users of skills, provider quick configuration, usage imports, backups, or cloud sync.
+
+### Thanks
+
+Thank you to everyone who reported an issue, shared diagnostics, continued a discussion, proposed a change, or opened a pull request during this patch cycle:
+
+- Issue reports, requests, and follow-up testing: [@DoubleLT](https://github.com/DoubleLT) ([#415](https://github.com/SaladDay/cc-switch-cli/issues/415)), [@ShatterDusk](https://github.com/ShatterDusk) ([#413](https://github.com/SaladDay/cc-switch-cli/issues/413)), [@PawnMa](https://github.com/PawnMa) ([#410](https://github.com/SaladDay/cc-switch-cli/issues/410)), [@evelyn-jialin-zhang](https://github.com/evelyn-jialin-zhang) ([#408](https://github.com/SaladDay/cc-switch-cli/issues/408)), [@MartinaBarton6](https://github.com/MartinaBarton6) ([#407](https://github.com/SaladDay/cc-switch-cli/issues/407)), [@Wizard-one](https://github.com/Wizard-one) ([#406](https://github.com/SaladDay/cc-switch-cli/issues/406)), [@Kurayuri](https://github.com/Kurayuri) ([#405](https://github.com/SaladDay/cc-switch-cli/issues/405)), [@coderyangyangyang](https://github.com/coderyangyangyang) ([#404](https://github.com/SaladDay/cc-switch-cli/issues/404)), [@CodeCatMeow](https://github.com/CodeCatMeow) ([#403](https://github.com/SaladDay/cc-switch-cli/issues/403)), and [@TaichiLi](https://github.com/TaichiLi) ([#402](https://github.com/SaladDay/cc-switch-cli/issues/402)).
+- Continued issue discussions: [@maxwell-feng](https://github.com/maxwell-feng) ([#370](https://github.com/SaladDay/cc-switch-cli/issues/370)), [@Jerrrry666](https://github.com/Jerrrry666) ([#278](https://github.com/SaladDay/cc-switch-cli/issues/278)), and [@AkaChou](https://github.com/AkaChou) ([#89](https://github.com/SaladDay/cc-switch-cli/issues/89)).
+- Pull requests and code proposals: [@ShatterDusk](https://github.com/ShatterDusk) ([#414](https://github.com/SaladDay/cc-switch-cli/pull/414)), [@XiaoHuo888-hue](https://github.com/XiaoHuo888-hue) ([#412](https://github.com/SaladDay/cc-switch-cli/pull/412)), [@brushax](https://github.com/brushax) ([#411](https://github.com/SaladDay/cc-switch-cli/pull/411)), [@ChanthMiao](https://github.com/ChanthMiao) ([#409](https://github.com/SaladDay/cc-switch-cli/pull/409)), [@wplct](https://github.com/wplct) ([#399](https://github.com/SaladDay/cc-switch-cli/pull/399), [#400](https://github.com/SaladDay/cc-switch-cli/pull/400), [#401](https://github.com/SaladDay/cc-switch-cli/pull/401)), [@louisneal](https://github.com/louisneal) ([#297](https://github.com/SaladDay/cc-switch-cli/pull/297)), [@zhangyang-crazy-one](https://github.com/zhangyang-crazy-one) ([#277](https://github.com/SaladDay/cc-switch-cli/pull/277)), [@tangaac](https://github.com/tangaac) ([#105](https://github.com/SaladDay/cc-switch-cli/pull/105)), and [@hitsmaxft](https://github.com/hitsmaxft) ([#94](https://github.com/SaladDay/cc-switch-cli/pull/94)).
+- Review and discussion participation: [@ToDayL](https://github.com/ToDayL) ([#297](https://github.com/SaladDay/cc-switch-cli/pull/297)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all upstream CC-Switch contributors, especially [@Komikawayi](https://github.com/Komikawayi) ([upstream #5951](https://github.com/farion1231/cc-switch/pull/5951)), [@mhy1227](https://github.com/mhy1227) ([upstream #6053](https://github.com/farion1231/cc-switch/pull/6053)), [@zayokami](https://github.com/zayokami) ([upstream #6122](https://github.com/farion1231/cc-switch/pull/6122)), and [@YUZHEthefool](https://github.com/YUZHEthefool) ([upstream #6146](https://github.com/farion1231/cc-switch/pull/6146), [#6147](https://github.com/farion1231/cc-switch/pull/6147)) for the database, pricing, backup, and sync behavior adapted in this release.
+
+Some acknowledged reports and proposals remain open or were not merged; inclusion here is a thank-you, not a change in their status.
+
+## [5.10.1] - 2026-08-06
+
+### Added
+
+- **Android / Termux (Experimental)**: Add a manual ARM64 Bionic build workflow and use `termux-open` for directory actions on Android. Android remains an experimental, separately built target and is not included in the standard release assets. Addresses [#370](https://github.com/SaladDay/cc-switch-cli/issues/370).
+
+### Changed
+
+- **Sponsors / Provider Presets**: Feature AICodeMirror in the sponsor documentation, update its registration link, and place its preset first across supported apps.
+
+### Fixed
+
+- **Updater / Linux libc Safety**: Keep Linux `auto` and `musl` updates on the static musl build, require an explicit `CC_SWITCH_LINUX_LIBC=glibc` opt-in for glibc assets, and report the asset that is actually selected without silently crossing the libc boundary. A failed download now leaves the installed binary unchanged and reports the error clearly. Fixes [#398](https://github.com/SaladDay/cc-switch-cli/issues/398).
+- **Database / Large SQL Imports**: Batch exported `INSERT` statements and restore sync-preserved tables in one transaction, reducing statement and commit overhead for large backup imports. Fixes [#391](https://github.com/SaladDay/cc-switch-cli/issues/391).
+- **Proxy / Responses Streaming**: Handle failed, cancelled, incomplete, terminal-only, and final unterminated Responses events consistently, while reporting truncated streams and request outcomes accurately. Addresses [#390](https://github.com/SaladDay/cc-switch-cli/issues/390).
+- **Proxy / OpenAI-compatible Authentication**: Always use bearer authentication for Claude providers configured with OpenAI Chat Completions or Responses format, even when the key is stored in the Anthropic API-key field. Native Anthropic authentication behavior is unchanged. Fixes [#330](https://github.com/SaladDay/cc-switch-cli/issues/330).
+
+### Upgrade notes
+
+- The database schema remains at v16; no migration is required.
+- Android/Termux support remains experimental and is available through the manual Android workflow rather than the standard installer, updater, or release assets.
+- This patch is recommended for Linux updater users, large backup imports, Responses streaming routes, and OpenAI-compatible Claude providers.
+
+### Thanks
+
+Thank you to everyone who reported an issue, shared diagnostics, followed up on a fix, proposed a change, or opened a pull request during this patch cycle:
+
+- Issue reports and follow-up testing: [@jiangxianfengge](https://github.com/jiangxianfengge) and [@nmbtwzt](https://github.com/nmbtwzt) ([#330](https://github.com/SaladDay/cc-switch-cli/issues/330)), [@maxwell-feng](https://github.com/maxwell-feng) ([#370](https://github.com/SaladDay/cc-switch-cli/issues/370)), [@wildoranges](https://github.com/wildoranges) ([#390](https://github.com/SaladDay/cc-switch-cli/issues/390)), [@Huasushis](https://github.com/Huasushis) ([#391](https://github.com/SaladDay/cc-switch-cli/issues/391)), and [@Golden-Pigeon](https://github.com/Golden-Pigeon) ([#398](https://github.com/SaladDay/cc-switch-cli/issues/398)).
+- Pull requests and proposals: [@huzhongyyuan](https://github.com/huzhongyyuan) ([#395](https://github.com/SaladDay/cc-switch-cli/issues/395), [#396](https://github.com/SaladDay/cc-switch-cli/pull/396)) and [@edabchann](https://github.com/edabchann) ([#397](https://github.com/SaladDay/cc-switch-cli/issues/397)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all upstream CC-Switch contributors whose provider, proxy, backup, and platform behavior helped shape this release.
+
+Some acknowledged reports and proposals remain open or await user verification; inclusion here does not mark them as fixed or merged.
+
+## [5.10.0] - 2026-08-02
+
+### Added
+
+- **Home / 30-day Usage Overview**: Add a responsive per-app dashboard with daily model activity, cost-ranked model totals, input/output/cache token details, live proxy state, and background refresh. The useful model summary remains available when narrow layouts cannot fit the chart. Includes [#384](https://github.com/SaladDay/cc-switch-cli/pull/384).
+- **Sessions / Complete History and Cost**: Page through the complete local session history, copy resume commands from the TUI, and show token/cost details for the visible page without blocking metadata, navigation, or refresh. Claude, Codex, Gemini, OpenCode, and Hermes use bounded source-specific projections.
+- **Codex / Anthropic-compatible Providers**: Add end-to-end support for Codex providers that expose the Anthropic Messages API, including request/response conversion, streaming, tools, media, model capabilities, failover, and provider forms. Addresses [#378](https://github.com/SaladDay/cc-switch-cli/issues/378).
+- **MCP / Authenticated Remote Servers**: Add TUI support for structured HTTP/SSE headers, including bearer authentication, preserve them through CLI/import/sync paths, and keep stdio environment editing in the same reusable key/value workflow. Implements [#383](https://github.com/SaladDay/cc-switch-cli/issues/383).
+- **Codex / Scriptable Auth Preservation**: Add CLI settings for preserving official Codex login state while managed third-party providers are active. Addresses [#385](https://github.com/SaladDay/cc-switch-cli/issues/385).
+
+### Changed
+
+- **Sessions / Bounded Architecture**: Replace retired full-list production scans and progressive-preview compatibility paths with paged manifests, bounded visible-page work, stale-result cancellation, and fail-soft background projection. Includes [#386](https://github.com/SaladDay/cc-switch-cli/pull/386).
+- **Codex / Unified History**: Align official and managed-provider session routing, add complete history paging, and keep resume actions available as copyable commands.
+- **Usage / Shared Refresh**: Reuse one background refresh projection across Home, Sessions, and Usage, move managed-proxy polling off the UI thread, and make automatic usage sync configurable.
+- **Providers / Models and Credentials**: Synchronize role-model presets and the built-in pricing catalog, preserve provider-owned model choices across switch/takeover/failover, and display configured credentials consistently. Resolves [#389](https://github.com/SaladDay/cc-switch-cli/issues/389) and incorporates the pricing report from [#382](https://github.com/SaladDay/cc-switch-cli/pull/382).
+- **Codex / Official Subscription Queries**: Align subscription-query behavior across CLI and TUI while preserving explicit user settings. Addresses [#388](https://github.com/SaladDay/cc-switch-cli/issues/388).
+- **Configuration / Permissions**: Stop attempting automatic permission repair during ordinary startup and validation.
+
+### Fixed
+
+- **Codex / Fork-heavy Import Performance**: Cache one parsed parent-rollout snapshot per file instead of reparsing it for every child cutoff. The release benchmark improved the 20-child case from 2.14 seconds to 51 milliseconds (41.7×). Includes [#384](https://github.com/SaladDay/cc-switch-cli/pull/384).
+- **TLS / Native Trust Stores**: Trust operating-system certificate roots with bundled WebPKI roots as a portable fallback, and reuse proxy HTTP clients. Fixes [#379](https://github.com/SaladDay/cc-switch-cli/issues/379).
+- **Codex / Active Provider Resolution**: Resolve the active `base_url` from the selected provider instead of matching commented or inactive entries, and refresh auth data during forced provider sync. Fixes [#376](https://github.com/SaladDay/cc-switch-cli/issues/376).
+- **Usage / Zhipu Quota Windows**: Classify hour, day, week, and month quota windows from the provider response instead of labeling every window as five-hour usage. Fixes [#375](https://github.com/SaladDay/cc-switch-cli/issues/375) and incorporates [#381](https://github.com/SaladDay/cc-switch-cli/pull/381).
+- **WebDAV / Collection URLs**: Preserve trailing collection slashes during normalization and synchronization.
+- **TUI / Reliability and Layout**: Avoid a lazy-i18n settings deadlock, deduplicate action hints and empty-state actions, keep session titles readable in narrow layouts, and prevent background refreshes from stalling the event loop.
+
+### Upgrade notes
+
+- **Upgrade recommended for everyone.** This release touches provider compatibility, session history, usage reporting, MCP authentication, TLS, and TUI responsiveness; all users should update even if they do not use the new dashboard.
+- The database schema remains at v16. Existing v5.9.x databases do not require a new schema migration.
+- Home usage auto-sync defaults to enabled and can be disabled in Settings.
+
+### Thanks
+
+Thank you to everyone who filed an issue, shared diagnostics, tested edge cases, or opened a pull request during this release cycle:
+
+- Reports and requests: [@Forget-Remember](https://github.com/Forget-Remember) ([#369](https://github.com/SaladDay/cc-switch-cli/issues/369)), [@maxwell-feng](https://github.com/maxwell-feng) ([#370](https://github.com/SaladDay/cc-switch-cli/issues/370), [#371](https://github.com/SaladDay/cc-switch-cli/issues/371)), [@edabchann](https://github.com/edabchann) ([#372](https://github.com/SaladDay/cc-switch-cli/issues/372)), [@CottonCandy2k](https://github.com/CottonCandy2k) ([#373](https://github.com/SaladDay/cc-switch-cli/issues/373)), [@genmlite](https://github.com/genmlite) ([#374](https://github.com/SaladDay/cc-switch-cli/issues/374)), [@wbbo](https://github.com/wbbo) ([#375](https://github.com/SaladDay/cc-switch-cli/issues/375)), [@mingzhao2019](https://github.com/mingzhao2019) ([#376](https://github.com/SaladDay/cc-switch-cli/issues/376)), [@Bjorne1](https://github.com/Bjorne1) ([#377](https://github.com/SaladDay/cc-switch-cli/issues/377)), [@lilinjie2](https://github.com/lilinjie2) ([#378](https://github.com/SaladDay/cc-switch-cli/issues/378)), and [@Cyclonekid](https://github.com/Cyclonekid) ([#379](https://github.com/SaladDay/cc-switch-cli/issues/379)).
+- More reports and requests: [@totoCZ](https://github.com/totoCZ) ([#383](https://github.com/SaladDay/cc-switch-cli/issues/383)), [@xjr353171020](https://github.com/xjr353171020) ([#385](https://github.com/SaladDay/cc-switch-cli/issues/385)), [@Haosonn](https://github.com/Haosonn) ([#387](https://github.com/SaladDay/cc-switch-cli/issues/387)), [@Kurayuri](https://github.com/Kurayuri) ([#388](https://github.com/SaladDay/cc-switch-cli/issues/388)), [@Autsunset](https://github.com/Autsunset) ([#389](https://github.com/SaladDay/cc-switch-cli/issues/389)), [@wildoranges](https://github.com/wildoranges) ([#390](https://github.com/SaladDay/cc-switch-cli/issues/390)), [@Huasushis](https://github.com/Huasushis) ([#391](https://github.com/SaladDay/cc-switch-cli/issues/391)), and [@Aestas16](https://github.com/Aestas16) ([#392](https://github.com/SaladDay/cc-switch-cli/issues/392)).
+- Pull requests and code proposals: [@wbbo](https://github.com/wbbo) ([#381](https://github.com/SaladDay/cc-switch-cli/pull/381)) and [@octo-patch](https://github.com/octo-patch) ([#382](https://github.com/SaladDay/cc-switch-cli/pull/382)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and all upstream CC-Switch contributors whose provider, authentication, pricing, and session behavior helped shape this release.
+
+Some reports above remain open or are still being investigated; acknowledgement here does not mark them as fixed.
+
+## [5.9.3] - 2026-07-24
+
+### Added
+
+- **Providers / Full URL Mode**: Press `f` on the Claude or Codex API URL field to use the exact upstream request URL through the local proxy. The form shows an inline `Full URL` indicator and warns when the proxy is required. Includes [#360](https://github.com/SaladDay/cc-switch-cli/pull/360).
+- **Codex / Prompt Cache Routing**: Add Auto, Enabled, and Disabled controls for `prompt_cache_key` when the proxy converts Responses requests to Chat Completions. Auto mode sends the key only to known-compatible upstreams. Includes [#361](https://github.com/SaladDay/cc-switch-cli/pull/361).
+- **Codex Desktop / Remote Projects**: Add a setting that preserves an existing official ChatGPT login while third-party providers or proxy takeover use a key from `config.toml`. The proxy now serves the active managed model catalog at `/models` and `/v1/models`, and the TUI prompts users to restart Codex or reconnect an SSH project after switching. Addresses [#364](https://github.com/SaladDay/cc-switch-cli/issues/364).
+
+### Changed
+
+- **CLI / Per-Terminal Launches**: Document `cc-switch start claude|codex <provider>` and the TUI `o` shortcut for launching one session with a provider without changing the global selection. Addresses [#363](https://github.com/SaladDay/cc-switch-cli/issues/363).
+- **Database / Upstream Compatibility**: Advance the local database to schema v16, including upstream-compatible fields and the Codex usage rebuild migration. Addresses [#366](https://github.com/SaladDay/cc-switch-cli/issues/366).
+
+### Fixed
+
+- **Usage / Codex Forks**: Align the Codex session importer with upstream parent-rollout token-prefix matching, so copied history in forked and subagent sessions is not counted again. Session imports are serialized and emit one refresh notification per cycle.
+
+### Upgrade notes
+
+- Schema v16 rebuilds only `codex_session` usage from source JSONL after making the normal pre-migration backup. History whose source log was already deleted cannot be reconstructed.
+- Forks whose parent rollout is missing are deferred instead of guessed; restoring the parent log and using the Usage page's Codex rebuild action imports them later.
+- Existing proxy-source rows are intentionally left untouched.
+
+### Thanks
+
+Thanks to everyone who filed an issue, shared diagnostics, or contributed code during this release cycle:
+
+- PRs: [@kingxzq](https://github.com/kingxzq) ([#360](https://github.com/SaladDay/cc-switch-cli/pull/360)) and [@bigshezhang](https://github.com/bigshezhang) ([#361](https://github.com/SaladDay/cc-switch-cli/pull/361)).
+- Reports and workflow feedback: [@ymj68520](https://github.com/ymj68520) ([#362](https://github.com/SaladDay/cc-switch-cli/issues/362)), [@limm-max](https://github.com/limm-max) ([#363](https://github.com/SaladDay/cc-switch-cli/issues/363)), [@LawrentChen](https://github.com/LawrentChen) ([#364](https://github.com/SaladDay/cc-switch-cli/issues/364)), [@moetayuko](https://github.com/moetayuko) ([#366](https://github.com/SaladDay/cc-switch-cli/issues/366)), [@gabornju](https://github.com/gabornju) ([#367](https://github.com/SaladDay/cc-switch-cli/issues/367)), and [@genmlite](https://github.com/genmlite) ([#368](https://github.com/SaladDay/cc-switch-cli/issues/368)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and the upstream contributors whose behavior was adapted here, especially [@yovinchen](https://github.com/yovinchen) for full URL routing, [@codeasier](https://github.com/codeasier) for Codex OAuth preservation, and [@CSberlin](https://github.com/CSberlin) for the Codex model reachability endpoint.
+
+## [5.9.2] - 2026-07-18
+
+### Added
+
+- **Sync / S3**: Add S3-compatible cloud sync, including endpoint, region, bucket, credentials, path-style access, encrypted uploads, conflict checks, and TUI/CLI configuration. Implements [#267](https://github.com/SaladDay/cc-switch-cli/issues/267).
+- **TUI / External Editor**: Add an external-editor setting that lists editors already installed on the machine and lets the user choose one explicitly.
+- **Claude / Model Mapping**: Add dedicated 1M-context controls for Sonnet and Opus while keeping the existing `[1M]` storage format. Implements [#332](https://github.com/SaladDay/cc-switch-cli/issues/332).
+- **Sessions / Codex Titles**: Show renamed Codex thread titles in session history.
+
+### Changed
+
+- **Proxy / Failover**: Align provider commit, retry, and takeover behavior with upstream, and streamline the TUI queue workflow. Implements [#252](https://github.com/SaladDay/cc-switch-cli/issues/252).
+- **TUI / Interaction**: Use Enter consistently for form toggles and edits, simplify persistent key hints, group settings and configuration actions with compact dividers, and improve manual usage refresh feedback.
+
+### Fixed
+
+- **Codex / Session History**: Use the stable `custom` provider bucket for managed third-party providers, migrate legacy history and saved templates, and keep official unified-session routing live-only. Live writes, backfill, takeover backups, failover caches, restore paths, MCP projection, and upgrade recovery now follow upstream semantics without changing the database schema. Fixes [#353](https://github.com/SaladDay/cc-switch-cli/issues/353) and includes [#359](https://github.com/SaladDay/cc-switch-cli/pull/359).
+- **Proxy / Streaming**: Ignore an empty `reasoning_content` field exactly as upstream does, preventing DeepSeek-compatible streams from alternating thinking and text blocks for every token. Fixes [#336](https://github.com/SaladDay/cc-switch-cli/issues/336).
+- **Providers / Takeover Editing**: Update the active takeover backup when a provider is edited so the editor and live application configuration no longer diverge. Fixes [#357](https://github.com/SaladDay/cc-switch-cli/issues/357).
+- **MCP / Validation**: Reject duplicate server IDs during creation instead of silently replacing an existing entry.
+
+### Thanks
+
+Thanks to everyone who reported an issue, shared diagnostics, joined a design discussion, or submitted a PR during this release cycle:
+
+- Direct reports and requests: [@1753135250](https://github.com/1753135250) ([#252](https://github.com/SaladDay/cc-switch-cli/issues/252)), [@czyt](https://github.com/czyt) ([#267](https://github.com/SaladDay/cc-switch-cli/issues/267)), [@shaoyucheng](https://github.com/shaoyucheng) ([#332](https://github.com/SaladDay/cc-switch-cli/issues/332)), [@ChengguanYu](https://github.com/ChengguanYu) and [@EMinsight](https://github.com/EMinsight) ([#336](https://github.com/SaladDay/cc-switch-cli/issues/336)), [@palering](https://github.com/palering) ([#353](https://github.com/SaladDay/cc-switch-cli/issues/353)), and [@KortanZ](https://github.com/KortanZ) ([#357](https://github.com/SaladDay/cc-switch-cli/issues/357)).
+- PRs and proposals: [@fjh1997](https://github.com/fjh1997) ([#359](https://github.com/SaladDay/cc-switch-cli/pull/359)), [@mydelren](https://github.com/mydelren) ([#339](https://github.com/SaladDay/cc-switch-cli/pull/339)), [@lao-der](https://github.com/lao-der) ([#341](https://github.com/SaladDay/cc-switch-cli/pull/341)), [@coder-movers](https://github.com/coder-movers) ([#348](https://github.com/SaladDay/cc-switch-cli/pull/348)), and [@binyangzhu000-sudo](https://github.com/binyangzhu000-sudo) ([#354](https://github.com/SaladDay/cc-switch-cli/pull/354)).
+- Community questions and workflow feedback: [@Noodle05](https://github.com/Noodle05) ([#253](https://github.com/SaladDay/cc-switch-cli/issues/253)), [@mattmok](https://github.com/mattmok) ([#331](https://github.com/SaladDay/cc-switch-cli/issues/331)), [@lsg328](https://github.com/lsg328) ([#352](https://github.com/SaladDay/cc-switch-cli/issues/352)), [@quinnxiao](https://github.com/quinnxiao) ([#355](https://github.com/SaladDay/cc-switch-cli/issues/355)), [@potoo0](https://github.com/potoo0) ([#356](https://github.com/SaladDay/cc-switch-cli/issues/356)), and [@dividduang](https://github.com/dividduang) ([#358](https://github.com/SaladDay/cc-switch-cli/issues/358)).
+- Upstream credit: [@farion1231](https://github.com/farion1231) and the upstream contributors whose work was adapted here, especially [@AdJIa](https://github.com/AdJIa) for the original [streaming fix](https://github.com/farion1231/cc-switch/pull/4869) and [@keithyt06](https://github.com/keithyt06) for the S3 sync foundation.
+
+## [5.9.1] - 2026-07-15
+
+### Added
+
+- **Proxy / Request Overrides**: Add provider-level User-Agent, header, and JSON body overrides. Overrides run after protocol transforms, reject protected transport/auth headers, and let OpenAI Responses providers set fields such as `store: false`. Fixes [#304](https://github.com/SaladDay/cc-switch-cli/issues/304) and [#335](https://github.com/SaladDay/cc-switch-cli/issues/335).
+- **TUI / Inline Editing**: Edit provider, MCP, prompt, and configuration values in place instead of opening a second modal. Long values stay bounded to the terminal, secrets remain visible while editing, and disabled rows no longer carry an extra status marker.
+- **Sessions / Project Scope**: Filter session history by project directory, keep the selected scope while paging and searching, and place unknown projects after named projects. Implements [#350](https://github.com/SaladDay/cc-switch-cli/issues/350).
+
+### Changed
+
+- **Database / Upstream Compatibility**: Move to schema v13 token semantics so cached input, cache reads, and cache writes remain consistent across proxy logs, rollups, backups, imports, and WebDAV sync. Implements [#346](https://github.com/SaladDay/cc-switch-cli/issues/346).
+- **TUI / Form Controls**: Keep secondary navigation keys in help instead of the persistent key bar, remove redundant apply-and-move shortcuts, and simplify long-value rendering across provider and configuration forms.
+
+### Fixed
+
+- **Codex / Tool Calls**: Preserve custom tool metadata, cached tool-call fields, streamed call IDs, and the order of parallel calls when routing between Responses and Chat Completions. This prevents later deltas from overwriting an accumulated tool call and addresses [#340](https://github.com/SaladDay/cc-switch-cli/issues/340) and the investigation in [#341](https://github.com/SaladDay/cc-switch-cli/pull/341).
+- **TUI / Version Checks**: Run local application discovery and version checks in background workers, so a slow or missing Hermes installation no longer delays the first TUI frame. Addresses [#344](https://github.com/SaladDay/cc-switch-cli/issues/344).
+- **Usage / Codex**: Add GPT-5.6 Sol/Terra/Luna pricing and aliases, backfill existing zero-cost rows, keep Token/Request trends visible when Cost is zero, and show unavailable Codex/Gemini cache-write data as `N/A` instead of a real zero.
+- **Database / Startup Backups**: Remove the backup throttle from startup and migration paths while retaining rotating, integrity-checked safety backups.
+
+### Performance
+
+- **TUI / Long Lists**: Replace eager session and usage list materialization with bounded paging; session scans and searches use disk-backed manifests. Reaching the end now waits for an explicit next-page action, so fast wheel scrolling cannot trap the event loop on large histories.
+
+### Thanks
+
+Thanks to everyone who filed an issue, shared diagnostics, or submitted a PR during this release cycle:
+
+- Code and release work: [@SaladDay](https://github.com/SaladDay)
+- Reports and requests: [@HasonHuang](https://github.com/HasonHuang) ([#304](https://github.com/SaladDay/cc-switch-cli/issues/304)), [@meichuanyi](https://github.com/meichuanyi) ([#312](https://github.com/SaladDay/cc-switch-cli/issues/312)), [@leetomlee123](https://github.com/leetomlee123) ([#313](https://github.com/SaladDay/cc-switch-cli/issues/313)), [@Liam0205](https://github.com/Liam0205) ([#335](https://github.com/SaladDay/cc-switch-cli/issues/335)), [@ChengguanYu](https://github.com/ChengguanYu) ([#336](https://github.com/SaladDay/cc-switch-cli/issues/336)), [@mydelren](https://github.com/mydelren) ([#338](https://github.com/SaladDay/cc-switch-cli/issues/338)), [@TuRan-H](https://github.com/TuRan-H) ([#340](https://github.com/SaladDay/cc-switch-cli/issues/340)), [@lonelymeko](https://github.com/lonelymeko) ([#342](https://github.com/SaladDay/cc-switch-cli/issues/342)), [@lilinjie2](https://github.com/lilinjie2) ([#343](https://github.com/SaladDay/cc-switch-cli/issues/343)), [@yycyyyc321](https://github.com/yycyyyc321) ([#344](https://github.com/SaladDay/cc-switch-cli/issues/344)), [@sirnple](https://github.com/sirnple) ([#345](https://github.com/SaladDay/cc-switch-cli/issues/345)), [@nianlee-official](https://github.com/nianlee-official) ([#346](https://github.com/SaladDay/cc-switch-cli/issues/346)), [@coder-movers](https://github.com/coder-movers) ([#347](https://github.com/SaladDay/cc-switch-cli/issues/347)), [@bxhzzx](https://github.com/bxhzzx) ([#350](https://github.com/SaladDay/cc-switch-cli/issues/350)), and [@Molly12123254](https://github.com/Molly12123254) ([#351](https://github.com/SaladDay/cc-switch-cli/issues/351)).
+- PR submissions and patch proposals (not merged into this release): [@felinae98](https://github.com/felinae98) ([#337](https://github.com/SaladDay/cc-switch-cli/pull/337)), [@mydelren](https://github.com/mydelren) ([#339](https://github.com/SaladDay/cc-switch-cli/pull/339)), [@lao-der](https://github.com/lao-der) ([#341](https://github.com/SaladDay/cc-switch-cli/pull/341)), and [@coder-movers](https://github.com/coder-movers) ([#348](https://github.com/SaladDay/cc-switch-cli/pull/348)).
+- Thanks [@farion1231](https://github.com/farion1231) for the upstream schema-v13 migration and GPT-5.6 usage-pricing work adapted in this release.
+
+## [5.9.0] - 2026-07-08
+
+### Added
+
+- **TUI / Session Search**: Add full-content deep search that matches inside every session (not just titles) and an all-providers session view. [#324](https://github.com/SaladDay/cc-switch-cli/pull/324)
+- **TUI / Light Theme**: Add a light color theme with a Settings toggle and terminal-background auto-detection, including a pinned ansi256 degradation for terminals without truecolor.
+- **TUI / Icons**: Add an icon-mode fallback so emoji never break border alignment on terminals that render them double-width or blank, plus a Settings › Icons row to switch icon mode (emoji / ASCII).
+- **TUI / Navigation**: Add breadcrumb titles on sub-pages, keep page key bars visible while the nav pane has focus, and show guidance on empty MCP / prompt / skill lists.
+- **TUI / Import Progress**: Show live progress while session usage imports and fill the sessions list progressively during a full scan, instead of blocking on the first paint.
+- **Proxy / Logging**: Add trace-level logging for JSONL resume decisions, sidecar-cache revalidation, and fallbacks so silent degradations in the session/usage importer are observable.
+
+### Changed
+
+- **TUI / Internals**: Migrate the Providers, MCP, Prompts, Skills, Usage, and Sessions pages onto a shared keymap registry and shared page/overlay frames, so key bindings, help sheets, breadcrumb titles, and body padding stay consistent across screens. The help sheet is now generated from the keymap, so it can no longer drift from the actual page bindings.
+
+### Fixed
+
+- **Proxy / Streaming (GLM, empty choices)**: Tolerate an explicitly empty `choices` array in both the OpenAI→Anthropic and Codex Chat→Responses transforms instead of failing the whole request with a 502 "Empty choices array" — NVIDIA NIM's `z-ai/glm-5.2` intermittently returns a usage-only body with `choices: []`. A missing `choices` field is still rejected. Fixes [#325](https://github.com/SaladDay/cc-switch-cli/issues/325).
+- **Proxy / Streaming (framing + usage)**: OpenAI-compatible Claude `/v1/messages` streaming now parses CRLF-delimited and split-multibyte SSE frames via the shared SSE helpers, injects `stream_options.include_usage` and folds in the trailing usage-only chunk so token counts are no longer all-zero, and records only the first `finish_reason` so a later chunk cannot downgrade `tool_use` to `end_turn`. This also stops the segmented-output / repeating-request loop seen against reverse-engineered GLM endpoints. Fixes [#323](https://github.com/SaladDay/cc-switch-cli/issues/323) and [#326](https://github.com/SaladDay/cc-switch-cli/issues/326).
+- **Proxy / Billing**: Report fresh (cache-subtracted) `input_tokens` in every Claude-billed transform so cached tokens are no longer billed twice once streaming usage is forwarded correctly. [#323](https://github.com/SaladDay/cc-switch-cli/issues/323)
+- **Proxy / OpenCode Auth**: Derive the Claude auth strategy from the env var name (`ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer`, `ANTHROPIC_API_KEY` → `x-api-key`) and stop emitting both headers, which broke strict Anthropic-protocol endpoints such as OpenCode Go (`opencode.ai/zen/go`) with a 401. Fixes [#330](https://github.com/SaladDay/cc-switch-cli/issues/330) and [#329](https://github.com/SaladDay/cc-switch-cli/issues/329).
+- **Codex / Auth**: Stop non-official (API-key) Codex providers from inheriting a stray ChatGPT OAuth login from `~/.codex/auth.json`. The pollution left switching to a third-party provider authenticating via OAuth against the wrong endpoint; providers are now reduced to key-only auth at every capture/write path, and already-polluted databases are auto-repaired. Fixes [#328](https://github.com/SaladDay/cc-switch-cli/issues/328).
+- **Codex / Deeplink**: Restore the provider `name` field (and correct the `requires_openai_auth` / reasoning fields) in deeplink-imported Codex config, which Codex otherwise refused to load with "provider name must not be empty". Fixes [#333](https://github.com/SaladDay/cc-switch-cli/issues/333).
+- **Database / Growth**: Enable `auto_vacuum=INCREMENTAL` on the local `cc-switch.db` (new databases, plus a one-time migrating `VACUUM` with a safety backup for existing `NONE` databases) so pruned proxy-log pages are returned to the OS instead of growing the file without bound (~1.1GB reported), and preserve the pragma across SQL import / WebDAV download. This also un-hangs WebDAV downloads that were copying the whole bloated file. Fixes [#327](https://github.com/SaladDay/cc-switch-cli/issues/327).
+- **TUI / Session Deletes**: Purge deleted sessions from the scan cache (by session id, on both TUI and CLI deletes) and tombstone them against in-flight scans, so a deleted session no longer reappears in the list. Related to [#321](https://github.com/SaladDay/cc-switch-cli/issues/321).
+- **Sessions / Usage Correctness**: Harden the incremental importer — verify file identity by inode before a byte-offset resume, re-check files whose incomplete tail may complete in place, resolve `created_at` at parse time rather than at deferred write, count `OR IGNORE` conflicts as skipped rather than imported, and converge on files whose final line never gets a trailing newline.
+
+### Performance
+
+- **Sessions / Usage Scan**: Replace the full re-scan on every launch with a sidecar metadata cache and a byte-offset resume driver, batch session-log imports into per-file transactions on a dedicated import connection, reuse compiled dedup statements, and set `PRAGMA synchronous=NORMAL` for the bulk import cycle. The sessions list is now painted stale-while-revalidate, so large histories (first scans previously ran for over two minutes and blocked startup) load immediately and subsequent syncs stay incremental.
+
+### Thanks
+
+Thanks to everyone who helped land this release:
+
+- Code & PRs: [@fjh1997](https://github.com/fjh1997) (full-content session search), [@SaladDay](https://github.com/SaladDay)
+- Reports & diagnosis: [@moonjoke001](https://github.com/moonjoke001) (GLM empty-choices 502), [@abcabc0330](https://github.com/abcabc0330) (OpenAI→Anthropic streaming usage), [@leetomlee123](https://github.com/leetomlee123) (GLM/codebuddy segmented streaming + retry loop), [@jiangxianfengge](https://github.com/jiangxianfengge) (OpenCode 401 auth), [@nianzhibai](https://github.com/nianzhibai) (Codex third-party OAuth pollution), [@keepanote](https://github.com/keepanote) (DB growth / WebDAV download hang), [@unive3sal](https://github.com/unive3sal) (Codex deeplink provider name), [@Jerry-Hunger](https://github.com/Jerry-Hunger) (deleted agent sessions lingering), [@kiwiflydream](https://github.com/kiwiflydream)
+- Thanks [@farion1231](https://github.com/farion1231) for the upstream cc-switch fixes this release ports — empty-choices tolerance, SSE framing, streaming usage/billing parity, the auth-strategy header fix, the Codex OAuth and deeplink-config fixes, and incremental `auto_vacuum`.
+- Thanks to every contributor who reported issues, tested the TUI/proxy changes, reviewed behavior, or helped diagnose problems.
+
+## [5.8.7] - 2026-07-02
+
+### Added
+
+- **Providers / Sponsors**: Add the Qiniu (七牛云 AI) and Fenno.ai sponsor presets across the supported apps (Claude, Codex, Gemini/OpenCode/OpenClaw/Hermes as applicable), wired into both the flag-driven CLI (`provider add --template qiniu|fenno`) and the TUI add-provider form.
+- **CLI / Provider Add**: Make `provider add` fully non-interactive and flag-driven (`--name`, `--id`, `--base-url`, `--api-key`, `--model`, `--config`/`--config-file`, `--api-format`, `--common-config`, `--account-id`, and more). Interactive add now lives only in the TUI.
+- **TUI / Claude Quick Config**: Collapse the Claude quick toggles into a "快捷配置菜单" sub-page with hide-AI-attribution, Teammates 模式 (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`), 启用 Tool Search (`ENABLE_TOOL_SEARCH`), and 禁用自动升级 (`DISABLE_AUTOUPDATER`) toggles.
+- **TUI / Codex Quick Config**: Add a Codex "快捷配置菜单" sub-page with 启用 Goal mode (`[features] goals`) and 启用远程压缩 toggles, both written via format-preserving `toml_edit`.
+- **TUI / Claude Advanced Options**: Add an always-visible advanced-options section with a 默认兜底模型 (`ANTHROPIC_MODEL`) row, a relabeled 模型映射 sub-page limited to the four role models, and per-row help.
+- **Codex / Provider Form**: Decouple the upstream format (Chat Completions vs native Responses) from model mapping and reasoning, add a working native Responses model catalog, and edit the model-mapping catalog inline.
+
+### Changed
+
+- **TUI / Provider List**: Remove the separate provider detail view; Enter now opens the edit form directly (respecting read-only).
+- **Providers / Sponsor Order**: Reorder sponsor presets — Cubence now appears before PackyCode, and RunAPI sits right after Fenno.ai — across the README sponsor tables and the provider-add chip lists.
+
+### Fixed
+
+- **Proxy / Streaming**: Emit a spec-complete `message_start` snapshot (`content: []`, `stop_reason: null`, `stop_sequence: null`) across all six transform paths (OpenAI Chat, OpenAI Responses, Gemini). Omitting these fields crashed the official `@anthropic-ai/sdk` stream accumulator, forcing clients into per-turn non-streaming fallback (double billing) or silently terminating agent sessions mid-task. [#320](https://github.com/SaladDay/cc-switch-cli/pull/320)
+- **TUI / Terminal Colors**: Prefer Ansi256 for a bare `TERM=xterm` with no truecolor signal (e.g. Xshell 8), so terminals that do not reliably support 24-bit color no longer render wrong colors. `xterm-256color`, explicit `COLORTERM=truecolor`/`24bit`, and the `CC_SWITCH_COLOR_MODE` override stay on the truecolor path. Fixes [#314](https://github.com/SaladDay/cc-switch-cli/issues/314) and [#60](https://github.com/SaladDay/cc-switch-cli/issues/60). [#319](https://github.com/SaladDay/cc-switch-cli/pull/319)
+- **TUI / Provider Form**: Restrict `Ctrl+S` save to the outermost form page (sub-pages no longer submit early), replace confusing "open" value cells with an "按 Enter 打开…" help hint, and place the Codex 快捷配置菜单 below the common-config controls to match the Claude layout.
+
+### Thanks
+
+Thanks to everyone who helped land this release:
+
+- Code & PRs: [@lishuceo](https://github.com/lishuceo) (proxy streaming `message_start` fix), [@mvanhorn](https://github.com/mvanhorn) (terminal color detection), [@SaladDay](https://github.com/SaladDay)
+- Reports & diagnosis: [@QQuan930](https://github.com/QQuan930), [@zenpuhls](https://github.com/zenpuhls) (TUI display corruption on remote terminals), [@leetomlee123](https://github.com/leetomlee123) (intermittent mid-session drops)
+- Thanks [@farion1231](https://github.com/farion1231) for the upstream cc-switch direction that the Claude/Codex quick-config, advanced-options, and provider-form reworks follow.
+- Thanks Qiniu (七牛云 AI) and Fenno.ai for sponsoring the project.
+- Thanks to every contributor who reported issues, tested the TUI/proxy changes, reviewed behavior, or helped diagnose problems.
+
+## [5.8.6] - 2026-06-29
+
+### Added
+
+- **Skills / Marketplace**: Add upstream-aligned skill marketplace discovery, including repository discovery with disk caching, `skills.sh` search, install-state detection, CLI market search, and TUI source switching.
+- **Providers / CLI**: Allow provider selection by name in `cc-switch use` and provider switch flows. [#317](https://github.com/SaladDay/cc-switch-cli/pull/317)
+- **Environment Check**: Improve local environment diagnostics with clearer tool status details.
+- **TUI / App Switching**: Support Chinese bracket keys for app switching.
+
+### Fixed
+
+- **Proxy / Managed Sessions**: Avoid per-app port collisions on the default proxy port by falling back safely when a worker port is already in use. Fixes [#290](https://github.com/SaladDay/cc-switch-cli/issues/290). [#305](https://github.com/SaladDay/cc-switch-cli/pull/305)
+- **TUI / Proxy**: Refresh the home-page proxy snapshot asynchronously so switching between proxy and non-proxy apps stays responsive.
+
+### Performance
+
+- **TUI / Startup**: Pre-seed lightweight app snapshots, defer usage/pricing aggregation, managed-auth status, and session-usage sync until needed, and keep large session lists responsive.
+- **Session Usage**: Batch Claude session sync-state lookups to avoid thousands of per-file database queries on large histories.
+
+### Thanks
+
+Thanks to everyone who helped land this release:
+
+- Code & PRs: [@mvanhorn](https://github.com/mvanhorn), [@SaladDay](https://github.com/SaladDay)
+- Reports, feature requests & diagnosis: [@fangyuan99](https://github.com/fangyuan99), [@Orangee511](https://github.com/Orangee511), [@Jony1211-lab](https://github.com/Jony1211-lab), [@QQuan930](https://github.com/QQuan930), [@leetomlee123](https://github.com/leetomlee123), [@meichuanyi](https://github.com/meichuanyi), [@shijunti19](https://github.com/shijunti19), [@HasonHuang](https://github.com/HasonHuang), [@zenpuhls](https://github.com/zenpuhls), [@sakuralost](https://github.com/sakuralost), [@jackjie330](https://github.com/jackjie330)
+- Thanks to every contributor who reported issues, tested the TUI/proxy changes, reviewed behavior, or helped diagnose performance problems.
+
 ## [5.8.5] - 2026-06-25
 
 ### Changed

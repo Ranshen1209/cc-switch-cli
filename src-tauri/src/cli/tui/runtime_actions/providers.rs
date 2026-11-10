@@ -98,48 +98,32 @@ fn refresh_provider_data_after_write_with_config(
 }
 
 pub(super) fn switch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
-    #[cfg(test)]
-    if ctx.proxy_req_tx.is_none() {
-        return do_switch_for_test(ctx, load_state()?, id);
-    }
+    // Upstream parity: provider switch is a clean write; no live-conflict
+    // preview/overlay is surfaced.
+    let state = load_state()?;
+    do_switch(ctx, state, id)
+}
 
-    let provider = ctx
-        .data
-        .providers
-        .rows
-        .iter()
-        .find(|row| row.id == id)
-        .map(|row| row.provider.clone())
-        .ok_or_else(|| AppError::InvalidInput(format!("Provider not found: {id}")))?;
-    let Some(tx) = ctx.proxy_req_tx else {
-        return Err(AppError::Message(
-            "provider switch worker is unavailable".to_string(),
-        ));
-    };
+pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
+    let state = load_state()?;
+    let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
 
-    let request_id = ctx.proxy_loading.start();
-    ctx.app.overlay = Overlay::Loading {
-        kind: super::super::app::LoadingKind::ProviderSwitch,
-        title: crate::t!("Switching provider", "切换供应商").to_string(),
-        message: texts::tui_loading().to_string(),
-    };
-    if let Err(error) = tx.send(super::super::runtime_systems::ProxyReq::SwitchProvider {
-        request_id,
-        app_type: ctx.app.app_type.clone(),
-        provider_id: id,
-        provider: Box::new(provider),
-    }) {
-        ctx.proxy_loading.cancel();
-        ctx.app.overlay = Overlay::None;
-        return Err(AppError::Message(format!(
-            "failed to queue provider switch: {error}"
-        )));
+    refresh_provider_data_after_write(ctx, &state)?;
+    ctx.app.pending_overlay = None;
+    if imported {
+        let toast_message = match ctx.app.app_type {
+            crate::app_config::AppType::Codex => texts::tui_toast_codex_live_config_imported(),
+            _ => texts::tui_toast_provider_live_config_imported(),
+        };
+        ctx.app.push_toast(toast_message, ToastKind::Success);
+    } else {
+        ctx.app
+            .push_toast(texts::tui_toast_no_live_config_imported(), ToastKind::Info);
     }
     Ok(())
 }
 
-#[cfg(test)]
-fn do_switch_for_test(
+fn do_switch(
     ctx: &mut RuntimeActionContext<'_>,
     state: crate::store::AppState,
     id: String,
@@ -170,12 +154,19 @@ fn do_switch_for_test(
         .proxy
         .routes_current_app_through_proxy(&ctx.app.app_type)
         .unwrap_or(false);
-    ctx.app.overlay = switched_provider
-        .as_ref()
-        .and_then(|provider| {
-            provider_switch_proxy_notice_overlay(&ctx.app.app_type, provider, proxy_ready)
-        })
-        .unwrap_or(Overlay::None);
+    let mut proxy_overlay = switched_provider.as_ref().and_then(|provider| {
+        provider_switch_proxy_notice_overlay(&ctx.app.app_type, provider, proxy_ready)
+    });
+    let restart_notice_in_overlay =
+        append_codex_restart_notice_to_proxy_overlay(&ctx.app.app_type, &mut proxy_overlay);
+    ctx.app.overlay = proxy_overlay.unwrap_or(Overlay::None);
+
+    if matches!(ctx.app.app_type, crate::app_config::AppType::Codex) && !restart_notice_in_overlay {
+        ctx.app.push_toast(
+            texts::tui_codex_provider_switched_restart_notice(),
+            ToastKind::Success,
+        );
+    }
 
     if ctx.app.app_type.is_additive_mode() {
         ctx.app.push_toast(
@@ -183,40 +174,78 @@ fn do_switch_for_test(
             ToastKind::Success,
         );
     }
+
     Ok(())
 }
 
-pub(super) fn import_live_config(ctx: &mut RuntimeActionContext<'_>) -> Result<(), AppError> {
-    let state = load_state()?;
-    let imported = ProviderService::import_live_config(&state, ctx.app.app_type.clone())? > 0;
-
-    refresh_provider_data_after_write(ctx, &state)?;
-    ctx.app.pending_overlay = None;
-    if imported {
-        let toast_message = match ctx.app.app_type {
-            crate::app_config::AppType::Codex => texts::tui_toast_codex_live_config_imported(),
-            _ => texts::tui_toast_provider_live_config_imported(),
-        };
-        ctx.app.push_toast(toast_message, ToastKind::Success);
-    } else {
-        ctx.app
-            .push_toast(texts::tui_toast_no_live_config_imported(), ToastKind::Info);
+fn append_codex_restart_notice_to_proxy_overlay(
+    app_type: &crate::app_config::AppType,
+    overlay: &mut Option<Overlay>,
+) -> bool {
+    if !matches!(app_type, crate::app_config::AppType::Codex) {
+        return false;
     }
-    Ok(())
+
+    let Some(Overlay::Confirm(confirm)) = overlay else {
+        return false;
+    };
+    confirm.message.push_str("\n\n");
+    confirm
+        .message
+        .push_str(texts::tui_codex_provider_switched_restart_notice());
+    true
 }
 
-pub(crate) fn provider_switch_proxy_notice_overlay(
+fn provider_switch_proxy_notice_overlay(
     app_type: &crate::app_config::AppType,
     provider: &crate::provider::Provider,
     proxy_ready: bool,
 ) -> Option<Overlay> {
-    provider_switch_proxy_notice_api_format(app_type, provider, proxy_ready).map(|api_format| {
-        Overlay::Confirm(ConfirmOverlay {
-            title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
-            message: texts::tui_claude_api_format_requires_proxy_message(api_format),
-            action: ConfirmAction::ProviderApiFormatProxyNotice,
+    let message = provider_switch_proxy_notice_api_format(app_type, provider, proxy_ready)
+        .map(|api_format| {
+            if matches!(app_type, crate::app_config::AppType::Codex) {
+                texts::tui_codex_api_format_requires_proxy_message(api_format)
+            } else {
+                texts::tui_claude_api_format_requires_proxy_message(api_format)
+            }
         })
-    })
+        .or_else(|| {
+            provider_switch_full_url_requires_proxy(app_type, provider, proxy_ready)
+                .then(|| texts::tui_full_url_requires_proxy_message().to_string())
+        })?;
+
+    Some(Overlay::Confirm(ConfirmOverlay {
+        title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+        message,
+        action: ConfirmAction::ProviderApiFormatProxyNotice,
+    }))
+}
+
+fn provider_switch_full_url_requires_proxy(
+    app_type: &crate::app_config::AppType,
+    provider: &crate::provider::Provider,
+    proxy_ready: bool,
+) -> bool {
+    let is_official = match app_type {
+        crate::app_config::AppType::Codex => provider.is_codex_official(),
+        crate::app_config::AppType::Claude => provider
+            .category
+            .as_deref()
+            .is_some_and(|category| category.eq_ignore_ascii_case("official")),
+        _ => false,
+    };
+    !proxy_ready
+        && matches!(
+            app_type,
+            crate::app_config::AppType::Claude | crate::app_config::AppType::Codex
+        )
+        && !provider.is_codex_oauth()
+        && !is_official
+        && provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.is_full_url)
+            .unwrap_or(false)
 }
 
 fn provider_requires_local_proxy(
@@ -230,14 +259,16 @@ fn provider_requires_local_proxy(
                 .requires_proxy()
                 .then_some(api_format)
         }
-        crate::app_config::AppType::Codex => {
-            if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
-                Some("anthropic")
-            } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
-                Some("openai_chat")
-            } else {
-                None
-            }
+        crate::app_config::AppType::Codex if provider.is_codex_official() => None,
+        crate::app_config::AppType::Codex
+            if crate::proxy::providers::codex_provider_uses_anthropic(provider) =>
+        {
+            Some("anthropic")
+        }
+        crate::app_config::AppType::Codex
+            if crate::proxy::providers::codex_provider_uses_chat_completions(provider) =>
+        {
+            Some("openai_chat")
         }
         _ => None,
     }
@@ -395,7 +426,10 @@ pub(super) fn remove_from_config(
             refresh_provider_data_after_write(ctx, &state)?;
             Ok(())
         }
-        crate::app_config::AppType::OpenCode | crate::app_config::AppType::Hermes => {
+        crate::app_config::AppType::OpenCode
+        | crate::app_config::AppType::Hermes
+        | crate::app_config::AppType::ClaudeDesktop
+        | crate::app_config::AppType::Pi => {
             let state = load_state()?;
             ProviderService::remove_from_live_config(&state, ctx.app.app_type.clone(), &id)?;
             ctx.app.push_toast(
@@ -485,10 +519,18 @@ pub(super) fn stream_check(ctx: &mut RuntimeActionContext<'_>, id: String) -> Re
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "model fetch carries the selected provider draft and result destination"
+)]
 pub(super) fn model_fetch(
     ctx: &mut RuntimeActionContext<'_>,
     base_url: String,
+    is_full_url: bool,
     api_key: Option<String>,
+    custom_user_agent: Option<String>,
+    api_protocol: Option<String>,
+    request_headers: Option<std::collections::BTreeMap<String, String>>,
     codex_oauth: bool,
     codex_oauth_account_id: Option<String>,
     field: ProviderAddField,
@@ -511,8 +553,11 @@ pub(super) fn model_fetch(
         query: String::new(),
         fetching: true,
         models: Vec::new(),
+        filtered_indices: None,
+        filter_incomplete: false,
         error: None,
         selected_idx: 0,
+        selection_active: false,
     };
     if matches!(field, ProviderAddField::HermesModels) {
         ctx.app.pending_overlay = Some(Overlay::HermesModelsPicker { editing: false });
@@ -521,7 +566,11 @@ pub(super) fn model_fetch(
     if let Err(err) = tx.send(ModelFetchReq::Fetch {
         request_id,
         base_url,
+        is_full_url,
         api_key,
+        custom_user_agent,
+        api_protocol,
+        request_headers,
         codex_oauth,
         codex_oauth_account_id,
         field,
@@ -903,74 +952,6 @@ mod tests {
             app,
             data,
         })
-    }
-
-    #[test]
-    #[serial(home_settings)]
-    fn provider_switch_queues_worker_without_writing_on_tui_thread() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        claude_test_config("old-provider", "anthropic")
-            .save()
-            .expect("save providers");
-
-        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
-        let mut app = App::new(Some(AppType::Claude));
-        let mut data = UiData::load(&AppType::Claude).expect("load ui data");
-        let mut proxy_loading = RequestTracker::default();
-        let mut webdav_loading = RequestTracker::default();
-        let mut update_check = RequestTracker::default();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut ctx = RuntimeActionContext {
-            terminal: &mut terminal,
-            app: &mut app,
-            data: &mut data,
-            speedtest_req_tx: None,
-            stream_check_req_tx: None,
-            skills_req_tx: None,
-            proxy_req_tx: Some(&tx),
-            proxy_loading: &mut proxy_loading,
-            local_env_req_tx: None,
-            session_req_tx: None,
-            webdav_req_tx: None,
-            webdav_loading: &mut webdav_loading,
-            update_req_tx: None,
-            update_check: &mut update_check,
-            model_fetch_req_tx: None,
-            managed_auth_req_tx: None,
-        };
-
-        switch(&mut ctx, "proxy-provider".to_string()).expect("queue switch");
-
-        assert!(matches!(
-            rx.recv().expect("worker request"),
-            crate::cli::tui::runtime_systems::ProxyReq::SwitchProvider {
-                request_id: 1,
-                app_type: AppType::Claude,
-                provider_id,
-                ..
-            } if provider_id == "proxy-provider"
-        ));
-        assert_eq!(ctx.proxy_loading.active, Some(1));
-        assert!(matches!(
-            ctx.app.overlay,
-            Overlay::Loading {
-                kind: crate::cli::tui::app::LoadingKind::ProviderSwitch,
-                ..
-            }
-        ));
-        assert_eq!(
-            load_state()
-                .expect("reload state")
-                .config
-                .read()
-                .expect("read config")
-                .get_manager(&AppType::Claude)
-                .expect("claude manager")
-                .current,
-            "old-provider",
-            "TUI thread must not perform the switch before the worker runs"
-        );
     }
 
     fn claude_queue_provider(id: &str) -> Provider {
@@ -1409,7 +1390,7 @@ mod tests {
 
     #[test]
     #[serial(home_settings)]
-    fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
+    fn codex_provider_switch_shows_restart_toast_when_live_sync_succeeds() {
         let fixture = run_codex_switch(
             "old-provider",
             Some(MATCHING_CODEX_LIVE_CONFIG),
@@ -1418,22 +1399,26 @@ mod tests {
         .expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
-        assert!(
-            fixture.app.toast.is_none(),
-            "provider switch should not show restart toast"
-        );
+        assert!(matches!(
+            fixture.app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Success
+                    && toast.message == texts::tui_codex_provider_switched_restart_notice()
+        ));
     }
 
     #[test]
     #[serial(home_settings)]
-    fn provider_switch_does_not_show_restart_toast_when_live_sync_is_skipped() {
+    fn codex_provider_switch_shows_restart_toast_when_live_sync_is_skipped() {
         let fixture = run_codex_switch("old-provider", None, None).expect("switch should succeed");
 
         assert_eq!(fixture.data.providers.current_id, "new-provider");
-        assert!(
-            fixture.app.toast.is_none(),
-            "provider switch should not show restart toast"
-        );
+        assert!(matches!(
+            fixture.app.toast.as_ref(),
+            Some(toast)
+                if toast.kind == ToastKind::Success
+                    && toast.message == texts::tui_codex_provider_switched_restart_notice()
+        ));
     }
 
     #[test]
@@ -1905,6 +1890,119 @@ mod tests {
         let notice = provider_switch_proxy_notice_api_format(&AppType::Claude, &provider, false);
 
         assert_eq!(notice, Some("openai_responses"));
+    }
+
+    #[test]
+    fn provider_switch_notice_covers_codex_anthropic_when_proxy_is_not_ready() {
+        let mut provider = Provider::with_id(
+            "anthropic".to_string(),
+            "Anthropic Gateway".to_string(),
+            json!({}),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            provider_switch_proxy_notice_api_format(&AppType::Codex, &provider, false),
+            Some("anthropic")
+        );
+        assert!(matches!(
+            provider_switch_proxy_notice_overlay(&AppType::Codex, &provider, false),
+            Some(Overlay::Confirm(ConfirmOverlay { message, .. }))
+                if message == texts::tui_codex_api_format_requires_proxy_message("anthropic")
+        ));
+        assert_eq!(
+            provider_switch_proxy_notice_api_format(&AppType::Codex, &provider, true),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_switch_full_url_notice_covers_claude_and_codex_only_when_proxy_is_needed() {
+        for app_type in [AppType::Claude, AppType::Codex] {
+            let mut provider = Provider::with_id(
+                "full-url".to_string(),
+                "Full URL".to_string(),
+                serde_json::json!({}),
+                None,
+            );
+            provider.meta = Some(crate::provider::ProviderMeta {
+                is_full_url: Some(true),
+                ..Default::default()
+            });
+
+            assert!(provider_switch_full_url_requires_proxy(
+                &app_type, &provider, false
+            ));
+            assert!(!provider_switch_full_url_requires_proxy(
+                &app_type, &provider, true
+            ));
+        }
+    }
+
+    #[test]
+    fn codex_restart_notice_is_appended_to_existing_proxy_notice() {
+        let original_message = "Full URL mode requires the local proxy.";
+        let mut overlay = Some(Overlay::Confirm(ConfirmOverlay {
+            title: "Proxy required".to_string(),
+            message: original_message.to_string(),
+            action: ConfirmAction::ProviderApiFormatProxyNotice,
+        }));
+
+        assert!(append_codex_restart_notice_to_proxy_overlay(
+            &AppType::Codex,
+            &mut overlay
+        ));
+        assert!(matches!(
+            overlay,
+            Some(Overlay::Confirm(ConfirmOverlay { message, .. }))
+                if message == format!(
+                    "{original_message}\n\n{}",
+                    texts::tui_codex_provider_switched_restart_notice()
+                )
+        ));
+    }
+
+    #[test]
+    fn non_codex_proxy_notice_is_left_unchanged() {
+        let mut overlay = Some(Overlay::Confirm(ConfirmOverlay {
+            title: "Proxy required".to_string(),
+            message: "Original".to_string(),
+            action: ConfirmAction::ProviderApiFormatProxyNotice,
+        }));
+
+        assert!(!append_codex_restart_notice_to_proxy_overlay(
+            &AppType::Claude,
+            &mut overlay
+        ));
+        assert!(matches!(
+            overlay,
+            Some(Overlay::Confirm(ConfirmOverlay { message, .. })) if message == "Original"
+        ));
+    }
+
+    #[test]
+    fn provider_switch_full_url_notice_ignores_managed_codex_oauth() {
+        let mut provider = Provider::with_id(
+            "codex-oauth".to_string(),
+            "Codex".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            is_full_url: Some(true),
+            ..Default::default()
+        });
+
+        assert!(!provider_switch_full_url_requires_proxy(
+            &AppType::Claude,
+            &provider,
+            false
+        ));
     }
 
     #[test]

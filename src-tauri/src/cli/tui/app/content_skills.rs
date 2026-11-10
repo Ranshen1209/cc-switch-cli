@@ -66,7 +66,7 @@ impl App {
                 self.overlay = Overlay::SkillsAppsPicker {
                     directory: skill.directory.clone(),
                     name: skill.name.clone(),
-                    selected: four_app_picker_index(&self.app_type),
+                    selected: skills_app_picker_index(&self.app_type),
                     apps: skill.apps.clone(),
                 };
                 Action::None
@@ -89,6 +89,28 @@ impl App {
             }
             Intent::Import => Action::SkillsOpenImport,
             Intent::Discover => self.push_route_and_switch(Route::SkillsDiscover),
+            Intent::CheckUpdates => Action::SkillsCheckUpdates,
+            Intent::Update => {
+                let Some(skill) = visible.get(self.skills_idx) else {
+                    return Action::None;
+                };
+                if self.skill_updates.contains_key(&skill.id) {
+                    Action::SkillsUpdate {
+                        ids: vec![skill.id.clone()],
+                    }
+                } else {
+                    Action::None
+                }
+            }
+            Intent::UpdateAll => {
+                let mut ids = self.skill_updates.keys().cloned().collect::<Vec<_>>();
+                ids.sort();
+                if ids.is_empty() {
+                    Action::None
+                } else {
+                    Action::SkillsUpdate { ids }
+                }
+            }
         }
     }
 
@@ -119,7 +141,6 @@ impl App {
                     },
                     input: TextInput::new(self.skills_discover_query.clone()),
                     submit: TextSubmit::SkillsDiscoverQuery,
-                    secret: false,
                 });
                 Action::None
             }
@@ -190,7 +211,6 @@ impl App {
                     prompt: texts::tui_skills_repos_add_prompt().to_string(),
                     input: TextInput::new(""),
                     submit: TextSubmit::SkillsRepoAdd,
-                    secret: false,
                 });
                 Action::None
             }
@@ -246,7 +266,7 @@ impl App {
                 self.overlay = Overlay::SkillsAppsPicker {
                     directory: skill.directory.clone(),
                     name: skill.name.clone(),
-                    selected: four_app_picker_index(&self.app_type),
+                    selected: skills_app_picker_index(&self.app_type),
                     apps: skill.apps.clone(),
                 };
                 Action::None
@@ -268,6 +288,14 @@ impl App {
                 app: Some(self.app_type.clone()),
             },
             KeyCode::Char('S') => Action::SkillsSync { app: None },
+            KeyCode::Char('r') if skill.repo_owner.is_some() && skill.repo_name.is_some() => {
+                Action::SkillsCheckUpdates
+            }
+            KeyCode::Char('u') if self.skill_updates.contains_key(&skill.id) => {
+                Action::SkillsUpdate {
+                    ids: vec![skill.id.clone()],
+                }
+            }
             _ => Action::None,
         }
     }

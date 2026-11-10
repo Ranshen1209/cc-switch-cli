@@ -64,20 +64,7 @@ pub fn codex_provider_uses_chat_completions(provider: &Provider) -> bool {
         return is_chat_wire_api(&wire_api);
     }
 
-    if let Some(base_url) = provider
-        .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-    {
-        return is_chat_completions_url(base_url);
-    }
-
-    provider
-        .settings_config
-        .get("config")
-        .and_then(|v| v.as_str())
-        .and_then(extract_codex_base_url_from_toml)
+    codex_provider_base_url(provider)
         .map(|url| is_chat_completions_url(&url))
         .unwrap_or(false)
 }
@@ -93,8 +80,12 @@ pub fn should_convert_codex_responses_to_chat(provider: &Provider, endpoint: &st
     ) && codex_provider_uses_chat_completions(provider)
 }
 
-/// Whether this Codex provider's upstream speaks native Anthropic Messages.
-/// This requires explicit configuration; gateway URLs are too varied to infer safely.
+/// Whether this Codex provider's real upstream speaks the native Anthropic
+/// Messages protocol (`/v1/messages`). The local Codex client always talks to
+/// CC Switch through Responses, so CC Switch bridges Responses ⇄ Anthropic.
+///
+/// Only explicit format configuration is accepted. Anthropic gateway URLs vary
+/// too widely for safe base-URL inference.
 pub fn codex_provider_uses_anthropic(provider: &Provider) -> bool {
     if let Some(api_format) = provider
         .meta
@@ -121,7 +112,8 @@ pub fn codex_provider_uses_anthropic(provider: &Provider) -> bool {
         .get("config")
         .and_then(|v| v.as_str())
         .and_then(extract_codex_wire_api_from_toml)
-        .is_some_and(|wire_api| is_anthropic_wire_api(&wire_api))
+        .map(|wire_api| is_anthropic_wire_api(&wire_api))
+        .unwrap_or(false)
 }
 
 pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint: &str) -> bool {
@@ -133,6 +125,67 @@ pub fn should_convert_codex_responses_to_anthropic(provider: &Provider, endpoint
         path,
         "/responses" | "/v1/responses" | "/responses/compact" | "/v1/responses/compact"
     ) && codex_provider_uses_anthropic(provider)
+}
+
+/// Whether a converted Codex Responses request may send `prompt_cache_key` to
+/// its Chat Completions upstream. Unknown OpenAI-compatible gateways default to
+/// false because many reject unsupported request fields with HTTP 400.
+pub fn should_send_codex_chat_prompt_cache_key(provider: &Provider) -> bool {
+    match provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.prompt_cache_routing.as_deref())
+        .unwrap_or("auto")
+    {
+        "enabled" => return true,
+        "disabled" => return false,
+        _ => {}
+    }
+
+    let Some(base_url) = codex_provider_base_url(provider) else {
+        return false;
+    };
+    let Ok(url) = url::Url::parse(&base_url) else {
+        return false;
+    };
+
+    match url.host_str() {
+        Some("api.openai.com") => true,
+        Some("api.kimi.com") => {
+            let path = url.path().trim_end_matches('/');
+            path == "/coding" || path.starts_with("/coding/")
+        }
+        _ => false,
+    }
+}
+
+/// Add a stable cache-routing key after Responses -> Chat conversion. An
+/// explicit client key wins; otherwise only a real client-provided session ID
+/// is eligible. Generated per-request UUIDs must never be used here.
+pub fn inject_codex_chat_prompt_cache_key(
+    provider: &Provider,
+    chat_body: &mut JsonValue,
+    explicit_key: Option<&str>,
+    client_session_id: Option<&str>,
+) -> bool {
+    if !should_send_codex_chat_prompt_cache_key(provider) {
+        return false;
+    }
+
+    let key = explicit_key
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .or_else(|| {
+            client_session_id
+                .map(str::trim)
+                .filter(|session_id| !session_id.is_empty())
+        });
+    let Some(key) = key else {
+        return false;
+    };
+
+    chat_body["prompt_cache_key"] = JsonValue::String(key.to_string());
+    true
 }
 
 /// Extract the real upstream model configured for a Codex provider.
@@ -184,6 +237,8 @@ pub fn apply_codex_chat_upstream_model(
     apply_codex_upstream_model(provider, body)
 }
 
+/// Apply the provider's configured upstream model without format gating.
+/// The Anthropic bridge calls this after routing has already been resolved.
 pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> Option<String> {
     let catalog_model_ids = codex_provider_catalog_model_ids(provider);
     if let Some(request_model) = body
@@ -206,15 +261,48 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
-    if let Some(config) = provider
+    let mut config = if let Some(config) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
     {
-        return Some(normalize_codex_chat_reasoning_config(config));
+        normalize_codex_chat_reasoning_config(config)
+    } else {
+        infer_codex_chat_reasoning_config(provider, body)?
+    };
+
+    if config.effort_value_mode.as_deref() == Some("zen") {
+        config.effort_levels = zen_catalog_effort_levels(provider, body);
     }
 
-    infer_codex_chat_reasoning_config(provider, body)
+    Some(config)
+}
+
+fn zen_catalog_effort_levels(provider: &Provider, body: &JsonValue) -> Option<Vec<String>> {
+    let model = body.get("model")?.as_str()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let entries = provider
+        .settings_config
+        .get("modelCatalog")?
+        .get("models")?
+        .as_array()?;
+    let entry = entries.iter().find(|entry| {
+        entry
+            .get("model")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|name| name.eq_ignore_ascii_case(model))
+    })?;
+    let levels = entry
+        .get("reasoningLevels")
+        .or_else(|| entry.get("reasoning_levels"))?
+        .as_array()?
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!levels.is_empty()).then_some(levels)
 }
 
 fn normalize_codex_chat_reasoning_config(
@@ -237,19 +325,7 @@ fn infer_codex_chat_reasoning_config(
         .or_else(|| codex_provider_upstream_model(provider))
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let base_url = provider
-        .settings_config
-        .get("base_url")
-        .or_else(|| provider.settings_config.get("baseURL"))
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .or_else(|| {
-            provider
-                .settings_config
-                .get("config")
-                .and_then(|v| v.as_str())
-                .and_then(extract_codex_base_url_from_toml)
-        })
+    let base_url = codex_provider_base_url(provider)
         .unwrap_or_default()
         .to_ascii_lowercase();
     let name = provider.name.to_ascii_lowercase();
@@ -268,6 +344,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -279,6 +356,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("low_high".to_string()),
             output_format: Some("reasoning".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -290,6 +368,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -301,6 +380,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -312,6 +392,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -323,6 +404,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_details".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -334,6 +416,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -354,6 +437,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             output_format: Some("auto".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -365,6 +449,21 @@ fn infer_aggregator_platform_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
+        });
+    }
+
+    // Zen uses gateway-level reasoning_effort with each model's catalog levels,
+    // rather than the model vendor's native thinking parameters (upstream #6123).
+    if platform.contains("opencode.ai") {
+        return Some(CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(true),
+            thinking_param: Some("none".to_string()),
+            effort_param: Some("reasoning_effort".to_string()),
+            effort_value_mode: Some("zen".to_string()),
+            output_format: Some("reasoning_content".to_string()),
+            effort_levels: None,
         });
     }
 
@@ -386,7 +485,7 @@ fn is_chat_wire_api(value: &str) -> bool {
 fn is_anthropic_wire_api(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
-        "anthropic" | "anthropic_messages" | "anthropic-messages" | "messages"
+        "anthropic" | "anthropic_messages" | "anthropic-messages" | "claude" | "messages"
     )
 }
 
@@ -437,22 +536,40 @@ fn extract_codex_model_from_toml(config_text: &str) -> Option<String> {
 }
 
 fn extract_codex_base_url_from_toml(config_text: &str) -> Option<String> {
-    let doc = config_text.parse::<TomlValue>().ok()?;
+    crate::codex_config::extract_codex_base_url(config_text)
+}
 
-    if let Some(active_provider) = doc.get("model_provider").and_then(|v| v.as_str()) {
-        if let Some(base_url) = doc
-            .get("model_providers")
-            .and_then(|providers| providers.get(active_provider))
-            .and_then(|provider| provider.get("base_url"))
-            .and_then(|v| v.as_str())
+fn normalize_codex_base_url(base_url: &str) -> Option<String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    (!base_url.is_empty()).then(|| base_url.to_string())
+}
+
+fn codex_provider_base_url(provider: &Provider) -> Option<String> {
+    if let Some(config) = provider.settings_config.get("config") {
+        if let Some(config_text) = config.as_str() {
+            if !config_text.trim().is_empty() {
+                return extract_codex_base_url_from_toml(config_text)
+                    .and_then(|base_url| normalize_codex_base_url(&base_url));
+            }
+        }
+
+        if let Some(base_url) = config
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_codex_base_url)
         {
-            return Some(base_url.to_string());
+            return Some(base_url);
         }
     }
 
-    doc.get("base_url")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
+    // Older provider records store the endpoint directly in settingsConfig.
+    // An empty/null config payload does not supersede those legacy aliases.
+    provider
+        .settings_config
+        .get("base_url")
+        .or_else(|| provider.settings_config.get("baseURL"))
+        .and_then(|value| value.as_str())
+        .and_then(normalize_codex_base_url)
 }
 
 impl CodexAdapter {
@@ -461,55 +578,7 @@ impl CodexAdapter {
     }
 
     fn extract_key(&self, provider: &Provider) -> Option<String> {
-        if let Some(env) = provider.settings_config.get("env") {
-            if let Some(key) = env
-                .get("OPENAI_API_KEY")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-            {
-                return Some(key.to_string());
-            }
-        }
-
-        if let Some(auth) = provider.settings_config.get("auth") {
-            if let Some(key) = crate::codex_config::extract_codex_auth_api_key(auth) {
-                return Some(key);
-            }
-        }
-
-        if let Some(key) = provider
-            .settings_config
-            .get("apiKey")
-            .or_else(|| provider.settings_config.get("api_key"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-        {
-            return Some(key.to_string());
-        }
-
-        if let Some(config) = provider.settings_config.get("config") {
-            if let Some(key) = config
-                .get("api_key")
-                .or_else(|| config.get("apiKey"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-            {
-                return Some(key.to_string());
-            }
-
-            if let Some(config_str) = config.as_str() {
-                if let Some(key) =
-                    crate::codex_config::extract_codex_experimental_bearer_token(config_str)
-                {
-                    return Some(key);
-                }
-            }
-        }
-
-        None
+        provider.configured_api_key(&crate::app_config::AppType::Codex)
     }
 }
 
@@ -525,41 +594,8 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
-        if let Some(url) = provider
-            .settings_config
-            .get("base_url")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.trim_end_matches('/').to_string());
-        }
-
-        if let Some(url) = provider
-            .settings_config
-            .get("baseURL")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.trim_end_matches('/').to_string());
-        }
-
-        if let Some(config) = provider.settings_config.get("config") {
-            if let Some(url) = config.get("base_url").and_then(|v| v.as_str()) {
-                return Ok(url.trim_end_matches('/').to_string());
-            }
-
-            if let Some(config_str) = config.as_str() {
-                if let Some(start) = config_str.find("base_url = \"") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('"') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-                if let Some(start) = config_str.find("base_url = '") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('\'') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-            }
+        if let Some(base_url) = codex_provider_base_url(provider) {
+            return Ok(base_url);
         }
 
         Err(ProxyError::ConfigError(
@@ -568,17 +604,22 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
-        let strategy = if codex_provider_uses_anthropic(provider)
-            && provider
+        let strategy = if codex_provider_uses_anthropic(provider) {
+            let uses_x_api_key = provider
                 .meta
                 .as_ref()
                 .and_then(|meta| meta.api_key_field.as_deref())
-                .is_some_and(|field| field.eq_ignore_ascii_case("ANTHROPIC_API_KEY"))
-        {
-            AuthStrategy::Anthropic
+                .map(|field| field.eq_ignore_ascii_case("ANTHROPIC_API_KEY"))
+                .unwrap_or(false);
+            if uses_x_api_key {
+                AuthStrategy::Anthropic
+            } else {
+                AuthStrategy::Bearer
+            }
         } else {
             AuthStrategy::Bearer
         };
+
         self.extract_key(provider)
             .map(|key| AuthInfo::new(key, strategy))
     }
@@ -605,7 +646,11 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn add_auth_headers(&self, request: RequestBuilder, auth: &AuthInfo) -> RequestBuilder {
-        request.header("Authorization", format!("Bearer {}", auth.api_key))
+        if auth.strategy == AuthStrategy::Anthropic {
+            request.header("x-api-key", &auth.api_key)
+        } else {
+            request.header("Authorization", format!("Bearer {}", auth.api_key))
+        }
     }
 }
 
@@ -621,6 +666,84 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn extract_base_url_uses_active_provider_instead_of_commented_assignment() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "config": r#"model_provider = "current"
+model = "gpt-5.6-sol"
+
+# [model_providers.old]
+# base_url = "https://old.example.com/v1"
+# wire_api = "responses"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1"
+wire_api = "responses"
+"#
+        }));
+
+        assert_eq!(
+            adapter
+                .extract_base_url(&provider)
+                .expect("extract base URL"),
+            "https://current.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn extract_base_url_prefers_config_toml_over_legacy_aliases() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "https://stale.example.com/v1",
+            "baseURL": "https://also-stale.example.com/v1",
+            "config": r#"model_provider = "current"
+
+[model_providers.current]
+base_url = "https://current.example.com/v1/"
+"#
+        }));
+
+        assert_eq!(
+            adapter
+                .extract_base_url(&provider)
+                .expect("extract base URL"),
+            "https://current.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn extract_base_url_does_not_fall_back_when_config_toml_is_invalid() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "https://stale.example.com/v1",
+            "config": "model_provider = \"current\"\n[broken"
+        }));
+
+        assert!(adapter.extract_base_url(&provider).is_err());
+    }
+
+    #[test]
+    fn extract_base_url_keeps_legacy_alias_without_config_toml() {
+        let adapter = CodexAdapter::new();
+        for config in [None, Some(json!("")), Some(serde_json::Value::Null)] {
+            let mut settings = json!({
+                "baseURL": "https://legacy.example.com/v1/"
+            });
+            if let Some(config) = config {
+                settings["config"] = config;
+            }
+            let provider = create_provider(settings);
+
+            assert_eq!(
+                adapter
+                    .extract_base_url(&provider)
+                    .expect("extract legacy base URL"),
+                "https://legacy.example.com/v1"
+            );
+        }
     }
 
     #[test]
@@ -662,6 +785,77 @@ experimental_bearer_token = "sk-config-key"
     }
 
     #[test]
+    fn test_uses_anthropic_from_all_explicit_config_locations() {
+        let settings = create_provider(json!({ "apiFormat": "anthropic" }));
+        assert!(codex_provider_uses_anthropic(&settings));
+
+        let mut meta = create_provider(json!({}));
+        meta.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
+        assert!(codex_provider_uses_anthropic(&meta));
+
+        let toml = create_provider(json!({
+            "config": r#"model_provider = "custom"
+
+[model_providers.custom]
+wire_api = "anthropic"
+"#
+        }));
+        assert!(codex_provider_uses_anthropic(&toml));
+    }
+
+    #[test]
+    fn test_anthropic_and_chat_routes_are_mutually_exclusive_and_path_guarded() {
+        let anthropic = create_provider(json!({ "apiFormat": "anthropic" }));
+        assert!(codex_provider_uses_anthropic(&anthropic));
+        assert!(!codex_provider_uses_chat_completions(&anthropic));
+        assert!(should_convert_codex_responses_to_anthropic(
+            &anthropic,
+            "/responses?x=1"
+        ));
+        assert!(should_convert_codex_responses_to_anthropic(
+            &anthropic,
+            "/v1/responses/compact"
+        ));
+        assert!(!should_convert_codex_responses_to_anthropic(
+            &anthropic,
+            "/chat/completions"
+        ));
+
+        let chat = create_provider(json!({ "apiFormat": "openai_chat" }));
+        assert!(codex_provider_uses_chat_completions(&chat));
+        assert!(!codex_provider_uses_anthropic(&chat));
+    }
+
+    #[test]
+    fn test_anthropic_auth_defaults_to_bearer_and_supports_x_api_key() {
+        let adapter = CodexAdapter::new();
+        let mut provider = create_provider(json!({
+            "apiFormat": "anthropic",
+            "apiKey": "sk-anthropic"
+        }));
+
+        let auth = adapter
+            .extract_auth(&provider)
+            .expect("extract bearer auth");
+        assert_eq!(auth.api_key, "sk-anthropic");
+        assert_eq!(auth.strategy, AuthStrategy::Bearer);
+
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+            ..Default::default()
+        });
+        let auth = adapter
+            .extract_auth(&provider)
+            .expect("extract x-api-key auth");
+        assert_eq!(auth.api_key, "sk-anthropic");
+        assert_eq!(auth.strategy, AuthStrategy::Anthropic);
+    }
+
+    #[test]
     fn test_catalog_tool_profile_honors_settings_api_format_fallback() {
         use crate::codex_config::CodexCatalogToolProfile;
         // Legacy/imported provider carries apiFormat only in settingsConfig (no
@@ -684,31 +878,100 @@ experimental_bearer_token = "sk-config-key"
             codex_provider_catalog_tool_profile(&anthropic),
             CodexCatalogToolProfile::Anthropic
         );
-        assert!(codex_provider_uses_anthropic(&anthropic));
-        assert!(should_convert_codex_responses_to_anthropic(
-            &anthropic,
-            "/v1/responses"
-        ));
     }
 
     #[test]
-    fn test_anthropic_auth_uses_selected_header_strategy() {
-        let adapter = CodexAdapter::new();
-        let mut provider = create_provider(json!({
-            "apiFormat": "anthropic",
-            "auth": { "OPENAI_API_KEY": "sk-anthropic" }
+    fn prompt_cache_routing_auto_enables_known_upstreams_only() {
+        let kimi = create_provider(json!({
+            "config": r#"
+model_provider = "custom"
+[model_providers.custom]
+base_url = "https://api.kimi.com/coding/v1"
+wire_api = "responses"
+"#
+        }));
+        let openai = create_provider(json!({
+            "base_url": "https://api.openai.com/v1"
+        }));
+        let unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
         }));
 
-        let bearer = adapter.extract_auth(&provider).expect("bearer auth");
-        assert_eq!(bearer.strategy, AuthStrategy::Bearer);
+        assert!(should_send_codex_chat_prompt_cache_key(&kimi));
+        assert!(should_send_codex_chat_prompt_cache_key(&openai));
+        assert!(!should_send_codex_chat_prompt_cache_key(&unknown));
+    }
 
-        provider.meta = Some(crate::provider::ProviderMeta {
-            api_format: Some("anthropic".to_string()),
-            api_key_field: Some("ANTHROPIC_API_KEY".to_string()),
+    #[test]
+    fn prompt_cache_routing_user_override_wins_over_auto_detection() {
+        let mut kimi = create_provider(json!({
+            "base_url": "https://api.kimi.com/coding/v1"
+        }));
+        kimi.meta = Some(crate::provider::ProviderMeta {
+            prompt_cache_routing: Some("disabled".to_string()),
             ..Default::default()
         });
-        let x_api_key = adapter.extract_auth(&provider).expect("x-api-key auth");
-        assert_eq!(x_api_key.strategy, AuthStrategy::Anthropic);
+        assert!(!should_send_codex_chat_prompt_cache_key(&kimi));
+
+        let mut unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
+        }));
+        unknown.meta = Some(crate::provider::ProviderMeta {
+            prompt_cache_routing: Some("enabled".to_string()),
+            ..Default::default()
+        });
+        assert!(should_send_codex_chat_prompt_cache_key(&unknown));
+    }
+
+    #[test]
+    fn prompt_cache_key_prefers_explicit_key_then_real_session() {
+        let provider = create_provider(json!({
+            "base_url": "https://api.kimi.com/coding/v1"
+        }));
+        let mut explicit_body = json!({ "model": "kimi-for-coding" });
+        assert!(inject_codex_chat_prompt_cache_key(
+            &provider,
+            &mut explicit_body,
+            Some("request-key"),
+            Some("session-key"),
+        ));
+        assert_eq!(explicit_body["prompt_cache_key"], "request-key");
+
+        let mut session_body = json!({ "model": "kimi-for-coding" });
+        assert!(inject_codex_chat_prompt_cache_key(
+            &provider,
+            &mut session_body,
+            None,
+            Some("session-key"),
+        ));
+        assert_eq!(session_body["prompt_cache_key"], "session-key");
+    }
+
+    #[test]
+    fn prompt_cache_key_is_not_injected_without_real_session_or_support() {
+        let kimi = create_provider(json!({
+            "base_url": "https://api.kimi.com/coding/v1"
+        }));
+        let mut no_session_body = json!({ "model": "kimi-for-coding" });
+        assert!(!inject_codex_chat_prompt_cache_key(
+            &kimi,
+            &mut no_session_body,
+            None,
+            None,
+        ));
+        assert!(no_session_body.get("prompt_cache_key").is_none());
+
+        let unknown = create_provider(json!({
+            "base_url": "https://strict.example.com/v1"
+        }));
+        let mut unsupported_body = json!({ "model": "other" });
+        assert!(!inject_codex_chat_prompt_cache_key(
+            &unknown,
+            &mut unsupported_body,
+            Some("request-key"),
+            Some("session-key"),
+        ));
+        assert!(unsupported_body.get("prompt_cache_key").is_none());
     }
 
     #[test]
@@ -825,6 +1088,7 @@ wire_api = "chat"
                 effort_param: Some("reasoning.effort".to_string()),
                 effort_value_mode: Some("openrouter".to_string()),
                 output_format: Some("auto".to_string()),
+                effort_levels: None,
             }),
             ..Default::default()
         });
@@ -838,6 +1102,103 @@ wire_api = "chat"
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
         assert_eq!(config.effort_param.as_deref(), Some("reasoning.effort"));
         assert_eq!(config.effort_value_mode.as_deref(), Some("openrouter"));
+    }
+
+    #[test]
+    fn opencode_zen_inference_uses_catalog_levels_in_chat_requests() {
+        let provider = create_provider(json!({
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_format": "openai_chat",
+            "modelCatalog": {"models": [
+                {"model": "glm-5.2", "reasoningLevels": ["high", "max"]},
+                {"model": "deepseek-v4-flash", "reasoning_levels": ["low", "high", "max"]},
+                {"model": "kimi-k3", "reasoningLevels": ["max"]},
+                {"model": "glm-5.1"}
+            ]}
+        }));
+        for (model, effort, expected) in [
+            ("GLM-5.2", "medium", Some("high")),
+            ("glm-5.2", "xhigh", Some("max")),
+            ("glm-5.2", "ultra", Some("max")),
+            ("deepseek-v4-flash", "low", Some("low")),
+            ("deepseek-v4-flash", "medium", Some("high")),
+            ("kimi-k3", "minimal", Some("max")),
+            ("glm-5.1", "high", None),
+            ("uncataloged-model", "high", None),
+            ("glm-5.2", "none", None),
+        ] {
+            let body = json!({"model": model, "input": "hello", "reasoning": {"effort": effort}});
+            let config = resolve_codex_chat_reasoning_config(&provider, &body)
+                .expect("infer Zen gateway reasoning");
+            assert_eq!(config.effort_value_mode.as_deref(), Some("zen"));
+            let result =
+                super::super::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+                    body,
+                    Some(&config),
+                )
+                .expect("translate Zen request");
+            assert_eq!(
+                result.get("reasoning_effort").and_then(JsonValue::as_str),
+                expected,
+                "{model}/{effort}"
+            );
+            assert!(result.get("thinking").is_none(), "{model}/{effort}");
+            assert!(result.get("reasoning").is_none(), "{model}/{effort}");
+        }
+    }
+
+    #[test]
+    fn opencode_name_alone_does_not_override_vendor_reasoning() {
+        let mut provider = create_provider(json!({
+            "base_url": "https://api.example.com/v1",
+            "api_format": "openai_chat"
+        }));
+        provider.name = "OpenCode compatible".to_string();
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({"model": "glm-5.2"}))
+            .expect("infer model vendor reasoning");
+        assert_eq!(config.thinking_param.as_deref(), Some("thinking"));
+        assert_eq!(config.supports_effort, Some(false));
+        assert_ne!(config.effort_value_mode.as_deref(), Some("zen"));
+    }
+
+    #[test]
+    fn opencode_go_preset_attaches_reasoning_levels_for_the_requested_model() {
+        let value = crate::provider_preset_builtin::builtin_provider_preset_value(
+            &crate::app_config::AppType::Codex,
+            crate::provider_preset_builtin::BuiltinProviderPresetId::OpenCodeGo,
+        )
+        .expect("OpenCode Go preset");
+        let provider: Provider = serde_json::from_value(value).expect("valid provider preset");
+
+        let glm = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "glm-5.3" }))
+            .expect("GLM reasoning config");
+        assert_eq!(
+            glm.effort_levels,
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
+
+        let flash = resolve_codex_chat_reasoning_config(
+            &provider,
+            &json!({ "model": "deepseek-v4.1-flash" }),
+        )
+        .expect("DeepSeek reasoning config");
+        assert_eq!(
+            flash.effort_levels,
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
+
+        let toggle =
+            resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "mimo-v2.6-pro" }))
+                .expect("toggle-only reasoning config");
+        assert!(toggle.effort_levels.is_none());
     }
 
     #[test]

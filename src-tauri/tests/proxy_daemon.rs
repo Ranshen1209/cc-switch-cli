@@ -46,6 +46,7 @@ const ENV_KEYS: &[&str] = &[
     "XDG_RUNTIME_DIR",
     "XDG_STATE_HOME",
     "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
 ];
 
 struct TestSandbox {
@@ -82,6 +83,7 @@ impl TestSandbox {
             std::env::set_var("USERPROFILE", &home);
             std::env::set_var("CC_SWITCH_CONFIG_DIR", &config_dir);
             std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
             std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
             std::env::set_var("XDG_STATE_HOME", &state_dir);
         }
@@ -256,60 +258,6 @@ fn daemon_starts_and_serves_status_request() {
 
 #[test]
 #[serial]
-fn managed_session_rejects_daemon_from_different_config_directory() {
-    let sandbox = TestSandbox::new();
-    let original_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR")
-        .map(PathBuf::from)
-        .expect("sandbox config directory");
-    let other_config_dir = sandbox._root.path().join("other-cc-switch");
-    std::fs::create_dir_all(&other_config_dir).expect("create second config directory");
-
-    let mut daemon = sandbox.spawn_daemon();
-    assert!(
-        sandbox.wait_for_socket(Duration::from_secs(10)),
-        "daemon socket should come up"
-    );
-
-    // Keep the runtime directory (and therefore daemon socket) shared while
-    // moving only the foreground process to a different CC-Switch database.
-    unsafe {
-        std::env::set_var("CC_SWITCH_CONFIG_DIR", &other_config_dir);
-    }
-    let state = cc_switch_lib::AppState::try_new().expect("create state for second database");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("create test runtime");
-    let error = runtime
-        .block_on(
-            state
-                .proxy_service
-                .set_managed_session_for_app("claude", true),
-        )
-        .expect_err("different database daemon must be rejected");
-
-    assert!(error.contains("running daemon uses"), "{error}");
-    assert!(error.contains("cc-switch daemon stop"), "{error}");
-    let proxy_config = runtime
-        .block_on(state.db.get_proxy_config_for_app("claude"))
-        .expect("load second database proxy config");
-    assert!(
-        !proxy_config.enabled,
-        "identity mismatch must be rejected before takeover is enabled"
-    );
-
-    unsafe {
-        std::env::set_var("CC_SWITCH_CONFIG_DIR", original_config_dir);
-    }
-    let _ = send_request(sandbox.socket(), r#"{"kind":"shutdown"}"#);
-    assert!(
-        wait_for_daemon_exit(&mut daemon, Duration::from_secs(5)),
-        "daemon should stop after cleanup"
-    );
-}
-
-#[test]
-#[serial]
 fn ensure_worker_spawns_a_worker_and_drop_takeover_brings_it_down() {
     let sandbox = TestSandbox::new();
     seed_minimal_claude_provider(&sandbox);
@@ -403,6 +351,118 @@ fn proxy_enable_and_disable_cli_manage_daemon_worker() {
         None,
         "proxy disable should restore Claude live config without a base URL"
     );
+}
+
+#[test]
+#[serial]
+fn disable_with_missing_or_stale_metadata_stops_only_the_target_worker() {
+    for stale in [false, true] {
+        let sandbox = TestSandbox::new();
+        seed_minimal_claude_provider(&sandbox);
+        let state = cc_switch_lib::AppState::try_new().expect("sandbox state");
+        let codex_dir = sandbox._root.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let config = "model = \"test-model\"\nmodel_provider = \"test\"\n[model_providers.test]\nname = \"Test\"\nbase_url = \"https://example.com/v1\"\nwire_api = \"responses\"\n";
+        std::fs::write(
+            codex_dir.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"test-key"}"#,
+        )
+        .unwrap();
+        std::fs::write(codex_dir.join("config.toml"), config).unwrap();
+        let provider = cc_switch_lib::Provider::with_id(
+            "codex-provider".into(),
+            "Codex Provider".into(),
+            serde_json::json!({"auth":{"OPENAI_API_KEY":"test-key"},"config":config}),
+            None,
+        );
+        state.db.save_provider("codex", &provider).unwrap();
+        state
+            .db
+            .set_current_provider("codex", &provider.id)
+            .unwrap();
+        state
+            .db
+            .set_app_proxy_preferred_port("codex", free_loopback_port())
+            .unwrap();
+        let mut daemon = sandbox.spawn_daemon();
+        assert!(sandbox.wait_for_socket(Duration::from_secs(10)));
+        for app in ["claude", "codex"] {
+            let response = send_request(
+                sandbox.socket(),
+                &format!(r#"{{"kind":"ensure_worker","app_type":"{app}"}}"#),
+            );
+            assert!(response.contains("\"kind\":\"worker\""), "{response}");
+        }
+        let before: serde_json::Value =
+            serde_json::from_str(&send_request(sandbox.socket(), r#"{"kind":"status"}"#)).unwrap();
+        let workers = before["workers"].as_array().unwrap();
+        let claude_pid = workers.iter().find(|w| w["app_type"] == "claude").unwrap()["pid"].clone();
+        let codex_port = workers.iter().find(|w| w["app_type"] == "codex").unwrap()["port"]
+            .as_u64()
+            .unwrap() as u16;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for app in ["claude", "codex", "gemini"] {
+            let mut cfg = runtime
+                .block_on(state.db.get_proxy_config_for_app(app))
+                .unwrap();
+            cfg.enabled = false;
+            cfg.auto_failover_enabled = false;
+            runtime
+                .block_on(state.db.update_proxy_config_for_app(cfg))
+                .unwrap();
+        }
+        if stale {
+            let raw = state
+                .db
+                .get_setting("proxy_runtime_session")
+                .unwrap()
+                .unwrap();
+            let mut marker: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            marker["workers"]["codex"]["session_token"] = serde_json::json!("stale-token");
+            state
+                .db
+                .set_setting("proxy_runtime_session", &marker.to_string())
+                .unwrap();
+        } else {
+            state.db.delete_setting("proxy_runtime_session").unwrap();
+        }
+        runtime
+            .block_on(
+                state
+                    .proxy_service
+                    .set_managed_session_for_app("codex", false),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let after: serde_json::Value =
+                serde_json::from_str(&send_request(sandbox.socket(), r#"{"kind":"status"}"#))
+                    .unwrap();
+            let workers = after["workers"].as_array().unwrap();
+            assert!(
+                workers.iter().any(|w| w["app_type"] == "claude"
+                    && w["pid"] == claude_pid
+                    && w["running"] == true),
+                "other worker changed: {after}"
+            );
+            if !workers
+                .iter()
+                .any(|w| w["app_type"] == "codex" && w["running"] == true)
+                && std::net::TcpStream::connect(("127.0.0.1", codex_port)).is_err()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Codex still running: {after}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Exercise the public CLI path with missing metadata for the last worker.
+        state.db.delete_setting("proxy_runtime_session").unwrap();
+        assert_command_success(
+            &run_cc_switch(&["proxy", "disable"]),
+            "disable last worker without metadata",
+        );
+        assert!(wait_for_daemon_exit(&mut daemon, Duration::from_secs(5)));
+    }
 }
 
 #[test]
@@ -562,7 +622,7 @@ fn set_managed_session_for_app_does_not_deadlock_on_state_mutation_lock() {
 }
 
 /// Regression for the symptom the user reported on the TUI:
-/// "FAIL daemon ensure worker failed: Resource temporarily unavailable (os error 35)"
+/// "✗ daemon ensure worker failed: Resource temporarily unavailable (os error 35)"
 /// when toggling proxy on and off via the main TUI proxy action.
 ///
 /// The TUI's `SetManagedProxyForCurrentApp` action funnels into

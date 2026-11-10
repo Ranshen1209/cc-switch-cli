@@ -2,6 +2,7 @@ use std::io::{self, Stdout};
 use std::sync::Arc;
 
 use crossterm::{
+    clipboard::CopyToClipboard,
     cursor,
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -9,134 +10,28 @@ use crossterm::{
 };
 #[cfg(test)]
 use ratatui::backend::TestBackend;
-use ratatui::{
-    backend::{Backend, ClearType, CrosstermBackend, WindowSize},
-    buffer::Cell,
-    layout::Position,
-    prelude::Size,
-    Terminal,
-};
+use ratatui::prelude::Size;
+use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::error::AppError;
 
-type LiveTerminal = Terminal<CursorPolicyBackend<CrosstermBackend<Stdout>>>;
+type LiveTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
 
 #[cfg(test)]
-type InMemoryTerminal = Terminal<CursorPolicyBackend<TestBackend>>;
-
-struct CursorPolicyBackend<B> {
-    inner: B,
-    allow_cursor: bool,
-    #[cfg(test)]
-    cursor_ops: Vec<CursorOp>,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CursorOp {
-    Hide,
-    Show,
-}
-
-impl<B> CursorPolicyBackend<B> {
-    fn new(inner: B) -> Self {
-        Self {
-            inner,
-            allow_cursor: true,
-            #[cfg(test)]
-            cursor_ops: Vec::new(),
-        }
-    }
-
-    fn set_cursor_allowed(&mut self, allowed: bool) {
-        self.allow_cursor = allowed;
-    }
-
-    fn inner_mut(&mut self) -> &mut B {
-        &mut self.inner
-    }
-
-    #[cfg(test)]
-    fn inner(&self) -> &B {
-        &self.inner
-    }
-
-    #[cfg(test)]
-    fn take_cursor_ops(&mut self) -> Vec<CursorOp> {
-        std::mem::take(&mut self.cursor_ops)
-    }
-}
-
-impl<B: Backend> Backend for CursorPolicyBackend<B> {
-    type Error = B::Error;
-
-    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
-    where
-        I: Iterator<Item = (u16, u16, &'a Cell)>,
-    {
-        self.inner.draw(content)
-    }
-
-    fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
-        self.inner.append_lines(n)
-    }
-
-    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
-        #[cfg(test)]
-        self.cursor_ops.push(CursorOp::Hide);
-        self.inner.hide_cursor()
-    }
-
-    fn show_cursor(&mut self) -> Result<(), Self::Error> {
-        if self.allow_cursor {
-            #[cfg(test)]
-            self.cursor_ops.push(CursorOp::Show);
-            self.inner.show_cursor()
-        } else {
-            // Ratatui decides to show the cursor after it has already flushed
-            // the frame. Keep the physical terminal hidden for non-editing
-            // frames even if an underlying renderer selected a cursor.
-            #[cfg(test)]
-            self.cursor_ops.push(CursorOp::Hide);
-            self.inner.hide_cursor()
-        }
-    }
-
-    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
-        self.inner.get_cursor_position()
-    }
-
-    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
-        self.inner.set_cursor_position(position)
-    }
-
-    fn clear(&mut self) -> Result<(), Self::Error> {
-        self.inner.clear()
-    }
-
-    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
-        self.inner.clear_region(clear_type)
-    }
-
-    fn size(&self) -> Result<Size, Self::Error> {
-        self.inner.size()
-    }
-
-    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
-        self.inner.window_size()
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.inner.flush()
-    }
-}
+type InMemoryTerminal = Terminal<TestBackend>;
 
 enum TerminalHandle {
     Stdout(LiveTerminal),
     #[cfg(test)]
     Test(InMemoryTerminal),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardCopyOutcome {
+    Confirmed,
+    Requested,
 }
 
 pub struct TuiTerminal {
@@ -219,6 +114,14 @@ fn terminal_error(e: impl ToString) -> AppError {
     )
 }
 
+fn clipboard_error(e: impl ToString) -> AppError {
+    AppError::localized(
+        "tui_clipboard_error",
+        format!("剪贴板错误: {}", e.to_string()),
+        format!("Clipboard error: {}", e.to_string()),
+    )
+}
+
 impl TuiTerminal {
     pub fn new() -> Result<Self, AppError> {
         let mut stdout = io::stdout();
@@ -233,8 +136,7 @@ impl TuiTerminal {
             return Err(terminal_error(e));
         }
 
-        let backend = CursorPolicyBackend::new(CrosstermBackend::new(stdout));
-        let terminal = match Terminal::new(backend) {
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(e) => {
                 let mut stdout = io::stdout();
@@ -258,8 +160,7 @@ impl TuiTerminal {
         const TEST_TERMINAL_WIDTH: u16 = 120;
         const TEST_TERMINAL_HEIGHT: u16 = 40;
 
-        let backend =
-            CursorPolicyBackend::new(TestBackend::new(TEST_TERMINAL_WIDTH, TEST_TERMINAL_HEIGHT));
+        let backend = TestBackend::new(TEST_TERMINAL_WIDTH, TEST_TERMINAL_HEIGHT);
         let terminal = Terminal::new(backend).expect("test terminal backend should be infallible");
 
         Ok(Self {
@@ -270,55 +171,16 @@ impl TuiTerminal {
         })
     }
 
-    pub fn draw_with_cursor_policy<F>(
-        &mut self,
-        wants_terminal_cursor: bool,
-        f: F,
-    ) -> Result<(), AppError>
+    pub fn draw<F>(&mut self, f: F) -> Result<(), AppError>
     where
         F: FnOnce(&mut ratatui::Frame<'_>),
     {
-        // Remove a cursor left by the previous input frame before writing any
-        // cells for the next frame.
-        self.hide_cursor_immediately()?;
-        let draw_result = match &mut self.terminal {
-            TerminalHandle::Stdout(terminal) => {
-                terminal
-                    .backend_mut()
-                    .set_cursor_allowed(wants_terminal_cursor);
-                let result = terminal.draw(f).map(|_| ()).map_err(terminal_error);
-                terminal.backend_mut().set_cursor_allowed(true);
-                result
-            }
-            #[cfg(test)]
-            TerminalHandle::Test(terminal) => {
-                terminal
-                    .backend_mut()
-                    .set_cursor_allowed(wants_terminal_cursor);
-                let result = terminal.draw(f).map(|_| ()).map_err(|e| match e {});
-                terminal.backend_mut().set_cursor_allowed(true);
-                result
-            }
-        };
-        if !wants_terminal_cursor {
-            let hide_result = self.hide_cursor_immediately();
-            if draw_result.is_ok() {
-                hide_result?;
-            } else if let Err(err) = hide_result {
-                log::debug!("failed to hide cursor after failed TUI draw: {err}");
-            }
-        }
-        draw_result
-    }
-
-    /// Hides the hardware cursor immediately, outside Ratatui's next-frame
-    /// cursor decision. This closes the gap between a state-changing action
-    /// and the following draw.
-    pub fn hide_cursor_immediately(&mut self) -> Result<(), AppError> {
         match &mut self.terminal {
-            TerminalHandle::Stdout(terminal) => terminal.hide_cursor().map_err(terminal_error),
+            TerminalHandle::Stdout(terminal) => {
+                terminal.draw(f).map(|_| ()).map_err(terminal_error)
+            }
             #[cfg(test)]
-            TerminalHandle::Test(terminal) => terminal.hide_cursor().map_err(|e| match e {}),
+            TerminalHandle::Test(terminal) => terminal.draw(f).map(|_| ()).map_err(|e| match e {}),
         }
     }
 
@@ -327,6 +189,24 @@ impl TuiTerminal {
             TerminalHandle::Stdout(terminal) => terminal.size().map_err(terminal_error),
             #[cfg(test)]
             TerminalHandle::Test(terminal) => terminal.size().map_err(|e| match e {}),
+        }
+    }
+
+    pub fn copy_to_clipboard(&mut self, text: &str) -> Result<ClipboardCopyOutcome, AppError> {
+        match &mut self.terminal {
+            TerminalHandle::Stdout(terminal) => {
+                if super::clipboard::copy_with_system_tool(text) {
+                    return Ok(ClipboardCopyOutcome::Confirmed);
+                }
+                execute!(
+                    terminal.backend_mut(),
+                    CopyToClipboard::to_clipboard_from(text)
+                )
+                .map_err(clipboard_error)?;
+                Ok(ClipboardCopyOutcome::Requested)
+            }
+            #[cfg(test)]
+            TerminalHandle::Test(_) => Ok(ClipboardCopyOutcome::Requested),
         }
     }
 
@@ -404,9 +284,8 @@ impl TuiTerminal {
 
         match &mut self.terminal {
             TerminalHandle::Stdout(terminal) => {
-                terminal.backend_mut().set_cursor_allowed(true);
                 if let Err(e) = execute!(
-                    terminal.backend_mut().inner_mut(),
+                    terminal.backend_mut(),
                     cursor::Show,
                     LeaveAlternateScreen,
                     DisableMouseCapture
@@ -451,7 +330,7 @@ impl TuiTerminal {
         match &mut self.terminal {
             TerminalHandle::Stdout(terminal) => {
                 if let Err(e) = execute!(
-                    terminal.backend_mut().inner_mut(),
+                    terminal.backend_mut(),
                     EnterAlternateScreen,
                     EnableMouseCapture,
                     cursor::Hide
@@ -516,9 +395,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use ratatui::backend::Backend;
-
-    use super::{CursorOp, TerminalHandle, TuiTerminal};
+    use super::TuiTerminal;
 
     #[test]
     fn new_for_test_supports_parallel_construction_without_touching_real_tty() {
@@ -533,9 +410,7 @@ mod tests {
                         let size = terminal.size().expect("read terminal size");
                         assert!(size.width > 0);
                         assert!(size.height > 0);
-                        terminal
-                            .draw_with_cursor_policy(false, |_| {})
-                            .expect("draw frame");
+                        terminal.draw(|_| {}).expect("draw frame");
                     }
                 })
             })
@@ -544,41 +419,6 @@ mod tests {
         for handle in handles {
             handle.join().expect("thread should complete without panic");
         }
-    }
-
-    #[test]
-    fn disabled_cursor_policy_never_forwards_show_during_frame() {
-        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
-        terminal
-            .draw_with_cursor_policy(true, |frame| frame.set_cursor_position((12, 7)))
-            .expect("draw input frame");
-
-        let TerminalHandle::Test(inner) = &mut terminal.terminal else {
-            unreachable!("new_for_test must use TestBackend");
-        };
-        let visible_backend = inner.backend().inner().clone();
-        let mut expected_hidden = visible_backend.clone();
-        expected_hidden
-            .hide_cursor()
-            .unwrap_or_else(|error| match error {});
-        assert_ne!(visible_backend, expected_hidden);
-        assert!(inner
-            .backend_mut()
-            .take_cursor_ops()
-            .contains(&CursorOp::Show));
-
-        for _ in 0..3 {
-            terminal
-                .draw_with_cursor_policy(false, |frame| frame.set_cursor_position((12, 7)))
-                .expect("draw a covered input frame");
-        }
-        let TerminalHandle::Test(inner) = &mut terminal.terminal else {
-            unreachable!("new_for_test must use TestBackend");
-        };
-        let cursor_ops = inner.backend_mut().take_cursor_ops();
-        assert!(!cursor_ops.contains(&CursorOp::Show), "{cursor_ops:?}");
-        assert!(cursor_ops.contains(&CursorOp::Hide), "{cursor_ops:?}");
-        assert_eq!(inner.backend().inner(), &expected_hidden);
     }
 
     #[test]
@@ -591,8 +431,23 @@ mod tests {
 
         assert_eq!(value, 42);
         terminal
-            .draw_with_cursor_policy(false, |_| {})
+            .draw(|_| {})
             .expect("draw after with_terminal_restored");
+    }
+
+    #[test]
+    fn test_terminal_accepts_clipboard_requests_without_touching_the_host_clipboard() {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+
+        assert_eq!(
+            terminal
+                .copy_to_clipboard("codex resume session-1")
+                .expect("test clipboard request"),
+            super::ClipboardCopyOutcome::Requested
+        );
+        terminal
+            .draw(|_| {})
+            .expect("test terminal remains usable after clipboard request");
     }
 
     #[test]
@@ -614,7 +469,7 @@ mod tests {
             .activate_best_effort()
             .expect("activate test terminal first");
         terminal
-            .draw_with_cursor_policy(false, |frame| {
+            .draw(|frame| {
                 let area = frame.area();
                 frame.render_widget(ratatui::widgets::Paragraph::new("stale"), area);
             })

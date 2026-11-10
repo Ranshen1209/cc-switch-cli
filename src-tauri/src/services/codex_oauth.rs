@@ -122,14 +122,18 @@ impl CodexOAuthService {
         *guard = None;
     }
 
-    pub async fn start_device_flow() -> Result<ManagedAuthDeviceCodeResponse, CodexOAuthError> {
-        Self::manager().start_device_flow().await
+    pub async fn start_device_flow(
+        target_account_id: Option<&str>,
+    ) -> Result<ManagedAuthDeviceCodeResponse, CodexOAuthError> {
+        Self::manager().start_device_flow(target_account_id).await
     }
 
     pub async fn poll_for_token(
         device_code: &str,
     ) -> Result<Option<ManagedAuthAccount>, CodexOAuthError> {
-        Self::manager().poll_for_token(device_code).await
+        Self::manager()
+            .poll_for_token(device_code, || async {})
+            .await
     }
 
     pub async fn get_valid_token_for_account(account_id: &str) -> Result<String, CodexOAuthError> {
@@ -152,7 +156,11 @@ impl CodexOAuthService {
     }
 
     pub async fn remove_account(account_id: &str) -> Result<(), CodexOAuthError> {
-        Self::manager().remove_account(account_id).await
+        let _guard = super::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(CodexOAuthError::TokenFetchFailed)?;
+        Self::manager().remove_account(account_id).await?;
+        Self::unbind_deleted_accounts(&[account_id.to_string()])
     }
 
     pub async fn set_default_account(account_id: &str) -> Result<(), CodexOAuthError> {
@@ -160,14 +168,39 @@ impl CodexOAuthService {
     }
 
     pub async fn clear_auth() -> Result<(), CodexOAuthError> {
-        Self::manager().clear_auth().await
+        let _guard = super::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(CodexOAuthError::TokenFetchFailed)?;
+        let manager = Self::manager();
+        let accounts = manager
+            .list_accounts()
+            .await
+            .into_iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        manager.clear_auth().await?;
+        Self::unbind_deleted_accounts(&accounts)
+    }
+
+    fn unbind_deleted_accounts(accounts: &[String]) -> Result<(), CodexOAuthError> {
+        if accounts.is_empty() {
+            return Ok(());
+        }
+        crate::Database::init()
+            .and_then(|db| db.unbind_codex_managed_accounts(accounts))
+            .map(|_| ())
+            .map_err(|error| {
+                CodexOAuthError::TokenFetchFailed(format!(
+                    "账号已删除，但 Codex 供应商解绑失败；请编辑供应商重新选择账号: {error}"
+                ))
+            })
     }
 
     pub async fn get_status() -> CodexOAuthStatus {
         Self::manager().get_status().await
     }
 
-    pub async fn get_quota(account_id: Option<&str>) -> Result<SubscriptionQuota, String> {
+    pub async fn get_quota(account_id: Option<&str>) -> SubscriptionQuota {
         let manager = Self::manager();
         let resolved_account_id = match account_id {
             Some(account_id) => Some(account_id.to_string()),
@@ -175,25 +208,70 @@ impl CodexOAuthService {
         };
 
         let Some(account_id) = resolved_account_id else {
-            return Ok(SubscriptionQuota::not_found("codex_oauth"));
+            return SubscriptionQuota::not_found("codex_oauth");
         };
 
         let token = match manager.get_valid_token_for_account(&account_id).await {
             Ok(token) => token,
             Err(error) => {
-                return Ok(SubscriptionQuota::error(
+                return SubscriptionQuota::error(
                     "codex_oauth",
                     CredentialStatus::Expired,
                     format!("Codex OAuth token unavailable: {error}"),
-                ));
+                );
             }
         };
 
+        let workspace = match manager.chatgpt_account_id_for_account(&account_id).await {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return SubscriptionQuota::error(
+                    "codex_oauth",
+                    CredentialStatus::Expired,
+                    error.to_string(),
+                )
+            }
+        };
         query_codex_quota(
             &token,
-            Some(&account_id),
+            Some(&workspace),
             "codex_oauth",
             "Codex OAuth access token expired or rejected. Please re-login via cc-switch.",
+        )
+        .await
+    }
+
+    pub async fn reset_quota(
+        account_id: Option<&str>,
+        credit_id: Option<&str>,
+    ) -> Result<crate::services::subscription::CodexResetConsumeResult, String> {
+        let manager = Self::manager();
+        let resolved_account_id = match account_id
+            .map(str::trim)
+            .filter(|account_id| !account_id.is_empty())
+        {
+            Some(account_id) => Some(account_id.to_string()),
+            None => manager.default_account_id().await,
+        };
+
+        let Some(account_id) = resolved_account_id else {
+            return Err("No ChatGPT account available".to_string());
+        };
+
+        let token = manager
+            .get_valid_token_for_account(&account_id)
+            .await
+            .map_err(|error| format!("Codex OAuth token unavailable: {error}"))?;
+
+        let workspace = manager
+            .chatgpt_account_id_for_account(&account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::services::subscription::consume_codex_reset_credit(
+            &token,
+            Some(&workspace),
+            credit_id,
+            "codex_oauth",
         )
         .await
     }
@@ -219,7 +297,11 @@ impl CodexOAuthService {
             .await
             .map_err(|error| format!("Codex OAuth token unavailable: {error}"))?;
 
-        crate::services::codex_oauth_models::fetch_models_with_token(&token, &account_id).await
+        let workspace = manager
+            .chatgpt_account_id_for_account(&account_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        crate::services::codex_oauth_models::fetch_models_with_token(&token, &workspace).await
     }
 
     #[cfg(test)]
@@ -239,5 +321,92 @@ impl CodexOAuthService {
                 expires_at_ms,
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod managed_removal_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn codex_removal_clears_owned_login_and_detaches_only_deleted_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::isolated(temp.path());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let db = crate::Database::init().unwrap();
+        let manager = CodexOAuthService::manager();
+        for account in ["alice", "bob"] {
+            runtime
+                .block_on(manager.add_test_account_with_workspace_and_access_token(
+                    account,
+                    "workspace",
+                    "access",
+                    Some(&crate::codex_config::test_codex_id_token(account)),
+                ))
+                .unwrap();
+            let provider = serde_json::from_value(json!({
+                "id": account, "name": account, "category": "official",
+                "settingsConfig": {"auth": {}, "config": ""},
+                "meta": {"codexOfficial": true, "providerType": "codex_oauth", "authBinding": {
+                    "source": "managed_account", "authProvider": "codex_oauth", "accountId": account
+                }}
+            }))
+            .unwrap();
+            db.save_provider("codex", &provider).unwrap();
+        }
+        let alice = crate::codex_config::codex_managed_oauth_auth_value(
+            "workspace",
+            "access",
+            Some(&crate::codex_config::test_codex_id_token("alice")),
+            "refresh",
+            "2026-11-05T00:00:00Z",
+        );
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &alice)
+            .unwrap();
+        crate::codex_config::record_codex_managed_oauth_live_auth(&alice, "alice").unwrap();
+        runtime
+            .block_on(CodexOAuthService::remove_account("alice"))
+            .unwrap();
+        assert!(!crate::codex_config::get_codex_auth_path().exists());
+        assert!(!crate::codex_config::get_codex_managed_oauth_live_auth_marker_path().exists());
+        let rows = db.get_all_providers("codex").unwrap();
+        assert!(rows["alice"].meta.as_ref().unwrap().auth_binding.is_none());
+        assert!(!rows["alice"].is_codex_oauth());
+        assert_eq!(
+            rows["bob"]
+                .meta
+                .as_ref()
+                .unwrap()
+                .managed_account_id_for("codex_oauth")
+                .as_deref(),
+            Some("bob")
+        );
+        // A native login of another member in the same workspace survives logout.
+        let bob = crate::codex_config::codex_managed_oauth_auth_value(
+            "workspace",
+            "access",
+            Some(&crate::codex_config::test_codex_id_token("bob")),
+            "refresh",
+            "2026-11-05T00:00:00Z",
+        );
+        crate::codex_config::record_codex_managed_oauth_live_auth(&bob, "bob").unwrap();
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &alice)
+            .unwrap();
+        runtime.block_on(CodexOAuthService::clear_auth()).unwrap();
+        assert_eq!(
+            crate::config::read_json_file::<serde_json::Value>(
+                &crate::codex_config::get_codex_auth_path()
+            )
+            .unwrap(),
+            alice
+        );
+        assert!(!crate::codex_config::get_codex_managed_oauth_live_auth_marker_path().exists());
+        assert!(db.get_all_providers("codex").unwrap()["bob"]
+            .meta
+            .as_ref()
+            .unwrap()
+            .auth_binding
+            .is_none());
     }
 }

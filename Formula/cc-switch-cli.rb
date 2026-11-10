@@ -2,8 +2,8 @@ class CcSwitchCli < Formula
   desc "All-in-one assistant tool for Claude Code, Codex, Gemini, OpenCode and OpenClaw"
   homepage "https://github.com/Ranshen1209/cc-switch-cli"
   url "https://github.com/Ranshen1209/cc-switch-cli.git",
-      tag: "v5.10.8"
-  version "5.10.8"
+      tag: "v5.11.3"
+  version "5.11.3"
   license "MIT"
   head "https://github.com/Ranshen1209/cc-switch-cli.git", branch: "main"
 

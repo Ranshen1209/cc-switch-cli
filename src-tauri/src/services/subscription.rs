@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,42 @@ pub struct ExtraUsage {
     pub currency: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetCredit {
+    pub id: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub reset_type: Option<String>,
+    pub status: Option<String>,
+    pub granted_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetCreditsSummary {
+    pub available_count: usize,
+    pub applicable_available_count: Option<usize>,
+    pub credits: Vec<CodexResetCredit>,
+    /// A successful usage query does not imply successful credit inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspection_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetConsumeResult {
+    pub success: bool,
+    pub code: String,
+    pub credit_id: String,
+    pub redeem_request_id: String,
+    pub windows_reset: Option<i64>,
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_quota: Option<SubscriptionQuota>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionQuota {
@@ -42,6 +79,8 @@ pub struct SubscriptionQuota {
     pub extra_usage: Option<ExtraUsage>,
     pub error: Option<String>,
     pub queried_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<CodexResetCreditsSummary>,
 }
 
 impl SubscriptionQuota {
@@ -55,6 +94,7 @@ impl SubscriptionQuota {
             extra_usage: None,
             error: None,
             queried_at: None,
+            reset_credits: None,
         }
     }
 
@@ -68,6 +108,7 @@ impl SubscriptionQuota {
             extra_usage: None,
             error: Some(message),
             queried_at: Some(now_millis()),
+            reset_credits: None,
         }
     }
 }
@@ -251,7 +292,7 @@ const KNOWN_TIERS: &[&str] = &[
     "seven_day_sonnet",
 ];
 
-async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
+async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
     let response = match client
@@ -264,39 +305,41 @@ async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         .await
     {
         Ok(response) => response,
-        Err(error) => return Err(format!("Network error: {error}")),
+        Err(error) => {
+            return SubscriptionQuota::error(
+                "claude",
+                CredentialStatus::Valid,
+                format!("Network error: {error}"),
+            );
+        }
     };
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             "claude",
             CredentialStatus::Expired,
             format!("Authentication failed (HTTP {status}). Please re-login with Claude CLI."),
-        ));
+        );
     }
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             "claude",
             CredentialStatus::Valid,
             format!("API error (HTTP {status}): {body}"),
-        ));
+        );
     }
 
-    let raw = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read API response: {error}"))?;
-    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+    let body: serde_json::Value = match response.json().await {
         Ok(body) => body,
         Err(error) => {
-            return Ok(SubscriptionQuota::error(
+            return SubscriptionQuota::error(
                 "claude",
                 CredentialStatus::Valid,
                 format!("Failed to parse API response: {error}"),
-            ));
+            );
         }
     };
 
@@ -344,7 +387,7 @@ async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, Str
             })
     });
 
-    Ok(SubscriptionQuota {
+    SubscriptionQuota {
         tool: "claude".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -353,7 +396,8 @@ async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         extra_usage,
         error: None,
         queried_at: Some(now_millis()),
-    })
+        reset_credits: None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -520,8 +564,111 @@ struct CodexRateLimit {
 }
 
 #[derive(Deserialize)]
+struct CodexUsageResetCredits {
+    available_count: Option<usize>,
+    applicable_available_count: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct CodexUsageResponse {
     rate_limit: Option<CodexRateLimit>,
+    rate_limit_reset_credits: Option<CodexUsageResetCredits>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawCodexResetCredit {
+    pub id: Option<String>,
+    pub reset_type: Option<String>,
+    pub is_supported_by_plan: Option<bool>,
+    pub status: Option<String>,
+    pub granted_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawCodexResetCreditsResponse {
+    credits: Option<Vec<RawCodexResetCredit>>,
+    available_count: Option<usize>,
+}
+
+pub(crate) fn filter_and_sort_codex_reset_credits(
+    raw_credits: Vec<RawCodexResetCredit>,
+) -> Vec<CodexResetCredit> {
+    let mut valid: Vec<CodexResetCredit> = raw_credits
+        .into_iter()
+        .filter_map(|c| {
+            let id = c.id?.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            if c.reset_type.as_deref() != Some("codex_rate_limits") {
+                return None;
+            }
+            if c.status.as_deref() != Some("available") {
+                return None;
+            }
+            if c.is_supported_by_plan == Some(false) {
+                return None;
+            }
+            let granted_at = c.granted_at.filter(|s| !s.trim().is_empty())?;
+            Some(CodexResetCredit {
+                id,
+                title: c.title,
+                description: c.description,
+                reset_type: c.reset_type,
+                status: c.status,
+                granted_at: Some(granted_at),
+                expires_at: c.expires_at,
+            })
+        })
+        .collect();
+
+    valid.sort_by(|a, b| match (&a.expires_at, &b.expires_at) {
+        (Some(ea), Some(eb)) => ea.cmp(eb),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    valid
+}
+
+pub(crate) async fn fetch_codex_reset_credits(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<Vec<CodexResetCredit>, String> {
+    let mut request = client
+        .get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json");
+
+    if let Some(account_id) = account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+
+    let response = request
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Network error fetching reset credits: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Failed to fetch reset credits (HTTP {status})"));
+    }
+
+    let raw: RawCodexResetCreditsResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse reset credits response: {e}"))?;
+
+    Ok(filter_and_sort_codex_reset_credits(
+        raw.credits.unwrap_or_default(),
+    ))
 }
 
 fn now_millis() -> i64 {
@@ -555,7 +702,7 @@ pub(crate) async fn query_codex_quota(
     account_id: Option<&str>,
     tool_label: &str,
     expired_message: &str,
-) -> Result<SubscriptionQuota, String> {
+) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
     let mut request = client
@@ -574,39 +721,41 @@ pub(crate) async fn query_codex_quota(
         .await
     {
         Ok(response) => response,
-        Err(error) => return Err(format!("Network error: {error}")),
+        Err(error) => {
+            return SubscriptionQuota::error(
+                tool_label,
+                CredentialStatus::Valid,
+                format!("Network error: {error}"),
+            );
+        }
     };
 
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             tool_label,
             CredentialStatus::Expired,
             format!("{expired_message} (HTTP {status})"),
-        ));
+        );
     }
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             tool_label,
             CredentialStatus::Valid,
             format!("API error (HTTP {status}): {body}"),
-        ));
+        );
     }
 
-    let raw = response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read API response: {error}"))?;
-    let body: CodexUsageResponse = match serde_json::from_slice(&raw) {
+    let body: CodexUsageResponse = match response.json().await {
         Ok(body) => body,
         Err(error) => {
-            return Ok(SubscriptionQuota::error(
+            return SubscriptionQuota::error(
                 tool_label,
                 CredentialStatus::Valid,
                 format!("Failed to parse API response: {error}"),
-            ));
+            );
         }
     };
 
@@ -629,7 +778,38 @@ pub(crate) async fn query_codex_quota(
         }
     }
 
-    Ok(SubscriptionQuota {
+    let reset_credits = match fetch_codex_reset_credits(&client, access_token, account_id).await {
+        Ok(credits) => {
+            let available_count = credits.len();
+            let applicable_available_count = body
+                .rate_limit_reset_credits
+                .as_ref()
+                .and_then(|rc| rc.applicable_available_count);
+            Some(CodexResetCreditsSummary {
+                available_count,
+                applicable_available_count,
+                credits,
+                inspection_error: None,
+            })
+        }
+        Err(_) => Some(CodexResetCreditsSummary {
+            available_count: body
+                .rate_limit_reset_credits
+                .as_ref()
+                .and_then(|rc| rc.available_count)
+                .unwrap_or(0),
+            applicable_available_count: body
+                .rate_limit_reset_credits
+                .as_ref()
+                .and_then(|rc| rc.applicable_available_count),
+            credits: Vec::new(),
+            inspection_error: Some(
+                "Reset credit inspection failed; retry the query before redeeming.".into(),
+            ),
+        }),
+    };
+
+    SubscriptionQuota {
         tool: tool_label.to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -638,7 +818,145 @@ pub(crate) async fn query_codex_quota(
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    })
+        reset_credits,
+    }
+}
+
+pub async fn consume_codex_reset_credit(
+    access_token: &str,
+    account_id: Option<&str>,
+    credit_id: Option<&str>,
+    tool_label: &str,
+) -> Result<CodexResetConsumeResult, String> {
+    let client = crate::proxy::http_client::get();
+
+    // 1. Fresh GET to fetch currently available credits (Fail-closed)
+    let available_credits = fetch_codex_reset_credits(&client, access_token, account_id).await?;
+    if available_credits.is_empty() {
+        return Err("No available rate limit reset credits found for this account.".to_string());
+    }
+
+    // 2. Select target credit: specified ID or earliest expiring
+    let target_credit = match credit_id {
+        Some(cid) => available_credits
+            .into_iter()
+            .find(|c| c.id == cid)
+            .ok_or_else(|| {
+                format!("Specified credit ID '{cid}' is not available or valid for this account.")
+            })?,
+        None => available_credits
+            .into_iter()
+            .next()
+            .ok_or_else(|| "No available reset credit to consume.".to_string())?,
+    };
+
+    let target_credit_id = target_credit.id;
+    let redeem_request_id = Uuid::new_v4().to_string();
+
+    // 3. Send consume request
+    let mut request = client
+        .post("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json");
+
+    if let Some(account_id) = account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+
+    let payload = serde_json::json!({
+        "credit_id": target_credit_id,
+        "redeem_request_id": redeem_request_id,
+    });
+
+    let response = request
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Network error consuming reset credit: {e}"))?;
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "Authentication failed (HTTP {status}). Please re-login."
+        ));
+    }
+
+    if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "OpenAI rejected reset credit consumption (HTTP 422): {body}"
+        ));
+    }
+
+    let body_text = response.text().await.unwrap_or_default();
+    let resp_json: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+        format!("Failed to parse consume response (HTTP {status}): {body_text} ({e})")
+    })?;
+
+    let code = resp_json
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let windows_reset = resp_json.get("windows_reset").and_then(|v| v.as_i64());
+
+    // CPA-Helper keeper rules: "reset" and "already_redeemed" are both considered successful
+    if code == "reset" || code == "already_redeemed" {
+        // 4. Re-inspect usage
+        let new_quota = query_codex_quota(
+            access_token,
+            account_id,
+            tool_label,
+            "Authentication failed on quota re-inspection.",
+        )
+        .await;
+
+        Ok(CodexResetConsumeResult {
+            success: true,
+            code,
+            credit_id: target_credit_id,
+            redeem_request_id,
+            windows_reset,
+            message: None,
+            new_quota: Some(new_quota),
+        })
+    } else if code == "nothing_to_reset" {
+        Err("Rate limit window is not currently restricted (nothing_to_reset).".to_string())
+    } else if code == "no_credit" {
+        Err("No valid reset credits available to consume (no_credit).".to_string())
+    } else {
+        Err(format!(
+            "Failed to redeem credit: upstream returned code '{code}' (HTTP {status}): {body_text}"
+        ))
+    }
+}
+
+pub async fn reset_codex_subscription_quota(
+    credit_id: Option<&str>,
+) -> Result<CodexResetConsumeResult, String> {
+    let (token, account_id, status, message) = read_codex_credentials();
+    match status {
+        CredentialStatus::NotFound => Err("Codex credentials not found".to_string()),
+        CredentialStatus::ParseError => {
+            Err(message.unwrap_or_else(|| "Failed to parse Codex credentials".to_string()))
+        }
+        CredentialStatus::Expired => {
+            let Some(token) = token else {
+                return Err(message.unwrap_or_else(|| "Codex token expired".to_string()));
+            };
+            consume_codex_reset_credit(&token, account_id.as_deref(), credit_id, "codex").await
+        }
+        CredentialStatus::Valid => {
+            let Some(token) = token else {
+                return Err("Codex access_token is empty or missing".to_string());
+            };
+            consume_codex_reset_credit(&token, account_id.as_deref(), credit_id, "codex").await
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -684,6 +1002,10 @@ fn gemini_oauth_client_from_options(
     })
 }
 
+#[expect(
+    dead_code,
+    reason = "kept for Gemini OAuth clients loaded from JSON credentials"
+)]
 fn gemini_oauth_client_from_json(value: &serde_json::Value) -> Option<GeminiOAuthClient> {
     let client_id = value
         .get("client_id")
@@ -941,7 +1263,7 @@ fn classify_gemini_model(model_id: &str) -> &str {
     }
 }
 
-async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, String> {
+async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
     let load_response = match client
@@ -959,41 +1281,43 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         .await
     {
         Ok(response) => response,
-        Err(error) => return Err(format!("Network error (loadCodeAssist): {error}")),
+        Err(error) => {
+            return SubscriptionQuota::error(
+                "gemini",
+                CredentialStatus::Valid,
+                format!("Network error (loadCodeAssist): {error}"),
+            );
+        }
     };
 
     let load_status = load_response.status();
     if load_status == reqwest::StatusCode::UNAUTHORIZED
         || load_status == reqwest::StatusCode::FORBIDDEN
     {
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Expired,
             format!("Authentication failed (HTTP {load_status}). Please re-login with Gemini CLI."),
-        ));
+        );
     }
 
     if !load_status.is_success() {
         let body = load_response.text().await.unwrap_or_default();
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Valid,
             format!("loadCodeAssist failed (HTTP {load_status}): {body}"),
-        ));
+        );
     }
 
-    let load_raw = load_response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read loadCodeAssist response: {error}"))?;
-    let load_body: GeminiLoadCodeAssistResponse = match serde_json::from_slice(&load_raw) {
+    let load_body: GeminiLoadCodeAssistResponse = match load_response.json().await {
         Ok(body) => body,
         Err(error) => {
-            return Ok(SubscriptionQuota::error(
+            return SubscriptionQuota::error(
                 "gemini",
                 CredentialStatus::Valid,
                 format!("Failed to parse loadCodeAssist response: {error}"),
-            ));
+            );
         }
     };
 
@@ -1017,41 +1341,43 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         .await
     {
         Ok(response) => response,
-        Err(error) => return Err(format!("Network error (retrieveUserQuota): {error}")),
+        Err(error) => {
+            return SubscriptionQuota::error(
+                "gemini",
+                CredentialStatus::Valid,
+                format!("Network error (retrieveUserQuota): {error}"),
+            );
+        }
     };
 
     let quota_status = quota_response.status();
     if quota_status == reqwest::StatusCode::UNAUTHORIZED
         || quota_status == reqwest::StatusCode::FORBIDDEN
     {
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Expired,
             format!("Authentication failed (HTTP {quota_status})."),
-        ));
+        );
     }
 
     if !quota_status.is_success() {
         let body = quota_response.text().await.unwrap_or_default();
-        return Ok(SubscriptionQuota::error(
+        return SubscriptionQuota::error(
             "gemini",
             CredentialStatus::Valid,
             format!("retrieveUserQuota failed (HTTP {quota_status}): {body}"),
-        ));
+        );
     }
 
-    let quota_raw = quota_response
-        .bytes()
-        .await
-        .map_err(|error| format!("Failed to read quota response: {error}"))?;
-    let quota_data: GeminiQuotaResponse = match serde_json::from_slice(&quota_raw) {
+    let quota_data: GeminiQuotaResponse = match quota_response.json().await {
         Ok(body) => body,
         Err(error) => {
-            return Ok(SubscriptionQuota::error(
+            return SubscriptionQuota::error(
                 "gemini",
                 CredentialStatus::Valid,
                 format!("Failed to parse quota response: {error}"),
-            ));
+            );
         }
     };
 
@@ -1094,7 +1420,7 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         .collect();
     tiers.sort_by_key(|tier| sort_order(&tier.name));
 
-    Ok(SubscriptionQuota {
+    SubscriptionQuota {
         tool: "gemini".to_string(),
         credential_status: CredentialStatus::Valid,
         credential_message: None,
@@ -1103,7 +1429,8 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         extra_usage: None,
         error: None,
         queried_at: Some(now_millis()),
-    })
+        reset_credits: None,
+    }
 }
 
 pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, String> {
@@ -1119,7 +1446,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                 )),
                 CredentialStatus::Expired => {
                     if let Some(token) = token {
-                        let result = query_claude_quota(&token).await?;
+                        let result = query_claude_quota(&token).await;
                         if result.success {
                             return Ok(result);
                         }
@@ -1138,7 +1465,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "accessToken is empty or missing".to_string(),
                         ));
                     };
-                    query_claude_quota(&token).await
+                    Ok(query_claude_quota(&token).await)
                 }
             }
         }
@@ -1159,7 +1486,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "codex",
                             "Authentication failed. Please re-login with Codex CLI.",
                         )
-                        .await?;
+                        .await;
                         if result.success {
                             return Ok(result);
                         }
@@ -1178,13 +1505,13 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "access_token is empty or missing".to_string(),
                         ));
                     };
-                    query_codex_quota(
+                    Ok(query_codex_quota(
                         &token,
                         account_id.as_deref(),
                         "codex",
                         "Authentication failed. Please re-login with Codex CLI.",
                     )
-                    .await
+                    .await)
                 }
             }
         }
@@ -1204,11 +1531,11 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                         if let Some(new_token) =
                             refresh_gemini_token(refresh_token, oauth_client).await
                         {
-                            return query_gemini_quota(&new_token).await;
+                            return Ok(query_gemini_quota(&new_token).await);
                         }
                     }
                     if let Some(ref token) = token {
-                        let result = query_gemini_quota(token).await?;
+                        let result = query_gemini_quota(token).await;
                         if result.success {
                             return Ok(result);
                         }
@@ -1227,7 +1554,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                             "access_token is empty or missing".to_string(),
                         ));
                     };
-                    query_gemini_quota(&token).await
+                    Ok(query_gemini_quota(&token).await)
                 }
             }
         }
@@ -1400,5 +1727,103 @@ mod tests {
         assert_eq!(window_seconds_to_tier_name(604_800), "seven_day");
         assert_eq!(window_seconds_to_tier_name(7_200), "2_hour");
         assert_eq!(window_seconds_to_tier_name(172_800), "2_day");
+    }
+
+    #[test]
+    fn filter_and_sort_codex_reset_credits_applies_strict_rules() {
+        let raw = vec![
+            RawCodexResetCredit {
+                id: Some("credit-expired".to_string()),
+                reset_type: Some("codex_rate_limits".to_string()),
+                status: Some("available".to_string()),
+                is_supported_by_plan: Some(true),
+                granted_at: Some("2025-01-01T00:00:00Z".to_string()),
+                expires_at: Some("2026-10-22T00:00:00Z".to_string()),
+                title: Some("Card Later".to_string()),
+                description: None,
+            },
+            RawCodexResetCredit {
+                id: Some("credit-earliest".to_string()),
+                reset_type: Some("codex_rate_limits".to_string()),
+                status: Some("available".to_string()),
+                is_supported_by_plan: Some(true),
+                granted_at: Some("2025-01-01T00:00:00Z".to_string()),
+                expires_at: Some("2026-10-04T00:00:00Z".to_string()),
+                title: Some("Card Earliest".to_string()),
+                description: None,
+            },
+            // Wrong reset type
+            RawCodexResetCredit {
+                id: Some("credit-other-type".to_string()),
+                reset_type: Some("chatgpt_messages".to_string()),
+                status: Some("available".to_string()),
+                is_supported_by_plan: Some(true),
+                granted_at: Some("2025-01-01T00:00:00Z".to_string()),
+                expires_at: Some("2026-10-01T00:00:00Z".to_string()),
+                title: None,
+                description: None,
+            },
+            // Redeemed / unavailable status
+            RawCodexResetCredit {
+                id: Some("credit-redeemed".to_string()),
+                reset_type: Some("codex_rate_limits".to_string()),
+                status: Some("redeemed".to_string()),
+                is_supported_by_plan: Some(true),
+                granted_at: Some("2025-01-01T00:00:00Z".to_string()),
+                expires_at: Some("2026-10-01T00:00:00Z".to_string()),
+                title: None,
+                description: None,
+            },
+            // Unsupported by plan
+            RawCodexResetCredit {
+                id: Some("credit-unsupported".to_string()),
+                reset_type: Some("codex_rate_limits".to_string()),
+                status: Some("available".to_string()),
+                is_supported_by_plan: Some(false),
+                granted_at: Some("2025-01-01T00:00:00Z".to_string()),
+                expires_at: Some("2026-10-01T00:00:00Z".to_string()),
+                title: None,
+                description: None,
+            },
+            // Missing granted_at
+            RawCodexResetCredit {
+                id: Some("credit-no-grant".to_string()),
+                reset_type: Some("codex_rate_limits".to_string()),
+                status: Some("available".to_string()),
+                is_supported_by_plan: Some(true),
+                granted_at: None,
+                expires_at: Some("2026-10-01T00:00:00Z".to_string()),
+                title: None,
+                description: None,
+            },
+        ];
+
+        let filtered = filter_and_sort_codex_reset_credits(raw);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].id, "credit-earliest");
+        assert_eq!(filtered[1].id, "credit-expired");
+    }
+
+    #[test]
+    fn parse_codex_usage_with_reset_credits() {
+        let json = serde_json::json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 12.5,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1700000000
+                }
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 3,
+                "applicable_available_count": 3
+            }
+        });
+
+        let resp: CodexUsageResponse =
+            serde_json::from_value(json).expect("deserialize CodexUsageResponse");
+        let credits = resp.rate_limit_reset_credits.expect("credits present");
+        assert_eq!(credits.available_count, Some(3));
+        assert_eq!(credits.applicable_available_count, Some(3));
     }
 }

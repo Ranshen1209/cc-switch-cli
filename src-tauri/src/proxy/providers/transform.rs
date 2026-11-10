@@ -1,4 +1,11 @@
-use crate::proxy::{error::ProxyError, json_canonical::canonical_json_string};
+use crate::proxy::{
+    error::ProxyError,
+    json_canonical::canonical_json_string,
+    tool_media::{
+        chat_media_part_from_tool_part, flush_pending_chat_tool_media, plan_chat_tool_output_media,
+        queue_chat_tool_output_media, ToolMediaScope,
+    },
+};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
@@ -114,14 +121,19 @@ pub fn anthropic_to_openai_with_reasoning_content(
                 messages.push(json!({"role": "system", "content": text}));
             }
         } else if let Some(arr) = system.as_array() {
+            // Merge the top-level system blocks into one message. Their content is
+            // fixed for the whole conversation, so this stays byte-stable across
+            // turns and does not disturb prefix caching.
+            let mut parts = Vec::new();
             for msg in arr {
                 if let Some(text) = msg.get("text").and_then(|t| t.as_str()) {
-                    let Some(text) = sanitize_system_text(text) else {
-                        continue;
-                    };
-                    let system_message = json!({"role": "system", "content": text});
-                    messages.push(system_message);
+                    if let Some(text) = sanitize_system_text(text) {
+                        parts.push(text.into_owned());
+                    }
                 }
+            }
+            if !parts.is_empty() {
+                messages.push(json!({"role": "system", "content": parts.join("\n")}));
             }
         }
     }
@@ -138,7 +150,6 @@ pub fn anthropic_to_openai_with_reasoning_content(
         }
     }
 
-    normalize_openai_system_messages(&mut messages);
     result["messages"] = json!(messages);
 
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
@@ -253,58 +264,6 @@ fn map_tool_choice_to_chat(tool_choice: &Value) -> Value {
     }
 }
 
-fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
-    let system_count = messages
-        .iter()
-        .filter(|message| message.get("role").and_then(|value| value.as_str()) == Some("system"))
-        .count();
-
-    if system_count == 0 {
-        return;
-    }
-
-    if system_count == 1 {
-        if let Some(index) = messages.iter().position(|message| {
-            message.get("role").and_then(|value| value.as_str()) == Some("system")
-        }) {
-            if index > 0 {
-                let message = messages.remove(index);
-                messages.insert(0, message);
-            }
-        }
-        return;
-    }
-
-    let mut parts = Vec::new();
-    messages.retain(|message| {
-        if message.get("role").and_then(|value| value.as_str()) != Some("system") {
-            return true;
-        }
-
-        match message.get("content") {
-            Some(Value::String(text)) if !text.is_empty() => parts.push(text.clone()),
-            Some(Value::Array(content_parts)) => {
-                let text = content_parts
-                    .iter()
-                    .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !text.is_empty() {
-                    parts.push(text);
-                }
-            }
-            _ => {}
-        }
-
-        false
-    });
-
-    if !parts.is_empty() {
-        let merged = json!({"role": "system", "content": parts.join("\n")});
-        messages.insert(0, merged);
-    }
-}
-
 fn convert_message_to_openai(
     role: &str,
     content: Option<&Value>,
@@ -328,6 +287,7 @@ fn convert_message_to_openai(
     if let Some(blocks) = content.as_array() {
         let mut content_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut pending_tool_media = Vec::new();
         let mut reasoning_parts = Vec::new();
 
         for block in blocks {
@@ -339,16 +299,10 @@ fn convert_message_to_openai(
                     }
                 }
                 "image" => {
-                    if let Some(source) = block.get("source") {
-                        let media_type = source
-                            .get("media_type")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("image/png");
-                        let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
-                        content_parts.push(json!({
-                            "type": "image_url",
-                            "image_url": {"url": format!("data:{};base64,{}", media_type, data)}
-                        }));
+                    if let Some(image) =
+                        chat_media_part_from_tool_part(block, ToolMediaScope::ImagesOnly)
+                    {
+                        content_parts.push(image);
                     }
                 }
                 "tool_use" => {
@@ -370,10 +324,22 @@ fn convert_message_to_openai(
                         .and_then(|i| i.as_str())
                         .unwrap_or("");
                     let content_val = block.get("content");
-                    let content_str = match content_val {
-                        Some(Value::String(s)) => s.clone(),
-                        Some(v) => canonical_json_string(v),
-                        None => String::new(),
+                    let media_plan = content_val.cloned().and_then(plan_chat_tool_output_media);
+                    let content_str = if let Some(media_plan) = media_plan {
+                        queue_chat_tool_output_media(
+                            &mut pending_tool_media,
+                            tool_use_id,
+                            media_plan.media_parts,
+                        );
+                        media_plan.tool_content
+                    } else {
+                        // Keep the no-media representation exactly equal to
+                        // the legacy converter for prompt-cache stability.
+                        match content_val {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(v) => canonical_json_string(v),
+                            None => String::new(),
+                        }
                     };
                     result.push(json!({
                         "role": "tool",
@@ -394,6 +360,11 @@ fn convert_message_to_openai(
                 _ => {}
             }
         }
+
+        // Chat tool messages cannot carry image parts. Keep parallel tool
+        // results adjacent, then present all extracted media in one user turn
+        // before any ordinary message content from the same Anthropic turn.
+        flush_pending_chat_tool_media(&mut result, &mut pending_tool_media);
 
         if !content_parts.is_empty() || !tool_calls.is_empty() {
             let mut msg = json!({"role": role});
@@ -486,6 +457,12 @@ fn openai_usage_to_anthropic(body: &Value) -> Value {
     let cache_creation = usage
         .get("cache_creation_input_tokens")
         .and_then(|v| v.as_u64())
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cache_write_tokens")
+                .or_else(|| usage.pointer("/input_tokens_details/cache_write_tokens"))
+                .and_then(|v| v.as_u64())
+        })
         .unwrap_or(0);
     let input_tokens = usage
         .get("prompt_tokens")
@@ -922,11 +899,27 @@ mod tests {
 
         let result = anthropic_to_openai(input, None).unwrap();
         let parameters = &result["tools"][0]["function"]["parameters"];
+
         assert_eq!(parameters["type"], json!("object"));
         assert_eq!(
             parameters["properties"]["location"]["type"],
             json!("string")
         );
+    }
+
+    #[test]
+    fn anthropic_to_openai_defaults_empty_tool_schema() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Do work"}],
+            "tools": [{"name": "do_work", "input_schema": {}}]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let parameters = &result["tools"][0]["function"]["parameters"];
+
+        assert_eq!(parameters, &json!({"type": "object", "properties": {}}));
     }
 
     #[test]
@@ -943,6 +936,7 @@ mod tests {
         });
 
         let result = clean_schema(schema);
+
         assert_eq!(result["type"], json!("object"));
         assert_eq!(
             result["properties"]["nullable_value"],
@@ -1169,6 +1163,164 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_to_openai_no_media_tool_results_keep_legacy_representation() {
+        let raw_json_string = "{ \"status\": \"ok\", \"count\": 2 }";
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_string",
+                        "content": raw_json_string
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_array",
+                        "content": [{"type": "text", "text": "plain"}]
+                    }
+                ]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], raw_json_string);
+        assert_eq!(
+            messages[1]["content"],
+            canonical_json_string(&json!([{"type": "text", "text": "plain"}]))
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_moves_tool_result_image_to_user_message() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "call_image",
+                    "content": [
+                        {"type": "text", "text": "caption"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "CLAUDE_CHAT_IMAGE_SENTINEL"
+                            },
+                            "cache_control": {"type": "ephemeral"},
+                            "prompt_cache_breakpoint": true
+                        }
+                    ]
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "call_image");
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("tool result media moved"));
+        assert!(!messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("CLAUDE_CHAT_IMAGE_SENTINEL"));
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[1]["content"][0]["text"],
+            "[cc-switch: media output of tool call call_image]"
+        );
+        assert_eq!(messages[1]["content"][1]["type"], "image_url");
+        assert!(messages[1]["content"][1].get("cache_control").is_none());
+        assert!(messages[1]["content"][1]
+            .get("prompt_cache_breakpoint")
+            .is_none());
+        assert_eq!(
+            messages[1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,CLAUDE_CHAT_IMAGE_SENTINEL"
+        );
+    }
+
+    #[test]
+    fn anthropic_to_openai_batches_parallel_tool_result_media() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": [{
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": "ONE"}
+                        }]
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_2",
+                        "content": [{
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/jpeg", "data": "TWO"}
+                        }]
+                    }
+                ]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn anthropic_to_openai_maps_remote_image_source() {
+        let input = json!({
+            "model": "claude-3-opus",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "url",
+                        "url": "https://example.com/image.png"
+                    },
+                    "cache_control": {"type": "ephemeral"},
+                    "prompt_cache_breakpoint": true
+                }]
+            }]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        assert_eq!(
+            result["messages"][0]["content"][0]["image_url"]["url"],
+            "https://example.com/image.png"
+        );
+        assert!(result["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert!(result["messages"][0]["content"][0]
+            .get("prompt_cache_breakpoint")
+            .is_none());
+    }
+
+    #[test]
     fn openai_to_anthropic_maps_reasoning_content_to_thinking_block() {
         let input = json!({
             "id": "chatcmpl-deepseek",
@@ -1211,7 +1363,10 @@ mod tests {
             "usage": {
                 "prompt_tokens": 13312,
                 "completion_tokens": 79,
-                "prompt_tokens_details": {"cached_tokens": 100}
+                "prompt_tokens_details": {
+                    "cached_tokens": 100,
+                    "cache_write_tokens": 200
+                }
             }
         });
 
@@ -1223,10 +1378,11 @@ mod tests {
         assert_eq!(result["model"], "z-ai/glm-5.2");
         assert_eq!(result["stop_reason"], "end_turn");
         assert_eq!(result["content"], json!([]));
-        // input_tokens is fresh input: prompt_tokens(13312) - cache_read(100) = 13212.
-        assert_eq!(result["usage"]["input_tokens"], 13212);
+        // Fresh input = prompt_tokens - cache read - cache write.
+        assert_eq!(result["usage"]["input_tokens"], 13012);
         assert_eq!(result["usage"]["output_tokens"], 79);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 100);
+        assert_eq!(result["usage"]["cache_creation_input_tokens"], 200);
     }
 
     #[test]
@@ -1289,5 +1445,71 @@ mod tests {
         );
         assert_eq!(msg["tool_calls"][0]["id"], "call_date");
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_date");
+    }
+
+    #[test]
+    fn anthropic_to_openai_preserves_mid_conversation_system_in_place() {
+        // Claude Code injects a system message every turn (environment and
+        // system-reminder blocks). Hoisting or merging them into the head
+        // rewrites the prompt prefix each turn and defeats upstream prefix
+        // caching, so they must stay exactly where the client put them.
+        let input = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": "You are Claude Code.",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "Continue"}
+            ]
+        });
+
+        let result = anthropic_to_openai(input, None).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are Claude Code.");
+        assert_eq!(messages[2]["role"], "system");
+        assert_eq!(messages[2]["content"], "# Environment\ncwd=/tmp");
+    }
+
+    #[test]
+    fn anthropic_to_openai_keeps_prefix_stable_when_a_turn_is_appended() {
+        // The serialized messages of one turn must remain a prefix of the next
+        // turn; otherwise the upstream prompt cache can never hit.
+        let turn_one = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"}
+            ]
+        });
+        let turn_two = json!({
+            "model": "claude-3-sonnet",
+            "max_tokens": 1024,
+            "system": [{"type": "text", "text": "You are Claude Code."}],
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "Continue"},
+                {"role": "system", "content": "# Environment\ncwd=/tmp"}
+            ]
+        });
+
+        let first = anthropic_to_openai(turn_one, None).unwrap();
+        let second = anthropic_to_openai(turn_two, None).unwrap();
+        let first_messages = first["messages"].as_array().unwrap();
+        let second_messages = second["messages"].as_array().unwrap();
+
+        assert_eq!(second_messages.len(), 6);
+        assert_eq!(
+            &second_messages[..first_messages.len()],
+            &first_messages[..]
+        );
     }
 }

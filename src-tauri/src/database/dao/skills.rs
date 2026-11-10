@@ -22,7 +22,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
-                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes, installed_at
+                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
+                        installed_at, content_hash, updated_at
                  FROM skills ORDER BY name ASC",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -44,8 +45,11 @@ impl Database {
                         gemini: row.get(10)?,
                         opencode: row.get(11)?,
                         hermes: row.get(12)?,
+                        pi: false,
                     },
                     installed_at: row.get(13)?,
+                    content_hash: row.get(14)?,
+                    updated_at: row.get(15)?,
                 })
             })
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -64,7 +68,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,
-                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes, installed_at
+                        readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
+                        installed_at, content_hash, updated_at
                  FROM skills WHERE id = ?1",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -85,8 +90,11 @@ impl Database {
                     gemini: row.get(10)?,
                     opencode: row.get(11)?,
                     hermes: row.get(12)?,
+                    pi: false,
                 },
                 installed_at: row.get(13)?,
+                content_hash: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         });
 
@@ -101,10 +109,27 @@ impl Database {
     pub fn save_skill(&self, skill: &InstalledSkill) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(
-            "INSERT OR REPLACE INTO skills
+            "INSERT INTO skills
              (id, name, description, directory, repo_owner, repo_name, repo_branch,
-              readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes, installed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              readme_url, enabled_claude, enabled_codex, enabled_gemini, enabled_opencode, enabled_hermes,
+              installed_at, content_hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                directory = excluded.directory,
+                repo_owner = excluded.repo_owner,
+                repo_name = excluded.repo_name,
+                repo_branch = excluded.repo_branch,
+                readme_url = excluded.readme_url,
+                enabled_claude = excluded.enabled_claude,
+                enabled_codex = excluded.enabled_codex,
+                enabled_gemini = excluded.enabled_gemini,
+                enabled_opencode = excluded.enabled_opencode,
+                enabled_hermes = excluded.enabled_hermes,
+                installed_at = excluded.installed_at,
+                content_hash = excluded.content_hash,
+                updated_at = excluded.updated_at",
             params![
                 skill.id,
                 skill.name,
@@ -120,6 +145,8 @@ impl Database {
                 skill.apps.opencode,
                 skill.apps.hermes,
                 skill.installed_at,
+                skill.content_hash,
+                skill.updated_at,
             ],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -150,6 +177,23 @@ impl Database {
             .execute(
                 "UPDATE skills SET enabled_claude = ?1, enabled_codex = ?2, enabled_gemini = ?3, enabled_opencode = ?4, enabled_hermes = ?5 WHERE id = ?6",
                 params![apps.claude, apps.codex, apps.gemini, apps.opencode, apps.hermes, id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(affected > 0)
+    }
+
+    /// 更新 Skill 的内容哈希和更新时间。
+    pub fn update_skill_hash(
+        &self,
+        id: &str,
+        content_hash: &str,
+        updated_at: i64,
+    ) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let affected = conn
+            .execute(
+                "UPDATE skills SET content_hash = ?1, updated_at = ?2 WHERE id = ?3",
+                params![content_hash, updated_at, id],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(affected > 0)
@@ -206,32 +250,91 @@ impl Database {
         Ok(())
     }
 
-    /// 初始化默认的 Skill 仓库（启动时调用，补充缺失的默认仓库）
-    pub fn init_default_skill_repos(&self) -> Result<usize, AppError> {
-        // 获取已有仓库列表
-        let existing = self.get_skill_repos()?;
-        let existing_keys: std::collections::HashSet<(String, String)> = existing
-            .iter()
-            .map(|r| (r.owner.clone(), r.name.clone()))
-            .collect();
+    /// 精确更新 Skill 仓库启用状态，避免覆盖并发更新的分支等字段。
+    pub fn set_skill_repo_enabled(
+        &self,
+        owner: &str,
+        name: &str,
+        enabled: bool,
+    ) -> Result<bool, AppError> {
+        let conn = lock_conn!(self.conn);
+        let changed = conn
+            .execute(
+                "UPDATE skill_repos SET enabled = ?3 WHERE owner = ?1 AND name = ?2",
+                params![owner, name, enabled],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(changed > 0)
+    }
 
-        // 获取默认仓库列表
+    /// 初始化默认的 Skill 仓库（启动时调用，每个数据库仅执行一次）
+    pub fn init_default_skill_repos(&self) -> Result<usize, AppError> {
+        const INITIALIZED_KEY: &str = "default_skill_repos_initialized";
+
+        if self.get_bool_flag(INITIALIZED_KEY)? {
+            return Ok(0);
+        }
+
+        // 兼容升级前已经存在的用户选择，并记录初始化状态，避免以后删空后恢复默认值。
+        if !self.get_skill_repos()?.is_empty() {
+            self.set_setting(INITIALIZED_KEY, "true")?;
+            return Ok(0);
+        }
+
         let default_store = crate::services::skill::SkillStore::default();
         let mut count = 0;
 
-        // 仅插入缺失的默认仓库
         for repo in &default_store.repos {
-            let key = (repo.owner.clone(), repo.name.clone());
-            if !existing_keys.contains(&key) {
-                self.save_skill_repo(repo)?;
-                count += 1;
-                log::info!("补充默认 Skill 仓库: {}/{}", repo.owner, repo.name);
-            }
+            self.save_skill_repo(repo)?;
+            count += 1;
+            log::info!("初始化默认 Skill 仓库: {}/{}", repo.owner, repo.name);
         }
 
-        if count > 0 {
-            log::info!("补充默认 Skill 仓库完成，新增 {count} 个");
-        }
+        self.set_setting(INITIALIZED_KEY, "true")?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_hash_fields_round_trip_without_schema_changes() {
+        let home = tempfile::tempdir().expect("create isolated home");
+        let _env = crate::test_support::TestEnvGuard::isolated(home.path());
+        let db = Database::init().expect("initialize database");
+        let skill = InstalledSkill {
+            id: "owner/repo:demo".to_string(),
+            name: "Demo".to_string(),
+            description: None,
+            directory: "demo".to_string(),
+            repo_owner: Some("owner".to_string()),
+            repo_name: Some("repo".to_string()),
+            repo_branch: Some("main".to_string()),
+            readme_url: None,
+            apps: SkillApps::default(),
+            installed_at: 1,
+            content_hash: Some("before".to_string()),
+            updated_at: 2,
+        };
+
+        db.save_skill(&skill).expect("save skill hash fields");
+        let stored = db
+            .get_installed_skill(&skill.id)
+            .expect("read skill")
+            .expect("stored skill");
+        assert_eq!(stored.content_hash.as_deref(), Some("before"));
+        assert_eq!(stored.updated_at, 2);
+
+        assert!(db
+            .update_skill_hash(&skill.id, "after", 3)
+            .expect("update hash fields"));
+        let updated = db
+            .get_installed_skill(&skill.id)
+            .expect("read updated skill")
+            .expect("updated skill");
+        assert_eq!(updated.content_hash.as_deref(), Some("after"));
+        assert_eq!(updated.updated_at, 3);
     }
 }

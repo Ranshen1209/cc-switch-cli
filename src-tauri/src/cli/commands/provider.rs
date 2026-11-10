@@ -1,29 +1,28 @@
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Subcommand, ValueEnum};
 use std::{collections::HashSet, path::PathBuf};
 
 use super::{provider_inspect, provider_usage_query};
 use crate::app_config::AppType;
+use crate::claude_model_config::{ClaudeModelRole, CLAUDE_DEFAULT_MODEL_ENV_KEY};
 use crate::cli::commands::provider_input::{
-    build_claude_settings_config_from_prompt, build_codex_settings_config_from_prompt,
-    build_gemini_api_key_settings_config, build_gemini_oauth_settings_config,
-    build_provider_from_add_template, codex_current_base_url_model,
-    common_snippet_has_effective_config, current_timestamp, display_provider_summary,
-    generate_provider_id_for_app, prompt_basic_fields, prompt_optional_fields,
-    prompt_settings_config, provider_uses_common_config, set_provider_common_config_meta,
-    supports_common_config, validate_provider_add_template, validate_provider_id_for_add,
-    OptionalFields, ProviderAddTemplate, SettingsConfigPromptResult,
+    apply_additive_template_field_overrides, build_claude_settings_config_from_prompt,
+    build_codex_settings_config_from_prompt, build_gemini_api_key_settings_config,
+    build_gemini_oauth_settings_config, build_provider_from_add_template,
+    codex_current_base_url_model, common_snippet_has_effective_config, current_timestamp,
+    display_provider_summary, generate_provider_id_for_app, prompt_basic_fields,
+    prompt_optional_fields, prompt_settings_config, provider_uses_common_config,
+    set_provider_common_config_meta, supports_common_config, validate_provider_add_template,
+    validate_provider_id_for_add, OptionalFields, ProviderAddTemplate, SettingsConfigPromptResult,
 };
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
-use crate::provider::{
-    AuthBinding, AuthBindingSource, ClaudeApiKeyField, ClaudeDesktopMode, ClaudeDesktopModelRoute,
-    Provider, ProviderMeta,
-};
+use crate::provider::{AuthBinding, AuthBindingSource, ClaudeApiKeyField, Provider, ProviderMeta};
+use crate::provider_preset_models::GEMINI_DEFAULT_MODEL;
 use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use indexmap::IndexMap;
-use inquire::{Confirm, Select};
+use inquire::{Confirm, Select, Text};
 
 const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 const CLAUDE_API_FORMAT_ANTHROPIC: &str = "anthropic";
@@ -36,9 +35,10 @@ const CLAUDE_API_FORMAT_CHOICES: [&str; 4] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_GEMINI_NATIVE,
 ];
-const CODEX_API_FORMAT_CHOICES: [&str; 2] = [
+const CODEX_API_FORMAT_CHOICES: [&str; 3] = [
     CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     CLAUDE_API_FORMAT_OPENAI_CHAT,
+    CLAUDE_API_FORMAT_ANTHROPIC,
 ];
 
 fn is_claude_official_provider(provider: &Provider) -> bool {
@@ -67,15 +67,13 @@ fn normalize_claude_api_format(raw: &str) -> &'static str {
 
 fn normalize_codex_api_format(raw: &str) -> &'static str {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "anthropic" | "anthropic_messages" | "anthropic-messages" | "messages" => {
-            CLAUDE_API_FORMAT_ANTHROPIC
-        }
         "chat"
         | "chat_completions"
         | "chat-completions"
         | CLAUDE_API_FORMAT_OPENAI_CHAT
         | "openai-chat"
         | "openai_chat_completions" => CLAUDE_API_FORMAT_OPENAI_CHAT,
+        "anthropic" | "anthropic_messages" | "anthropic-messages" => CLAUDE_API_FORMAT_ANTHROPIC,
         _ => CLAUDE_API_FORMAT_OPENAI_RESPONSES,
     }
 }
@@ -141,7 +139,9 @@ fn effective_codex_api_format(provider: &Provider) -> &'static str {
         return normalize_codex_api_format(api_format);
     }
 
-    if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+    if crate::proxy::providers::codex_provider_uses_anthropic(provider) {
+        CLAUDE_API_FORMAT_ANTHROPIC
+    } else if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
         CLAUDE_API_FORMAT_OPENAI_CHAT
     } else {
         CLAUDE_API_FORMAT_OPENAI_RESPONSES
@@ -250,26 +250,46 @@ fn apply_claude_api_format(provider: &mut Provider, api_format: &str) {
 
 fn apply_codex_api_format(provider: &mut Provider, api_format: &str) {
     let api_format = normalize_codex_api_format(api_format);
-    provider
-        .meta
-        .get_or_insert_with(ProviderMeta::default)
-        .api_format = Some(api_format.to_string());
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_format = Some(api_format.to_string());
+    if api_format != CLAUDE_API_FORMAT_ANTHROPIC {
+        meta.api_key_field = None;
+        meta.impersonate_claude_code = None;
+        meta.max_output_tokens = None;
+    }
     strip_codex_api_format_legacy_settings(provider);
     normalize_codex_settings_wire_api(provider);
 }
 
-fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
-    if matches!(app_type, AppType::ClaudeDesktop) {
-        if matches!(
-            crate::claude_desktop_config::provider_mode(provider),
-            ClaudeDesktopMode::Direct
-        ) {
-            apply_claude_api_format(provider, CLAUDE_API_FORMAT_ANTHROPIC);
-            return true;
-        }
-        return false;
+fn apply_add_codex_anthropic_options(
+    app_type: &AppType,
+    provider: &mut Provider,
+    api_key_field: Option<ClaudeApiKeyField>,
+    impersonate_claude_code: bool,
+    max_output_tokens: Option<u64>,
+) {
+    if !matches!(app_type, AppType::Codex)
+        || effective_codex_api_format(provider) != CLAUDE_API_FORMAT_ANTHROPIC
+    {
+        return;
     }
 
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    if let Some(api_key_field) = api_key_field {
+        meta.api_key_field = match api_key_field {
+            ClaudeApiKeyField::AuthToken => None,
+            ClaudeApiKeyField::ApiKey => Some(api_key_field.as_env_key().to_string()),
+        };
+    }
+    if impersonate_claude_code {
+        meta.impersonate_claude_code = Some(true);
+    }
+    if let Some(max_output_tokens) = max_output_tokens.filter(|value| *value > 0) {
+        meta.max_output_tokens = Some(max_output_tokens);
+    }
+}
+
+fn apply_fixed_claude_api_format_if_needed(app_type: &AppType, provider: &mut Provider) -> bool {
     if !matches!(app_type, AppType::Claude) {
         return true;
     }
@@ -295,6 +315,9 @@ fn apply_fixed_codex_api_format_if_needed(app_type: &AppType, provider: &mut Pro
     if provider.is_codex_official() {
         if let Some(meta) = provider.meta.as_mut() {
             meta.api_format = None;
+            meta.api_key_field = None;
+            meta.impersonate_claude_code = None;
+            meta.max_output_tokens = None;
             meta.codex_chat_reasoning = None;
         }
         if let Some(settings_obj) = provider.settings_config.as_object_mut() {
@@ -377,6 +400,94 @@ fn prompt_and_apply_codex_api_format(
 
     let api_format = prompt_codex_api_format(provider)?;
     apply_codex_api_format(provider, api_format);
+    if api_format == CLAUDE_API_FORMAT_ANTHROPIC {
+        prompt_and_apply_codex_anthropic_options(provider)?;
+    }
+    Ok(())
+}
+
+fn prompt_and_apply_codex_anthropic_options(provider: &mut Provider) -> Result<(), AppError> {
+    let current_api_key_field = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_key_field.as_deref())
+        .filter(|field| *field == "ANTHROPIC_API_KEY")
+        .map(|_| ClaudeApiKeyField::ApiKey)
+        .unwrap_or(ClaudeApiKeyField::AuthToken);
+    let fields = [ClaudeApiKeyField::AuthToken, ClaudeApiKeyField::ApiKey];
+    let labels = fields
+        .iter()
+        .map(|field| texts::tui_codex_anthropic_auth_field_value(field.as_env_key()).to_string())
+        .collect::<Vec<_>>();
+    let default_index = fields
+        .iter()
+        .position(|field| *field == current_api_key_field)
+        .unwrap_or(0);
+    let selected = Select::new(
+        texts::tui_label_codex_anthropic_auth_field(),
+        labels.clone(),
+    )
+    .with_starting_cursor(default_index)
+    .prompt()
+    .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+    let selected_field = fields
+        .get(
+            labels
+                .iter()
+                .position(|label| label == &selected)
+                .unwrap_or(default_index),
+        )
+        .copied()
+        .unwrap_or(ClaudeApiKeyField::AuthToken);
+
+    let impersonate_claude_code = Confirm::new(texts::tui_label_codex_impersonate_claude_code())
+        .with_default(
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.impersonate_claude_code)
+                == Some(true),
+        )
+        .prompt()
+        .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+
+    let current_max_output_tokens = provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.max_output_tokens)
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let max_output_tokens = if current_max_output_tokens.is_empty() {
+        Text::new(texts::tui_label_codex_max_output_tokens())
+            .with_placeholder("8192")
+            .prompt()
+    } else {
+        Text::new(texts::tui_label_codex_max_output_tokens())
+            .with_initial_value(&current_max_output_tokens)
+            .prompt()
+    }
+    .map_err(|error| AppError::Message(texts::input_failed_error(&error.to_string())))?;
+    let max_output_tokens = if max_output_tokens.trim().is_empty() {
+        None
+    } else {
+        Some(max_output_tokens.trim().parse::<u64>().map_err(|_| {
+            AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+                "最大输出 tokens 必须是正整数".to_string()
+            } else {
+                "max output tokens must be a positive integer".to_string()
+            })
+        })?)
+        .filter(|value| *value > 0)
+    };
+
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.api_key_field = match selected_field {
+        ClaudeApiKeyField::AuthToken => None,
+        ClaudeApiKeyField::ApiKey => Some(selected_field.as_env_key().to_string()),
+    };
+    meta.impersonate_claude_code = impersonate_claude_code.then_some(true);
+    meta.max_output_tokens = max_output_tokens;
     Ok(())
 }
 
@@ -385,11 +496,14 @@ fn prompt_and_apply_provider_api_format(
     provider: &mut Provider,
 ) -> Result<(), AppError> {
     match app_type {
-        AppType::Claude | AppType::ClaudeDesktop => {
-            prompt_and_apply_claude_api_format(app_type, provider)
-        }
+        AppType::Claude => prompt_and_apply_claude_api_format(app_type, provider),
         AppType::Codex => prompt_and_apply_codex_api_format(app_type, provider),
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => Ok(()),
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => Ok(()),
     }
 }
 
@@ -560,85 +674,6 @@ impl From<ClaudeApiKeyFieldArg> for ClaudeApiKeyField {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ClaudeDesktopModeArg {
-    Direct,
-    Proxy,
-}
-
-impl From<ClaudeDesktopModeArg> for ClaudeDesktopMode {
-    fn from(value: ClaudeDesktopModeArg) -> Self {
-        match value {
-            ClaudeDesktopModeArg::Direct => Self::Direct,
-            ClaudeDesktopModeArg::Proxy => Self::Proxy,
-        }
-    }
-}
-
-#[derive(Args)]
-pub struct ProviderAddCommand {
-    /// Provider template to apply before creation
-    #[arg(long, value_enum)]
-    pub template: Option<ProviderAddTemplate>,
-    /// Provider display name (required)
-    #[arg(long)]
-    pub name: Option<String>,
-    /// Explicit provider ID (default: generated from the name)
-    #[arg(long)]
-    pub id: Option<String>,
-    /// API endpoint base URL (Claude/Codex/Gemini field mode)
-    #[arg(long, conflicts_with_all = ["config", "config_file"])]
-    pub base_url: Option<String>,
-    /// API key or token (Claude/Codex/Gemini field mode)
-    #[arg(long, conflicts_with_all = ["config", "config_file"])]
-    pub api_key: Option<String>,
-    /// Default model (Claude/Codex/Gemini field mode, optional)
-    #[arg(long, conflicts_with_all = ["config", "config_file"])]
-    pub model: Option<String>,
-    /// Raw settings_config as a JSON string (any app, advanced use)
-    #[arg(long, conflicts_with = "config_file")]
-    pub config: Option<String>,
-    /// Raw settings_config read from a JSON file (any app, advanced use)
-    #[arg(long)]
-    pub config_file: Option<PathBuf>,
-    /// Website URL (optional)
-    #[arg(long)]
-    pub website_url: Option<String>,
-    /// Notes (optional)
-    #[arg(long)]
-    pub notes: Option<String>,
-    /// Sort index (optional)
-    #[arg(long)]
-    pub sort_index: Option<usize>,
-    /// Claude API-key field to populate (default: auth-token)
-    #[arg(long, value_enum)]
-    pub api_key_field: Option<ClaudeApiKeyFieldArg>,
-    /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: anthropic|responses|chat)
-    #[arg(long)]
-    pub api_format: Option<String>,
-    /// Codex Anthropic upstream: emulate the Claude Code client fingerprint
-    #[arg(long)]
-    pub impersonate_claude_code: bool,
-    /// Codex Anthropic upstream: override Anthropic max_tokens
-    #[arg(long)]
-    pub max_output_tokens: Option<u64>,
-    /// Attach the app-level common config snippet (Claude/Codex/Gemini)
-    #[arg(long)]
-    pub common_config: bool,
-    /// Codex OAuth managed account ID (required for the codex-oauth template)
-    #[arg(long)]
-    pub account_id: Option<String>,
-    /// Enable Codex fast mode (codex-oauth template)
-    #[arg(long)]
-    pub fast_mode: bool,
-    /// Claude Desktop provider mode
-    #[arg(long, value_enum)]
-    pub desktop_mode: Option<ClaudeDesktopModeArg>,
-    /// Claude Desktop model-route map as JSON
-    #[arg(long)]
-    pub desktop_routes: Option<String>,
-}
-
 #[derive(Subcommand)]
 pub enum ProviderCommand {
     /// List all providers
@@ -651,7 +686,77 @@ pub enum ProviderCommand {
         id: String,
     },
     /// Add a new provider (non-interactive; use the TUI for interactive add)
-    Add(Box<ProviderAddCommand>),
+    Add {
+        /// Provider template to apply before creation
+        #[arg(long, value_enum)]
+        template: Option<ProviderAddTemplate>,
+        /// Provider display name (required)
+        #[arg(long)]
+        name: Option<String>,
+        /// Explicit provider ID (default: generated from the name)
+        #[arg(long)]
+        id: Option<String>,
+        /// API endpoint base URL (Claude/Codex/Gemini field mode)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        base_url: Option<String>,
+        /// API key or token (Claude/Codex/Gemini field mode)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        api_key: Option<String>,
+        /// Default model (Claude/Codex/Gemini field mode, optional)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        model: Option<String>,
+        /// Claude Haiku role model ([1M] is ignored because Haiku does not support it)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        haiku_model: Option<String>,
+        /// Claude Sonnet role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        sonnet_model: Option<String>,
+        /// Claude Opus role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        opus_model: Option<String>,
+        /// Claude Fable role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        fable_model: Option<String>,
+        /// Claude Subagent role model (append [1M] to enable 1M context)
+        #[arg(long, conflicts_with_all = ["config", "config_file"])]
+        subagent_model: Option<String>,
+        /// Raw settings_config as a JSON string (any app, advanced use)
+        #[arg(long, conflicts_with = "config_file")]
+        config: Option<String>,
+        /// Raw settings_config read from a JSON file (any app, advanced use)
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+        /// Website URL (optional)
+        #[arg(long)]
+        website_url: Option<String>,
+        /// Notes (optional)
+        #[arg(long)]
+        notes: Option<String>,
+        /// Sort index (optional)
+        #[arg(long)]
+        sort_index: Option<usize>,
+        /// Claude API-key field, or Codex Anthropic upstream auth field
+        #[arg(long, value_enum)]
+        api_key_field: Option<ClaudeApiKeyFieldArg>,
+        /// Provider API format (Claude: anthropic|openai_chat|openai_responses|gemini_native; Codex: responses|chat|anthropic)
+        #[arg(long)]
+        api_format: Option<String>,
+        /// Emulate the Claude Code client for a Codex Anthropic upstream
+        #[arg(long)]
+        impersonate_claude_code: bool,
+        /// Override max_tokens for a Codex Anthropic upstream
+        #[arg(long)]
+        max_output_tokens: Option<u64>,
+        /// Attach the app-level common config snippet (Claude/Codex/Gemini)
+        #[arg(long)]
+        common_config: bool,
+        /// Codex OAuth managed account ID (required for the codex-oauth template)
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Enable Codex fast mode (codex-oauth template)
+        #[arg(long)]
+        fast_mode: bool,
+    },
     /// Edit a provider
     Edit {
         /// Provider ID to edit
@@ -717,6 +822,15 @@ pub enum ProviderCommand {
         /// Output raw quota result as JSON
         #[arg(long)]
         json: bool,
+        /// Redeem a rate limit reset credit to reset quota (Codex / OpenAI only)
+        #[arg(long)]
+        reset: bool,
+        /// Specific credit ID to consume (defaults to earliest expiring credit)
+        #[arg(long)]
+        credit_id: Option<String>,
+        /// Confirm consumption of a rate limit reset credit (safety gate; required to actually consume)
+        #[arg(long)]
+        confirm: bool,
     },
     /// Configure provider Usage Query
     #[command(subcommand)]
@@ -739,55 +853,58 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::List => provider_inspect::list_providers(app_type),
         ProviderCommand::Current => provider_inspect::show_current(app_type),
         ProviderCommand::Switch { id } => switch_provider(app_type, &id),
-        ProviderCommand::Add(command) => {
-            let ProviderAddCommand {
+        ProviderCommand::Add {
+            template,
+            name,
+            id,
+            base_url,
+            api_key,
+            model,
+            haiku_model,
+            sonnet_model,
+            opus_model,
+            fable_model,
+            subagent_model,
+            config,
+            config_file,
+            website_url,
+            notes,
+            sort_index,
+            api_key_field,
+            api_format,
+            impersonate_claude_code,
+            max_output_tokens,
+            common_config,
+            account_id,
+            fast_mode,
+        } => add_provider(
+            app_type,
+            AddProviderArgs {
                 template,
                 name,
                 id,
                 base_url,
                 api_key,
                 model,
+                haiku_model,
+                sonnet_model,
+                opus_model,
+                fable_model,
+                subagent_model,
                 config,
                 config_file,
                 website_url,
                 notes,
                 sort_index,
-                api_key_field,
+                api_key_field: api_key_field.map(ClaudeApiKeyField::from),
                 api_format,
                 impersonate_claude_code,
                 max_output_tokens,
                 common_config,
                 account_id,
                 fast_mode,
-                desktop_mode,
-                desktop_routes,
-            } = *command;
-            add_provider(
-                app_type,
-                AddProviderArgs {
-                    template,
-                    name,
-                    id,
-                    base_url,
-                    api_key,
-                    model,
-                    config,
-                    config_file,
-                    website_url,
-                    notes,
-                    sort_index,
-                    api_key_field: api_key_field.map(ClaudeApiKeyField::from),
-                    api_format,
-                    impersonate_claude_code,
-                    max_output_tokens,
-                    common_config,
-                    account_id,
-                    fast_mode,
-                    desktop_mode,
-                    desktop_routes,
-                },
-            )
-        }
+            },
+        ),
         ProviderCommand::Edit { id } => edit_provider(app_type, &id),
         ProviderCommand::Delete { id } => delete_provider(app_type, &id),
         ProviderCommand::Duplicate { id, edit } => duplicate_provider(app_type, &id, edit),
@@ -817,9 +934,13 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
                 )
             }
         }
-        ProviderCommand::Quota { id, json } => {
-            provider_inspect::quota_provider(app_type, &id, json)
-        }
+        ProviderCommand::Quota {
+            id,
+            json,
+            reset,
+            credit_id,
+            confirm,
+        } => provider_inspect::quota_provider(app_type, &id, json, reset, credit_id, confirm),
         ProviderCommand::UsageQuery(cmd) => provider_usage_query::execute(cmd, app_type),
         ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
     }
@@ -887,7 +1008,8 @@ fn resolve_provider_for_switch(
 fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
     let app_str = app_type.as_str().to_string();
-    let skip_live_sync = !crate::sync_policy::should_sync_live(&app_type);
+    let skip_live_sync =
+        !matches!(app_type, AppType::Pi) && !crate::sync_policy::should_sync_live(&app_type);
 
     // 检查 provider 是否存在（支持按 id 或名称解析）
     let providers = ProviderService::list(&state, app_type.clone())?;
@@ -913,7 +1035,7 @@ fn switch_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     } else {
         println!("{}", success(&texts::switched_to_provider(id)));
     }
-    println!("{}", info(&format!("Application: {}", app_str)));
+    println!("{}", info(&format!("  Application: {}", app_str)));
     if skip_live_sync {
         println!(
             "{}",
@@ -937,6 +1059,21 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         ));
     }
 
+    if matches!(app_type, AppType::Pi)
+        && crate::services::pi_state::PiStateService::current(&state)
+            .ok()
+            .and_then(|current| current.default_provider_id)
+            .as_deref()
+            == Some(id)
+    {
+        println!(
+            "{}",
+            warning(
+                "Pi references this provider as the global default; deletion will not rewrite Pi's default setting."
+            )
+        );
+    }
+
     // 确认删除
     let confirm = inquire::Confirm::new(&format!(
         "Are you sure you want to delete provider '{}'?",
@@ -954,12 +1091,13 @@ fn delete_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     // 执行删除
     ProviderService::delete(&state, app_type, id)?;
 
-    println!("{}", success(&format!("OK Deleted provider '{}'", id)));
+    println!("{}", success(&format!("✓ Deleted provider '{}'", id)));
 
     Ok(())
 }
 
 /// Parsed flags for the non-interactive `provider add`.
+#[derive(Default)]
 struct AddProviderArgs {
     template: Option<ProviderAddTemplate>,
     name: Option<String>,
@@ -967,6 +1105,11 @@ struct AddProviderArgs {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    haiku_model: Option<String>,
+    sonnet_model: Option<String>,
+    opus_model: Option<String>,
+    fable_model: Option<String>,
+    subagent_model: Option<String>,
     config: Option<String>,
     config_file: Option<PathBuf>,
     website_url: Option<String>,
@@ -979,92 +1122,49 @@ struct AddProviderArgs {
     common_config: bool,
     account_id: Option<String>,
     fast_mode: bool,
-    desktop_mode: Option<ClaudeDesktopModeArg>,
-    desktop_routes: Option<String>,
 }
 
-fn apply_codex_anthropic_options(
-    app_type: &AppType,
-    provider: &mut Provider,
-    api_key_field: Option<ClaudeApiKeyField>,
-    impersonate_claude_code: bool,
-    max_output_tokens: Option<u64>,
-) -> Result<(), AppError> {
-    if !matches!(app_type, AppType::Codex) {
-        if impersonate_claude_code || max_output_tokens.is_some() {
-            return Err(AppError::InvalidInput(
-                "--impersonate-claude-code and --max-output-tokens require --app codex".to_string(),
-            ));
-        }
-        return Ok(());
+impl AddProviderArgs {
+    fn has_claude_role_models(&self) -> bool {
+        [
+            &self.haiku_model,
+            &self.sonnet_model,
+            &self.opus_model,
+            &self.fable_model,
+            &self.subagent_model,
+        ]
+        .into_iter()
+        .any(Option::is_some)
     }
 
-    let is_anthropic = provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.api_format.as_deref())
-        == Some(CLAUDE_API_FORMAT_ANTHROPIC);
-    if !is_anthropic && (impersonate_claude_code || max_output_tokens.is_some()) {
-        return Err(AppError::InvalidInput(
-            "Codex Anthropic options require --api-format anthropic".to_string(),
-        ));
+    fn claude_model_fields(&self) -> Vec<(&'static str, Option<String>)> {
+        [
+            (CLAUDE_DEFAULT_MODEL_ENV_KEY, self.model.clone()),
+            (
+                ClaudeModelRole::Haiku.model_env_key(),
+                self.haiku_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Sonnet.model_env_key(),
+                self.sonnet_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Opus.model_env_key(),
+                self.opus_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Fable.model_env_key(),
+                self.fable_model.clone(),
+            ),
+            (
+                ClaudeModelRole::Subagent.model_env_key(),
+                self.subagent_model.clone(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| non_empty(value).map(|value| (key, Some(value))))
+        .collect()
     }
-
-    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
-    meta.api_key_field = if is_anthropic && api_key_field == Some(ClaudeApiKeyField::ApiKey) {
-        Some("ANTHROPIC_API_KEY".to_string())
-    } else {
-        None
-    };
-    meta.impersonate_claude_code = is_anthropic.then_some(impersonate_claude_code);
-    meta.max_output_tokens = is_anthropic
-        .then_some(max_output_tokens)
-        .flatten()
-        .filter(|value| *value > 0);
-    prune_empty_provider_meta(provider);
-    Ok(())
-}
-
-fn apply_claude_desktop_options(
-    app_type: &AppType,
-    provider: &mut Provider,
-    mode: Option<ClaudeDesktopModeArg>,
-    routes_json: Option<&str>,
-) -> Result<(), AppError> {
-    if !matches!(app_type, AppType::ClaudeDesktop) {
-        if mode.is_some() || routes_json.is_some() {
-            return Err(AppError::InvalidInput(
-                "--desktop-mode and --desktop-routes require --app claude-desktop".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-
-    let mut routes = match routes_json.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => {
-            serde_json::from_str::<std::collections::HashMap<String, ClaudeDesktopModelRoute>>(raw)
-                .map_err(|error| {
-                    AppError::InvalidInput(format!("invalid --desktop-routes JSON: {error}"))
-                })?
-        }
-        None => provider
-            .meta
-            .as_ref()
-            .map(|meta| meta.claude_desktop_model_routes.clone())
-            .unwrap_or_default(),
-    };
-
-    let mode = mode.map(Into::into).unwrap_or(ClaudeDesktopMode::Direct);
-    if matches!(mode, ClaudeDesktopMode::Direct) {
-        for route in routes.values_mut() {
-            route.supports_1m = None;
-        }
-    }
-
-    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
-    meta.claude_desktop_mode = Some(mode);
-    meta.claude_desktop_model_routes = routes;
-    Ok(())
 }
 
 /// Trim a flag value and drop it when empty.
@@ -1099,6 +1199,20 @@ fn add_additive_requires_config_error(app_type: &AppType) -> AppError {
     } else {
         format!(
             "provider add for {} requires raw config via --config or --config-file (or use the TUI)",
+            app_type.as_str()
+        )
+    })
+}
+
+fn add_claude_role_models_unsupported_error(app_type: &AppType) -> AppError {
+    AppError::InvalidInput(if crate::cli::i18n::is_chinese() {
+        format!(
+            "Haiku、Sonnet、Opus、Fable 和 Subagent 模型参数仅适用于 Claude，当前应用为 {}",
+            app_type.as_str()
+        )
+    } else {
+        format!(
+            "Haiku, Sonnet, Opus, Fable, and Subagent model flags are only valid for Claude; current app is {}",
             app_type.as_str()
         )
     })
@@ -1229,11 +1343,13 @@ fn build_add_settings_config(
     args: &AddProviderArgs,
     raw_config: Option<&serde_json::Value>,
     current: Option<&serde_json::Value>,
+    current_meta: Option<&ProviderMeta>,
+    provider_name: &str,
     prompt_result: &mut Option<SettingsConfigPromptResult>,
 ) -> Result<serde_json::Value, AppError> {
     // Raw config wins for every app type.
     if let Some(raw) = raw_config {
-        if matches!(app_type, AppType::Claude | AppType::ClaudeDesktop) {
+        if matches!(app_type, AppType::Claude) {
             let field = args
                 .api_key_field
                 .unwrap_or_else(|| ClaudeApiKeyField::from_meta_and_settings(None, raw));
@@ -1245,15 +1361,25 @@ fn build_add_settings_config(
         return Ok(raw.clone());
     }
 
+    if !matches!(app_type, AppType::Claude) && args.has_claude_role_models() {
+        return Err(add_claude_role_models_unsupported_error(app_type));
+    }
+
     match app_type {
-        AppType::Claude | AppType::ClaudeDesktop => {
+        AppType::Claude => {
             let base_url = non_empty(args.base_url.clone())
                 .or_else(|| claude_current_base_url(current))
                 .ok_or_else(|| add_missing_field_error("--base-url"))?;
             let api_key = non_empty(args.api_key.clone())
                 .ok_or_else(|| add_missing_field_error("--api-key"))?;
-            let field = args.api_key_field.unwrap_or(ClaudeApiKeyField::AuthToken);
-            let model_fields = vec![("ANTHROPIC_MODEL", non_empty(args.model.clone()))];
+            let field = args.api_key_field.unwrap_or_else(|| {
+                current
+                    .map(|settings| {
+                        ClaudeApiKeyField::from_meta_and_settings(current_meta, settings)
+                    })
+                    .unwrap_or(ClaudeApiKeyField::AuthToken)
+            });
+            let model_fields = args.claude_model_fields();
             let settings = build_claude_settings_config_from_prompt(
                 current,
                 field,
@@ -1283,7 +1409,7 @@ fn build_add_settings_config(
                 &api_key,
                 &base_url,
                 model.trim(),
-                "custom",
+                provider_name,
             ))
         }
         AppType::Gemini => match non_empty(args.api_key.clone()) {
@@ -1295,15 +1421,54 @@ fn build_add_settings_config(
                     .unwrap_or_default();
                 let model = non_empty(args.model.clone())
                     .or_else(|| gemini_current_env(current, &["GEMINI_MODEL"]))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| GEMINI_DEFAULT_MODEL.to_string());
                 Ok(build_gemini_api_key_settings_config(
                     current, &api_key, &base_url, &model,
                 ))
             }
             None => Ok(build_gemini_oauth_settings_config(current)),
         },
+        AppType::ClaudeDesktop | AppType::Pi => {
+            let base_url = non_empty(args.base_url.clone())
+                .ok_or_else(|| add_missing_field_error("--base-url"))?;
+            if !crate::pi_config::is_valid_request_url(&base_url) {
+                return Err(AppError::InvalidInput(
+                    "Pi --base-url must be an absolute HTTP(S) URL".to_string(),
+                ));
+            }
+            let model =
+                non_empty(args.model.clone()).ok_or_else(|| add_missing_field_error("--model"))?;
+            let api = non_empty(args.api_format.clone())
+                .unwrap_or_else(|| "openai-completions".to_string());
+            if !crate::openclaw_config::OPENCLAW_API_PROTOCOLS.contains(&api.as_str()) {
+                return Err(add_invalid_api_format_error(
+                    &api,
+                    &crate::openclaw_config::OPENCLAW_API_PROTOCOLS.join("|"),
+                ));
+            }
+            let mut settings = serde_json::json!({
+                "name": provider_name,
+                "baseUrl": base_url,
+                "api": api,
+                "models": [{ "id": model }],
+            });
+            if let Some(api_key) = non_empty(args.api_key.clone()) {
+                settings["apiKey"] = serde_json::json!(api_key);
+            }
+            Ok(settings)
+        }
         AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {
-            Err(add_additive_requires_config_error(app_type))
+            let current = current.ok_or_else(|| add_additive_requires_config_error(app_type))?;
+            let api_key = non_empty(args.api_key.clone());
+            let base_url = non_empty(args.base_url.clone());
+            let model = non_empty(args.model.clone());
+            apply_additive_template_field_overrides(
+                app_type,
+                current,
+                api_key.as_deref(),
+                base_url.as_deref(),
+                model.as_deref(),
+            )
         }
     }
 }
@@ -1331,9 +1496,6 @@ fn validate_claude_api_format(raw: &str) -> Result<&'static str, AppError> {
 
 fn validate_codex_api_format(raw: &str) -> Result<&'static str, AppError> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "anthropic" | "anthropic_messages" | "anthropic-messages" | "messages" => {
-            Ok(CLAUDE_API_FORMAT_ANTHROPIC)
-        }
         "chat"
         | "chat_completions"
         | "chat-completions"
@@ -1343,9 +1505,12 @@ fn validate_codex_api_format(raw: &str) -> Result<&'static str, AppError> {
         "responses" | "openai_responses" | "openai-responses" => {
             Ok(CLAUDE_API_FORMAT_OPENAI_RESPONSES)
         }
+        "anthropic" | "anthropic_messages" | "anthropic-messages" => {
+            Ok(CLAUDE_API_FORMAT_ANTHROPIC)
+        }
         other => Err(add_invalid_api_format_error(
             other,
-            "anthropic, responses, chat",
+            "responses, chat, anthropic",
         )),
     }
 }
@@ -1359,7 +1524,7 @@ fn apply_add_provider_api_format(
     api_format: Option<&str>,
 ) -> Result<(), AppError> {
     match app_type {
-        AppType::Claude | AppType::ClaudeDesktop => {
+        AppType::Claude => {
             if apply_fixed_claude_api_format_if_needed(app_type, provider) {
                 return Ok(());
             }
@@ -1367,17 +1532,6 @@ fn apply_add_provider_api_format(
                 Some(raw) => validate_claude_api_format(raw)?,
                 None => effective_claude_api_format(provider),
             };
-            if matches!(app_type, AppType::ClaudeDesktop)
-                && matches!(
-                    crate::claude_desktop_config::provider_mode(provider),
-                    ClaudeDesktopMode::Direct
-                )
-                && format != CLAUDE_API_FORMAT_ANTHROPIC
-            {
-                return Err(AppError::InvalidInput(
-                    "Claude Desktop direct mode only supports --api-format anthropic".to_string(),
-                ));
-            }
             apply_claude_api_format(provider, format);
         }
         AppType::Codex => {
@@ -1390,7 +1544,12 @@ fn apply_add_provider_api_format(
             };
             apply_codex_api_format(provider, format);
         }
-        AppType::Gemini | AppType::OpenCode | AppType::Hermes | AppType::OpenClaw => {}
+        AppType::Gemini
+        | AppType::OpenCode
+        | AppType::Hermes
+        | AppType::OpenClaw
+        | AppType::ClaudeDesktop
+        | AppType::Pi => {}
     }
     Ok(())
 }
@@ -1446,6 +1605,8 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
             &args,
             raw_config.as_ref(),
             None,
+            None,
+            &name,
             &mut settings_prompt_result,
         )?;
         Provider {
@@ -1473,16 +1634,20 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         let has_field_input = raw_config.is_some()
             || args.base_url.is_some()
             || args.api_key.is_some()
-            || args.model.is_some();
-        if template.requires_settings_prompt() {
-            // Configurable templates inherit prefilled settings for omitted fields
-            // and apply explicit CLI overrides on top.
+            || args.model.is_some()
+            || args.has_claude_role_models();
+        if template.supports_field_overrides() {
+            // Sponsor / third-party templates: fold the CLI field values into the
+            // template's prefilled settings_config (base_url is inherited when
+            // --base-url is omitted).
             let current = provider.settings_config.clone();
             provider.settings_config = build_add_settings_config(
                 &app_type,
                 &args,
                 raw_config.as_ref(),
                 Some(&current),
+                provider.meta.as_ref(),
+                &name,
                 &mut settings_prompt_result,
             )?;
         } else if has_field_input {
@@ -1502,24 +1667,18 @@ fn add_provider(app_type: AppType, args: AddProviderArgs) -> Result<(), AppError
         &mut provider,
         settings_prompt_result.as_ref(),
     );
-    apply_claude_desktop_options(
-        &app_type,
-        &mut provider,
-        args.desktop_mode,
-        args.desktop_routes.as_deref(),
-    )?;
     apply_add_provider_api_format(
         &app_type,
         &mut provider,
         non_empty(args.api_format.clone()).as_deref(),
     )?;
-    apply_codex_anthropic_options(
+    apply_add_codex_anthropic_options(
         &app_type,
         &mut provider,
         args.api_key_field,
         args.impersonate_claude_code,
         args.max_output_tokens,
-    )?;
+    );
     apply_add_codex_oauth_options(
         &app_type,
         &mut provider,
@@ -1564,7 +1723,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let manager = config
         .get_manager(&app_type)
         .ok_or_else(|| AppError::Message(texts::app_config_not_found(app_type.as_str())))?;
-    let original = manager
+    let mut original = manager
         .providers
         .get(id)
         .ok_or_else(|| {
@@ -1575,6 +1734,36 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     let is_current = manager.current == id;
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
+
+    let claude_editor = if matches!(app_type, AppType::Claude) {
+        let view = ProviderService::claude_editor_view(&state, &original.settings_config)?;
+        original.settings_config = view.settings.clone();
+        if !view.inactive.is_empty() {
+            for field in &view.inactive {
+                println!("{}: {}", field.path.join("."), field.value);
+            }
+            if Confirm::new(crate::t!(
+                "Copy these inactive fields into the editor?",
+                "将这些未应用字段复制到编辑器？"
+            ))
+            .with_default(false)
+            .prompt()
+            .map_err(|e| AppError::Message(e.to_string()))?
+            {
+                crate::services::provider::claude_editor::copy_inactive_fields(
+                    &mut original.settings_config,
+                    &view.inactive,
+                );
+            }
+        }
+        Some(crate::services::provider::claude_editor::EditorSave {
+            base: view.settings,
+            draft: None,
+            on_conflict: Default::default(),
+        })
+    } else {
+        None
+    };
 
     // 2. 显示当前配置
     println!("\n{}", highlight(texts::current_config_header()));
@@ -1598,6 +1787,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
             Some(&original.settings_config),
             original.meta.as_ref(),
             matches!(app_type, AppType::Codex) && original.is_codex_official(),
+            &name,
         )?)
     } else {
         None
@@ -1618,6 +1808,13 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         OptionalFields::from_provider(&original)
     };
 
+    let pi_native_name_follows_display = matches!(app_type, AppType::Pi)
+        && original
+            .settings_config
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|native| native.trim() == original.name.trim());
+
     // 6. 构建更新后的 Provider（保留 meta 和 created_at）
     let mut updated = Provider {
         id: id.to_string(),
@@ -1633,6 +1830,9 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         meta: original.meta,                           // 保留元数据
         in_failover_queue: original.in_failover_queue, // 保留故障转移状态
     };
+    if pi_native_name_follows_display {
+        updated.settings_config["name"] = serde_json::Value::String(updated.name.clone());
+    }
     apply_settings_prompt_result_metadata(&app_type, &mut updated, settings_prompt_result.as_ref());
     prompt_and_apply_provider_api_format(&app_type, &mut updated)?;
     prompt_and_apply_codex_oauth_provider_options(&app_type, &mut updated)?;
@@ -1654,8 +1854,13 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         return Ok(());
     }
 
-    // 8. 调用 Service 层（upstream parity：干净写入，无冲突提示）
-    ProviderService::update(&state, app_type.clone(), updated)?;
+    if let Some(editor) = claude_editor {
+        if !save_claude_editor_interactive(&state, &updated, editor, None)? {
+            return Ok(());
+        }
+    } else {
+        ProviderService::update(&state, app_type.clone(), updated)?;
+    }
 
     // 9. 成功消息
     println!(
@@ -1667,6 +1872,56 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn save_claude_editor_interactive(
+    state: &AppState,
+    provider: &Provider,
+    mut editor: crate::services::provider::claude_editor::EditorSave,
+    copy_source: Option<&str>,
+) -> Result<bool, AppError> {
+    loop {
+        match ProviderService::save_claude_from_editor(
+            state,
+            provider.clone(),
+            editor.clone(),
+            copy_source.is_some(),
+            copy_source,
+        ) {
+            Ok(_) => return Ok(true),
+            Err(error)
+                if crate::services::provider::claude_editor::conflict_keys(&error).is_some() =>
+            {
+                let choices = vec![
+                    crate::t!("Cancel", "取消"),
+                    crate::t!("Keep my changes", "保留我的修改"),
+                    crate::t!("Keep external changes", "保留外部修改"),
+                ];
+                let keys = crate::services::provider::claude_editor::conflict_keys(&error)
+                    .unwrap_or_default()
+                    .join(", ");
+                let prompt = format!(
+                    "{}: {keys}",
+                    crate::t!(
+                        "Fields changed outside the editor",
+                        "以下字段已被其他程序修改"
+                    )
+                );
+                let choice = inquire::Select::new(&prompt, choices.clone())
+                    .prompt()
+                    .map_err(|e| AppError::Message(e.to_string()))?;
+                use crate::services::provider::claude_editor::ConflictPolicy;
+                editor.on_conflict = if choice == choices[1] {
+                    ConflictPolicy::KeepMine
+                } else if choice == choices[2] {
+                    ConflictPolicy::KeepTheirs
+                } else {
+                    return Ok(false);
+                };
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn provider_copy_id(original_id: &str, existing_ids: &[String]) -> String {
@@ -1759,7 +2014,18 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
     let common_snippet = config.common_config_snippets.get(&app_type).cloned();
     drop(config);
 
-    let draft = provider_duplicate_draft(&source, &existing_ids);
+    let mut draft = provider_duplicate_draft(&source, &existing_ids);
+    let claude_editor = if matches!(app_type, AppType::Claude) {
+        let view = ProviderService::claude_editor_view(&state, &draft.settings_config)?;
+        draft.settings_config = view.settings;
+        Some(crate::services::provider::claude_editor::EditorSave {
+            base: view.base_for_new,
+            draft: None,
+            on_conflict: Default::default(),
+        })
+    } else {
+        None
+    };
 
     println!("\n{}", highlight(texts::current_config_header()));
     display_provider_summary(&draft, &app_type);
@@ -1777,6 +2043,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
             Some(&draft.settings_config),
             draft.meta.as_ref(),
             matches!(app_type, AppType::Codex) && source.is_codex_official(),
+            &name,
         )?)
     } else {
         None
@@ -1830,7 +2097,14 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
         return Ok(());
     }
 
-    let duplicate = ProviderService::duplicate(&state, app_type, id, Some(copied))?;
+    let duplicate = if let Some(editor) = claude_editor {
+        if !save_claude_editor_interactive(&state, &copied, editor, Some(id))? {
+            return Ok(());
+        }
+        copied
+    } else {
+        ProviderService::duplicate(&state, app_type, id, Some(copied))?
+    };
     println!(
         "{}",
         success(&texts::provider_duplicated_success(id, &duplicate.id))
@@ -1845,7 +2119,7 @@ fn import_live_config(app_type: AppType) -> Result<(), AppError> {
         println!(
             "{}",
             success(&format!(
-                "OK Imported {imported} provider(s) from {} live config",
+                "✓ Imported {imported} provider(s) from {} live config",
                 app_type.as_str()
             ))
         );
@@ -1863,11 +2137,25 @@ fn import_live_config(app_type: AppType) -> Result<(), AppError> {
 
 fn remove_from_config(app_type: AppType, id: &str) -> Result<(), AppError> {
     let state = get_state()?;
+    if matches!(app_type, AppType::Pi)
+        && crate::services::pi_state::PiStateService::current(&state)
+            .ok()
+            .and_then(|current| current.default_provider_id)
+            .as_deref()
+            == Some(id)
+    {
+        println!(
+            "{}",
+            warning(
+                "Pi references this provider as the global default; removal will not rewrite Pi's default setting."
+            )
+        );
+    }
     ProviderService::remove_from_live_config(&state, app_type.clone(), id)?;
     println!(
         "{}",
         success(&format!(
-            "OK Removed provider '{}' from {} live config",
+            "✓ Removed provider '{}' from {} live config",
             id,
             app_type.as_str()
         ))
@@ -1881,7 +2169,7 @@ fn set_default_provider(app_type: AppType, id: &str, model: Option<&str>) -> Res
     println!(
         "{}",
         success(&format!(
-            "OK Set '{}' as default for {}",
+            "✓ Set '{}' as default for {}",
             default,
             app_type.as_str()
         ))
@@ -1964,7 +2252,7 @@ fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Resu
         }
     }
 
-    let settings_content = ProviderService::build_live_backup_snapshot(
+    let settings_content = ProviderService::build_effective_live_snapshot(
         &app_type,
         &provider,
         common_config_snippet.as_deref(),
@@ -1976,7 +2264,7 @@ fn export_provider(app_type: AppType, id: &str, output: Option<PathBuf>) -> Resu
     println!(
         "{}",
         success(&format!(
-            "OK Exported provider '{}' to {}",
+            "✓ Exported provider '{}' to {}",
             id,
             output_path.display()
         ))
@@ -2029,48 +2317,76 @@ mod tests {
     }
 
     #[test]
-    fn direct_desktop_routes_drop_independent_one_m_metadata() {
-        let routes = r#"{
-            "claude-sonnet-5": {
-                "model": "claude-sonnet-5",
-                "labelOverride": "Fast Sonnet",
-                "supports1m": true
-            }
-        }"#;
-
-        let mut direct = claude_provider(json!({"env": {}}));
-        apply_claude_desktop_options(
-            &AppType::ClaudeDesktop,
-            &mut direct,
-            Some(ClaudeDesktopModeArg::Direct),
-            Some(routes),
+    fn noninteractive_add_uses_upstream_defaults_when_model_is_omitted() {
+        let mut prompt_result = None;
+        let codex = build_add_settings_config(
+            &AppType::Codex,
+            &AddProviderArgs {
+                base_url: Some("https://codex.example/v1".to_string()),
+                api_key: Some("sk-codex".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+            "Custom Codex",
+            &mut prompt_result,
         )
-        .expect("apply Direct Desktop options");
-        let direct_route = &direct
-            .meta
-            .as_ref()
-            .expect("Direct meta")
-            .claude_desktop_model_routes["claude-sonnet-5"];
-        assert_eq!(direct_route.label_override.as_deref(), Some("Fast Sonnet"));
-        assert_eq!(direct_route.supports_1m, None);
-
-        let mut proxy = claude_provider(json!({"env": {}}));
-        apply_claude_desktop_options(
-            &AppType::ClaudeDesktop,
-            &mut proxy,
-            Some(ClaudeDesktopModeArg::Proxy),
-            Some(routes),
-        )
-        .expect("apply Proxy Desktop options");
-        assert_eq!(
-            proxy
-                .meta
-                .as_ref()
-                .expect("Proxy meta")
-                .claude_desktop_model_routes["claude-sonnet-5"]
-                .supports_1m,
-            Some(true)
+        .expect("build Codex settings");
+        let default_model = format!(
+            "model = \"{}\"",
+            crate::provider_preset_models::CODEX_DEFAULT_MODEL
         );
+        assert!(codex["config"]
+            .as_str()
+            .expect("Codex config should be TOML")
+            .contains(&default_model));
+
+        let gemini = build_add_settings_config(
+            &AppType::Gemini,
+            &AddProviderArgs {
+                base_url: Some("https://gemini.example".to_string()),
+                api_key: Some("sk-gemini".to_string()),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+            "Custom Gemini",
+            &mut prompt_result,
+        )
+        .expect("build Gemini settings");
+        assert_eq!(
+            gemini["env"]["GEMINI_MODEL"],
+            crate::provider_preset_models::GEMINI_DEFAULT_MODEL
+        );
+    }
+
+    #[test]
+    fn noninteractive_pi_add_validates_transport_fields() {
+        let build = |base_url: &str, api_format: &str| {
+            build_add_settings_config(
+                &AppType::Pi,
+                &AddProviderArgs {
+                    base_url: Some(base_url.to_string()),
+                    model: Some("model-a".to_string()),
+                    api_format: Some(api_format.to_string()),
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+                "Custom Pi",
+                &mut None,
+            )
+        };
+
+        assert!(build("relative/path", "openai-completions").is_err());
+        assert!(build("https://pi.example/v1", "unknown-protocol").is_err());
+        let settings =
+            build("https://pi.example/v1", "anthropic-messages").expect("valid Pi transport");
+        assert_eq!(settings["api"], "anthropic-messages");
+        assert_eq!(settings["models"][0]["id"], "model-a");
     }
 
     #[test]
@@ -2340,6 +2656,23 @@ wire_api = "chat"
     }
 
     #[test]
+    fn codex_api_format_effective_value_reads_legacy_anthropic_wire_api() {
+        let provider = codex_provider(json!({
+            "config": r#"model_provider = "vendor"
+
+[model_providers.vendor]
+base_url = "https://vendor.example/v1"
+wire_api = "anthropic"
+"#
+        }));
+
+        assert_eq!(
+            effective_codex_api_format(&provider),
+            CLAUDE_API_FORMAT_ANTHROPIC
+        );
+    }
+
+    #[test]
     fn codex_api_format_apply_writes_meta_and_normalizes_legacy_config() {
         let mut provider = codex_provider(json!({
             "api_format": "openai_responses",
@@ -2437,7 +2770,7 @@ wire_api = "chat"
             ..Default::default()
         });
 
-        apply_codex_oauth_provider_options(&mut provider, Some("acc-123 ".to_string()), true);
+        apply_codex_oauth_provider_options(&mut provider, Some(" acc-123 ".to_string()), true);
 
         let meta = provider.meta.expect("metadata should be present");
         assert_eq!(meta.apply_common_config, Some(true));
@@ -2485,7 +2818,7 @@ wire_api = "chat"
             ..Default::default()
         });
 
-        apply_codex_oauth_provider_options(&mut provider, Some("\n ".to_string()), false);
+        apply_codex_oauth_provider_options(&mut provider, Some(" \n ".to_string()), false);
 
         let meta = provider.meta.expect("metadata should be present");
         assert_eq!(meta.provider_type.as_deref(), Some("codex_oauth"));
